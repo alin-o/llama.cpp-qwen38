@@ -28,6 +28,10 @@ add_library(llama
             llama-kv-cache-dsa-iswa.cpp
             llama-kv-cache-msa.cpp
             llama-kv-cache-dsv4.cpp
+            llama-kv-cache-paged.cpp
+            llama-block-manager.cpp
+            llama-paged-scheduler.cpp
+            llama-paged-scheduler-impl.cpp
             llama-memory.cpp
             llama-memory-hybrid.cpp
             llama-memory-hybrid-iswa.cpp
