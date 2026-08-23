@@ -11,6 +11,17 @@
 build*/
 
 tools/ui/node_modules/
+tools/server/tests/
+
+scripts/qwen38/
+docker-compose.qwen38.yml
+run*.sh
+
+# churns on every bench run; keep the build context hash stable so the
+# COPY layer (and the cmake build after it) stays cached
+qwen38/results/
+qwen38/.venv-speed-bench/
+qwen38/.hf-cache/
 
 models/*
 

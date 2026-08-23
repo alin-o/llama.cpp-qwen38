@@ -219,6 +219,8 @@ public:
 
     bool empty() const { return tokens.empty(); }
 
+    bool has_media_chunks() const { return !map_idx_to_media.empty(); }
+
     void clear() {
         map_idx_to_media.clear();
         tokens.clear();
@@ -311,6 +313,14 @@ struct server_chat_params {
     std::string media_path;
     bool force_pure_content = false;
 };
+
+struct responses_tool_name {
+    std::string namespace_name;
+    std::string name;
+    bool custom = false;
+};
+
+using responses_tool_name_map = std::map<std::string, responses_tool_name>;
 
 // used by /completions endpoint
 json oaicompat_completion_params_parse(const json & body);

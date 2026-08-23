@@ -3589,6 +3589,13 @@ llama_context * llama_init_from_model(
         return nullptr;
     }
 
+    const bool turbo_k = params.type_k == GGML_TYPE_TURBO3_0 || params.type_k == GGML_TYPE_TURBO4_0;
+    const bool turbo_v = params.type_v == GGML_TYPE_TURBO3_0 || params.type_v == GGML_TYPE_TURBO4_0;
+    if ((turbo_k || turbo_v) && !params.offload_kqv) {
+        LLAMA_LOG_ERROR("%s: TurboQuant requires KQV offload to CUDA\n", __func__);
+        return nullptr;
+    }
+
     if (ggml_is_quantized(params.type_v) && params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_ENABLED) {
         if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO) {
             LLAMA_LOG_INFO("%s: enabling flash_attn since it is required for quantized V cache\n", __func__);

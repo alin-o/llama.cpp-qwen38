@@ -1,0 +1,79 @@
+name: qwen38-evaluation
+
+x-runtime: &runtime
+  restart: "no"
+  volumes:
+    - ${QWEN38_MODEL_DIR:-/mnt/S/.cache/llama.cpp/qwen38/unsloth-Qwen3.8-27B-GGUF-27af057e}:/models:ro
+  cpuset: "0-7"
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+      limits:
+        cpus: 8
+        memory: 24G
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+    interval: 10s
+    timeout: 5s
+    retries: 60
+    start_period: 30s
+
+services:
+  upstream-candidate:
+    <<: *runtime
+    profiles: [upstream]
+    build:
+      context: .
+      dockerfile: qwen38/Dockerfile
+    image: qwen38-upstream:b10502
+    ports:
+      - "${QWEN38_UPSTREAM_PORT:-8882}:8080"
+    volumes:
+      - ${QWEN38_MODEL_DIR:-/mnt/S/.cache/llama.cpp/qwen38/unsloth-Qwen3.8-27B-GGUF-27af057e}:/models:ro
+      - ${QWEN38_CACHE_ROOT:-/mnt/S/.cache/llama.cpp/qwen38}:/qwen38-cache:ro
+      - ./scripts/qwen38:/qwen38:ro
+      - qwen38_upstream_state:/state
+    environment:
+      MODEL_GGUF: ${MODEL_GGUF:-}
+      MTP_GGUF: ${MTP_GGUF:-}
+      CACHE_ROOT: ${CACHE_ROOT:-/qwen38-cache}
+      CACHE_PROFILE: ${CACHE_PROFILE:-turbo4}
+      SPEC: ${SPEC:-mtp}
+      CTX: ${CTX:-102400}
+      DRAFT_MAX: ${DRAFT_MAX:-3}
+      DRAFT_CACHE_K: ${DRAFT_CACHE_K:-q8_0}
+      DRAFT_CACHE_V: ${DRAFT_CACHE_V:-q8_0}
+      NP: ${NP:-1}
+      CACHE_REUSE: ${CACHE_REUSE:-0}
+      SLOT_PROMPT_CACHE_THRESHOLD: ${SLOT_PROMPT_CACHE_THRESHOLD:-0.5}
+      LLAMA_ARG_CACHE_RAM: "16384"
+      LLAMA_ARG_LOG_VERBOSITY: "3"
+    entrypoint: ["/bin/bash", "/qwen38/run-upstream-server.sh"]
+
+  fork-candidate:
+    <<: *runtime
+    profiles: [fork]
+    build:
+      context: ../atomic-llama-cpp-turboquant
+      dockerfile: ../llama.cpp-qwen38/qwen38/Dockerfile.fork
+    image: qwen38-turboquant:d7179ba3c
+    ports:
+      - "${QWEN38_FORK_PORT:-8883}:8080"
+    volumes:
+      - ${QWEN38_MODEL_DIR:-/mnt/S/.cache/llama.cpp/qwen38/unsloth-Qwen3.8-27B-GGUF-27af057e}:/models:ro
+      - ${QWEN38_CACHE_ROOT:-/mnt/S/.cache/llama.cpp/qwen38}:/qwen38-cache:ro
+      - ./scripts/qwen38:/qwen38:ro
+      - qwen38_fork_state:/state
+    environment:
+      SPEC: ${SPEC:-off}
+      CTX: ${CTX:-102400}
+      DRAFT_MAX: ${DRAFT_MAX:-4}
+    entrypoint: ["/bin/bash", "/qwen38/run-fork-server.sh"]
+
+volumes:
+  qwen38_upstream_state:
+  qwen38_fork_state:

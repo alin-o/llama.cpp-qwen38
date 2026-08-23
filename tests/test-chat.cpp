@@ -8,6 +8,7 @@
 #include "../src/llama-grammar.h"
 #include "../src/unicode.h"
 #include "../tools/server/server-chat.h"
+#include "../tools/server/server-task.h"
 #include "chat-auto-parser.h"
 #include "chat.h"
 #include "common.h"
@@ -1898,7 +1899,7 @@ static void test_convert_responses_to_chatcmpl() {
         assert_equals(100, result.at("max_tokens").get<int>());
     }
 
-    // Test mixed Responses tools: convert only function tools
+    // Test mixed Responses tools: convert functions and namespace functions
     {
         json input = json::parse(R"({
             "input": "Hello",
@@ -1930,21 +1931,46 @@ static void test_convert_responses_to_chatcmpl() {
                 },
                 {
                     "type": "namespace",
-                    "name": "browser"
+                    "name": "mcp__browser__",
+                    "description": "Browser tools",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "open",
+                            "description": "Open a page",
+                            "strict": false,
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "url": {
+                                        "type": "string"
+                                    }
+                                }
+                            }
+                        }
+                    ]
                 }
             ]
         })");
 
-        json result = server_chat_convert_responses_to_chatcmpl(input);
+        responses_tool_name_map tool_names;
+        json result = server_chat_convert_responses_to_chatcmpl(input, &tool_names);
 
         assert_equals(true, result.contains("tools"));
         assert_equals(true, result.at("tools").is_array());
-        assert_equals((size_t)1, result.at("tools").size());
+        assert_equals((size_t)2, result.at("tools").size());
 
         const auto & tool = result.at("tools")[0];
         assert_equals(std::string("function"), tool.at("type").get<std::string>());
         assert_equals(std::string("get_weather"), tool.at("function").at("name").get<std::string>());
         assert_equals(true, tool.at("function").at("strict").get<bool>());
+
+        const auto & namespaced_tool = result.at("tools")[1];
+        assert_equals(std::string("function"), namespaced_tool.at("type").get<std::string>());
+        assert_equals(std::string("mcp__browser__open"), namespaced_tool.at("function").at("name").get<std::string>());
+        assert_equals(false, namespaced_tool.at("function").at("strict").get<bool>());
+        assert_equals(std::string("mcp__browser__"), tool_names.at("mcp__browser__open").namespace_name);
+        assert_equals(std::string("open"), tool_names.at("mcp__browser__open").name);
     }
 
     // Test non-function Responses tools are ignored
@@ -1965,7 +1991,8 @@ static void test_convert_responses_to_chatcmpl() {
                 },
                 {
                     "type": "namespace",
-                    "name": "browser"
+                    "name": "browser",
+                    "tools": []
                 }
             ]
         })");
@@ -1973,6 +2000,142 @@ static void test_convert_responses_to_chatcmpl() {
         json result = server_chat_convert_responses_to_chatcmpl(input);
 
         assert_equals(false, result.contains("tools"));
+    }
+
+    // Test namespace metadata in input history and output calls
+    {
+        json input = json::parse(R"({
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "namespace": "mcp__browser__",
+                    "name": "open",
+                    "arguments": "{\"url\":\"https://example.com\"}"
+                }
+            ],
+            "model": "test-model"
+        })");
+        json converted = server_chat_convert_responses_to_chatcmpl(input);
+        assert_equals(std::string("mcp__browser__open"), converted.at("messages")[0].at("tool_calls")[0].at("function").at("name").get<std::string>());
+
+        server_task_result_cmpl_final result{};
+        result.is_updated = true;
+        result.oaicompat_msg.tool_calls.push_back({"mcp__browser__open", R"({"url":"https://example.com"})", "123"});
+        result.response_tool_names["mcp__browser__open"] = {"mcp__browser__", "open"};
+
+        const json output = result.to_json_oaicompat_resp().at("output")[0];
+        assert_equals(std::string("function_call"), output.at("type").get<std::string>());
+        assert_equals(std::string("mcp__browser__"), output.at("namespace").get<std::string>());
+        assert_equals(std::string("open"), output.at("name").get<std::string>());
+    }
+
+    // Test custom tool declarations, history, and output calls
+    {
+        json input = json::parse(R"({
+            "input": [
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_patch",
+                    "name": "apply_patch",
+                    "input": "*** Begin Patch\n*** End Patch"
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_patch",
+                    "output": "Done!"
+                }
+            ],
+            "model": "test-model",
+            "tools": [
+                {
+                    "type": "custom",
+                    "name": "apply_patch",
+                    "description": "Apply a patch"
+                }
+            ]
+        })");
+
+        responses_tool_name_map tool_names;
+        json converted = server_chat_convert_responses_to_chatcmpl(input, &tool_names);
+
+        const auto & tool = converted.at("tools")[0];
+        assert_equals(std::string("function"), tool.at("type").get<std::string>());
+        assert_equals(std::string("apply_patch"), tool.at("function").at("name").get<std::string>());
+        assert_equals(true, tool.at("function").at("strict").get<bool>());
+        assert_equals(std::string("string"), tool.at("function").at("parameters").at("properties").at("input").at("type").get<std::string>());
+        assert_equals(true, tool_names.at("apply_patch").custom);
+
+        const auto & call = converted.at("messages")[0].at("tool_calls")[0];
+        assert_equals(std::string("apply_patch"), call.at("function").at("name").get<std::string>());
+        assert_equals(std::string("*** Begin Patch\n*** End Patch"), json::parse(call.at("function").at("arguments").get<std::string>()).at("input").get<std::string>());
+        assert_equals(std::string("tool"), converted.at("messages")[1].at("role").get<std::string>());
+        assert_equals(std::string("Done!"), converted.at("messages")[1].at("content").get<std::string>());
+
+        server_task_result_cmpl_final result{};
+        result.is_updated = true;
+        result.oaicompat_msg.tool_calls.push_back({"apply_patch", R"({"input":"*** Begin Patch\n*** End Patch"})", "patch"});
+        result.response_tool_names = tool_names;
+
+        const json output = result.to_json_oaicompat_resp().at("output")[0];
+        assert_equals(std::string("custom_tool_call"), output.at("type").get<std::string>());
+        assert_equals(std::string("apply_patch"), output.at("name").get<std::string>());
+        assert_equals(std::string("*** Begin Patch\n*** End Patch"), output.at("input").get<std::string>());
+        assert_equals(false, output.contains("arguments"));
+
+        server_task_result_cmpl_partial partial{};
+        partial.is_updated = true;
+        partial.oai_resp_created = true;
+        partial.response_tool_names = tool_names;
+        common_chat_msg_diff diff;
+        diff.tool_call_delta = {"apply_patch", R"({"input":"*** Begin Patch"})", "patch"};
+        partial.oaicompat_msg_diffs.push_back(diff);
+
+        const json events = partial.to_json_oaicompat_resp();
+        assert_equals((size_t)1, events.size());
+        assert_equals(std::string("response.output_item.added"), events[0].at("data").at("type").get<std::string>());
+        assert_equals(std::string("custom_tool_call"), events[0].at("data").at("item").at("type").get<std::string>());
+        assert_equals(false, events[0].at("data").at("item").contains("arguments"));
+    }
+
+    // Test multimodal function call output
+    {
+        json input = json::parse(R"({
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "view_image",
+                    "arguments": "{\"path\":\"screenshot.png\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": [
+                        {
+                            "type": "input_text",
+                            "text": "Screenshot loaded"
+                        },
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,iVBORw0KGgo="
+                        }
+                    ]
+                }
+            ],
+            "model": "test-model"
+        })");
+
+        json result = server_chat_convert_responses_to_chatcmpl(input);
+
+        assert_equals((size_t)2, result.at("messages").size());
+        const auto & tool_msg = result.at("messages")[1];
+        assert_equals(std::string("tool"), tool_msg.at("role").get<std::string>());
+        assert_equals(std::string("call_123"), tool_msg.at("tool_call_id").get<std::string>());
+        assert_equals(std::string("text"), tool_msg.at("content")[0].at("type").get<std::string>());
+        assert_equals(std::string("Screenshot loaded"), tool_msg.at("content")[0].at("text").get<std::string>());
+        assert_equals(std::string("image_url"), tool_msg.at("content")[1].at("type").get<std::string>());
+        assert_equals(std::string("data:image/png;base64,iVBORw0KGgo="), tool_msg.at("content")[1].at("image_url").at("url").get<std::string>());
     }
 }
 

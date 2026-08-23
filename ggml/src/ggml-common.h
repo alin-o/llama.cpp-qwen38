@@ -287,6 +287,30 @@ typedef struct {
 } block_tq2_0;
 static_assert(sizeof(block_tq2_0) == sizeof(ggml_half) + QK_K / 4, "wrong tq2_0 block size/padding");
 
+// TurboQuant3 stores 3-bit centroid indices after a 128-wide WHT.
+#define QK_TURBO3 128
+#define QK_TURBO3_GROUP 128
+#define NL_TURBO3     (QK_TURBO3 / 16)
+#define NL_TURBO3_VEC (QK_TURBO3 / 4)
+typedef struct {
+    ggml_half norm;
+    uint8_t qs[QK_TURBO3 / 4];
+    uint8_t signs[QK_TURBO3 / 8];
+} block_turbo3_0;
+static_assert(sizeof(block_turbo3_0) == sizeof(ggml_half) + QK_TURBO3/4 + QK_TURBO3/8,
+        "wrong turbo3_0 block size/padding");
+
+// TurboQuant4 stores 4-bit centroid indices after a 128-wide WHT (nibble packed).
+#define QK_TURBO4 128
+#define QK_TURBO4_GROUP 128
+typedef struct {
+    ggml_half norm;
+    ggml_half rnorm;
+    uint8_t qs[QK_TURBO4 / 2];
+} block_turbo4_0;
+static_assert(sizeof(block_turbo4_0) == sizeof(ggml_half) + sizeof(ggml_half) + QK_TURBO4/2,
+        "wrong turbo4_0 block size/padding");
+
 //
 // Super-block quantization structures
 //

@@ -95,6 +95,8 @@
 # Python
 
 /.venv
+qwen38/.venv-speed-bench/
+qwen38/results/
 __pycache__/
 */poetry.lock
 poetry.toml
@@ -153,3 +155,4 @@ a.out.*
 
 AGENTS.local.md
 .pi/SYSTEM.md
+.hf-cache

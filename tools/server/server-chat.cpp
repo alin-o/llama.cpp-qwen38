@@ -3,7 +3,7 @@
 
 #include <sstream>
 
-json server_chat_convert_responses_to_chatcmpl(const json & response_body) {
+json server_chat_convert_responses_to_chatcmpl(const json & response_body, responses_tool_name_map * tool_names) {
     if (!response_body.contains("input")) {
         throw std::invalid_argument("'input' is required");
     }
@@ -160,17 +160,28 @@ json server_chat_convert_responses_to_chatcmpl(const json & response_body) {
                     item["content"] = chatcmpl_content;
                     chatcmpl_messages.push_back(item);
                 }
-            } else if (exists_and_is_string(item, "arguments") &&
+            } else if ((exists_and_is_string(item, "arguments") || exists_and_is_string(item, "input")) &&
                 exists_and_is_string(item, "call_id") &&
                 exists_and_is_string(item, "name") &&
                 exists_and_is_string(item, "type") &&
-                item.at("type") == "function_call"
+                (item.at("type") == "function_call" || item.at("type") == "custom_tool_call")
             ) {
-                // #responses_create-input-input_item_list-item-function_tool_call
+                const bool is_custom = item.at("type") == "custom_tool_call";
+                const char * arguments_key = is_custom ? "input" : "arguments";
+                if (!exists_and_is_string(item, arguments_key)) {
+                    throw std::invalid_argument(is_custom ? "Custom tool call requires string 'input'" : "Function tool call requires string 'arguments'");
+                }
+                std::string name = item.at("name");
+                if (exists_and_is_string(item, "namespace")) {
+                    name = item.at("namespace").get<std::string>() + name;
+                }
+                const std::string arguments = is_custom
+                    ? json({{"input", item.at("input")}}).dump()
+                    : item.at("arguments").get<std::string>();
                 json tool_call = {
                     {"function", json {
-                        {"arguments", item.at("arguments")},
-                        {"name",      item.at("name")},
+                        {"arguments", arguments},
+                        {"name",      name},
                     }},
                     {"id",   item.at("call_id")},
                     {"type", "function"},
@@ -191,7 +202,7 @@ json server_chat_convert_responses_to_chatcmpl(const json & response_body) {
             } else if (exists_and_is_string(item, "call_id") &&
                 (exists_and_is_string(item, "output") || exists_and_is_array(item, "output")) &&
                 exists_and_is_string(item, "type") &&
-                item.at("type") == "function_call_output"
+                (item.at("type") == "function_call_output" || item.at("type") == "custom_tool_call_output")
             ) {
                 // #responses_create-input-input_item_list-item-function_tool_call_output
                 if (item.at("output").is_string()) {
@@ -201,12 +212,30 @@ json server_chat_convert_responses_to_chatcmpl(const json & response_body) {
                         {"tool_call_id", item.at("call_id")},
                     });
                 } else {
-                    json chatcmpl_outputs = item.at("output");
-                    for (json & chatcmpl_output : chatcmpl_outputs) {
-                        if (!chatcmpl_output.contains("type") || chatcmpl_output.at("type") != "input_text") {
-                            throw std::invalid_argument("Output of tool call should be 'Input text'");
+                    json chatcmpl_outputs = json::array();
+                    for (const json & output : item.at("output")) {
+                        const std::string type = json_value(output, "type", std::string());
+                        if (type == "input_text") {
+                            if (!output.contains("text")) {
+                                throw std::invalid_argument("'Input text' requires 'text'");
+                            }
+                            chatcmpl_outputs.push_back({
+                                {"text", output.at("text")},
+                                {"type", "text"},
+                            });
+                        } else if (type == "input_image") {
+                            if (!output.contains("image_url")) {
+                                throw std::invalid_argument("'image_url' is required");
+                            }
+                            chatcmpl_outputs.push_back({
+                                {"image_url", json {
+                                    {"url", output.at("image_url")}
+                                }},
+                                {"type", "image_url"},
+                            });
+                        } else {
+                            throw std::invalid_argument("Output of tool call should be 'Input text' or 'Input image'");
                         }
-                        chatcmpl_output["type"] = "text";
                     }
                     chatcmpl_messages.push_back(json {
                         {"content",      chatcmpl_outputs},
@@ -254,23 +283,78 @@ json server_chat_convert_responses_to_chatcmpl(const json & response_body) {
             throw std::invalid_argument("'tools' must be an array of objects");
         }
         std::vector<json> chatcmpl_tools;
-        for (json resp_tool : response_body.at("tools")) {
-            json chatcmpl_tool;
+        responses_tool_name_map converted_tool_names;
+        auto add_function_tool = [&chatcmpl_tools](json resp_tool) {
+            resp_tool.erase("type");
+            json chatcmpl_tool = {
+                {"type",     "function"},
+                {"function", std::move(resp_tool)},
+            };
 
+            if (!chatcmpl_tool.at("function").contains("strict")) {
+                chatcmpl_tool["function"]["strict"] = true;
+            }
+            chatcmpl_tools.push_back(std::move(chatcmpl_tool));
+        };
+        for (json resp_tool : response_body.at("tools")) {
             const std::string type = json_value(resp_tool, "type", std::string());
-            if (type != "function") {
-                // Non-function Responses tools have no Chat Completions equivalent.
+            if (type == "function") {
+                add_function_tool(std::move(resp_tool));
+                continue;
+            }
+            if (type == "custom") {
+                if (!resp_tool.contains("name") || !resp_tool.at("name").is_string()) {
+                    throw std::invalid_argument("Custom tool requires string 'name'");
+                }
+                const std::string name = resp_tool.at("name");
+                json function_tool = {
+                    {"type",        "function"},
+                    {"name",        name},
+                    {"description", json_value(resp_tool, "description", std::string())},
+                    {"strict",      true},
+                    {"parameters", json {
+                        {"type",                 "object"},
+                        {"properties",           json {{"input", json {{"type", "string"}}}}},
+                        {"required",             json::array({"input"})},
+                        {"additionalProperties", false},
+                    }},
+                };
+                converted_tool_names[name] = {"", name, true};
+                add_function_tool(std::move(function_tool));
+                continue;
+            }
+            if (type != "namespace") {
                 SRV_WRN("unsupported Responses tool type '%s' skipped\n", type.c_str());
                 continue;
             }
-            resp_tool.erase("type");
-            chatcmpl_tool["type"] = "function";
 
-            if (!resp_tool.contains("strict")) {
-                resp_tool["strict"] = true;
+            if (!resp_tool.contains("name") || !resp_tool.at("name").is_string()) {
+                throw std::invalid_argument("Namespace tool requires string 'name'");
             }
-            chatcmpl_tool["function"] = resp_tool;
-            chatcmpl_tools.push_back(chatcmpl_tool);
+            if (!resp_tool.contains("tools") || !resp_tool.at("tools").is_array()) {
+                throw std::invalid_argument("Namespace tool requires array 'tools'");
+            }
+
+            const std::string namespace_name = resp_tool.at("name");
+            for (json child_tool : resp_tool.at("tools")) {
+                const std::string child_type = json_value(child_tool, "type", std::string());
+                if (child_type != "function") {
+                    SRV_WRN("unsupported Responses namespace tool type '%s' skipped\n", child_type.c_str());
+                    continue;
+                }
+                if (!child_tool.contains("name") || !child_tool.at("name").is_string()) {
+                    throw std::invalid_argument("Namespace function tool requires string 'name'");
+                }
+
+                const std::string child_name = child_tool.at("name");
+                const std::string flat_name = namespace_name + child_name;
+                child_tool["name"] = flat_name;
+                converted_tool_names[flat_name] = {namespace_name, child_name};
+                add_function_tool(std::move(child_tool));
+            }
+        }
+        if (tool_names != nullptr) {
+            *tool_names = std::move(converted_tool_names);
         }
         chatcmpl_body.erase("tools");
         if (!chatcmpl_tools.empty()) {

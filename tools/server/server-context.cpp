@@ -876,6 +876,7 @@ private:
 
     // Necessary similarity of prompt for slot selection
     float slot_prompt_similarity = 0.0f;
+    float slot_prompt_cache_threshold = 0.5f;
 
     std::string model_name; // name of the loaded model, to be used by API
     std::set<std::string> model_aliases; // additional names for the model
@@ -1120,11 +1121,6 @@ private:
                 params_base.ctx_shift = false;
                 SRV_WRN("%s\n", "ctx_shift is not supported by multimodal, it will be disabled");
             }
-
-            if (params_base.n_cache_reuse) {
-                params_base.n_cache_reuse = 0;
-                SRV_WRN("%s\n", "cache_reuse is not supported by multimodal, it will be disabled");
-            }
         }
 
         if (!llama_memory_can_shift(llama_get_memory(ctx_tgt))) {
@@ -1150,6 +1146,7 @@ private:
 
         // Necessary similarity of prompt for slot selection
         slot_prompt_similarity = params_base.slot_prompt_similarity;
+        slot_prompt_cache_threshold = params_base.slot_prompt_cache_threshold;
 
         const int n_ctx_train = llama_model_n_ctx_train(model_tgt);
 
@@ -1499,7 +1496,7 @@ private:
                 }
 
                 // if we are about to lose a large portion of the existing context - save it in the prompt cache
-                if (f_keep < 0.5f) {
+                if (f_keep < slot_prompt_cache_threshold) {
                     update_cache = true;
                 }
             }
@@ -1959,8 +1956,9 @@ private:
 
         res->verbose           = slot.task->params.verbose;
         res->res_type          = slot.task->params.res_type;
-        res->oaicompat_model   = slot.task->params.oaicompat_model;
-        res->oaicompat_cmpl_id = slot.task->params.oaicompat_cmpl_id;
+        res->oaicompat_model      = slot.task->params.oaicompat_model;
+        res->oaicompat_cmpl_id    = slot.task->params.oaicompat_cmpl_id;
+        res->response_tool_names  = slot.task->params.response_tool_names;
 
         // populate res.probs_output
         if (slot.task->params.sampling.n_probs > 0) {
@@ -2014,8 +2012,9 @@ private:
         res->stream            = slot.task->params.stream;
         res->include_usage     = slot.task->params.include_usage;
         res->res_type          = slot.task->params.res_type;
-        res->oaicompat_model   = slot.task->params.oaicompat_model;
-        res->oaicompat_cmpl_id = slot.task->params.oaicompat_cmpl_id;
+        res->oaicompat_model      = slot.task->params.oaicompat_model;
+        res->oaicompat_cmpl_id    = slot.task->params.oaicompat_cmpl_id;
+        res->response_tool_names  = slot.task->params.response_tool_names;
 
         // populate res.probs_output
         if (slot.task->params.sampling.n_probs > 0) {
@@ -3101,7 +3100,8 @@ private:
 
                                 const bool can_cache_reuse =
                                     llama_memory_can_shift(llama_get_memory(ctx_tgt)) &&
-                                    !slot.prompt.tokens.has_mtmd;
+                                    !slot.prompt.tokens.has_media_chunks() &&
+                                    !input_tokens.has_media_chunks();
 
                                 if (!can_cache_reuse && n_cache_reuse > 0) {
                                     SLT_WRN(slot, "cache reuse is not supported - ignoring n_cache_reuse = %d\n", n_cache_reuse);
@@ -3109,15 +3109,11 @@ private:
 
                                 // reuse chunks from the cached prompt by shifting their KV cache in the new position
                                 if (can_cache_reuse && n_cache_reuse > 0) {
-                                    GGML_ASSERT(!slot.prompt.tokens.has_mtmd);
+                                    GGML_ASSERT(!slot.prompt.tokens.has_media_chunks());
+                                    GGML_ASSERT(!input_tokens.has_media_chunks());
 
                                     size_t head_c = n_past; // cache
                                     size_t head_p = n_past; // current prompt
-
-                                    if (mctx) {
-                                        // we should never reach this
-                                        GGML_ABORT("not supported by multimodal");
-                                    }
 
                                     SLT_DBG(slot, "trying to reuse chunks with size > %d, n_past = %d\n", n_cache_reuse, n_past);
 
@@ -4120,7 +4116,8 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             server_task_type type,
             const json & data,
             const std::vector<raw_buffer> & files,
-            task_response_type res_type) {
+            task_response_type res_type,
+            responses_tool_name_map response_tool_names) {
     GGML_ASSERT(type == SERVER_TASK_TYPE_COMPLETION || type == SERVER_TASK_TYPE_INFILL);
 
     auto res = create_response();
@@ -4185,9 +4182,10 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             sse_ping_interval = task.params.sse_ping_interval;
 
             // OAI-compat
-            task.params.res_type          = res_type;
-            task.params.oaicompat_cmpl_id = completion_id;
-            task.params.oaicompat_model   = meta->model_name;
+            task.params.res_type            = res_type;
+            task.params.oaicompat_cmpl_id   = completion_id;
+            task.params.oaicompat_model     = meta->model_name;
+            task.params.response_tool_names = response_tool_names;
 
             // prepare child tasks
             if (task.params.n_cmpl > 1) {
@@ -4848,7 +4846,8 @@ void server_routes::init_routes() {
     this->post_responses_oai = [this](const server_http_req & req) {
         auto res = create_response();
         std::vector<raw_buffer> files;
-        json body = server_chat_convert_responses_to_chatcmpl(json::parse(req.body));
+        responses_tool_name_map response_tool_names;
+        json body = server_chat_convert_responses_to_chatcmpl(json::parse(req.body), &response_tool_names);
         SRV_DBG("%s\n", "Request converted: OpenAI Responses -> OpenAI Chat Completions");
         SRV_DBG("converted request: %s\n", body.dump().c_str());
         json body_parsed = oaicompat_chat_params_parse(
@@ -4860,7 +4859,8 @@ void server_routes::init_routes() {
             SERVER_TASK_TYPE_COMPLETION,
             body_parsed,
             files,
-            TASK_RESPONSE_TYPE_OAI_RESP);
+            TASK_RESPONSE_TYPE_OAI_RESP,
+            std::move(response_tool_names));
     };
 
     this->post_responses_tok_oai = [this](const server_http_req & req) {

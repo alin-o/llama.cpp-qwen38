@@ -311,6 +311,8 @@ const std::vector<ggml_type> kv_cache_types = {
     GGML_TYPE_IQ4_NL,
     GGML_TYPE_Q5_0,
     GGML_TYPE_Q5_1,
+    GGML_TYPE_TURBO3_0,
+    GGML_TYPE_TURBO4_0,
 };
 
 static ggml_type kv_cache_type_from_str(const std::string & s) {
@@ -3759,6 +3761,18 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.slot_prompt_similarity = std::stof(value);
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--slot-prompt-cache-threshold"}, "THRESHOLD",
+        string_format(
+            "save the selected slot to the RAM prompt cache when less than this fraction of its context is kept "
+            "(default: %.2f, range: 0.0-1.0)", params.slot_prompt_cache_threshold),
+        [](common_params & params, const std::string & value) {
+            params.slot_prompt_cache_threshold = std::stof(value);
+            if (params.slot_prompt_cache_threshold < 0.0f || params.slot_prompt_cache_threshold > 1.0f) {
+                throw std::invalid_argument("slot-prompt-cache-threshold must be between 0.0 and 1.0");
+            }
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SLOT_PROMPT_CACHE_THRESHOLD"));
     add_opt(common_arg(
         {"--lora-init-without-apply"},
         string_format("load LoRA adapters without applying them (apply later via POST /lora-adapters) (default: %s)", params.lora_init_without_apply ? "enabled" : "disabled"),
