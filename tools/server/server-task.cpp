@@ -332,7 +332,7 @@ static bool restore_responses_tool_name(json & item, const std::string & name, c
 }
 
 static std::string responses_custom_tool_input(const std::string & arguments) {
-    const json parsed = json::parse(arguments, nullptr, false);
+    const json parsed = json::parse_no_throw(arguments);
     if (parsed.is_object() && parsed.contains("input") && parsed.at("input").is_string()) {
         return parsed.at("input");
     }
