@@ -10,7 +10,8 @@ llama_paged_scheduler_impl::llama_paged_scheduler_impl(uint32_t               n_
     n_seq_max_ctx(n_ctx),
     block_size(block_sz),
     n_batch(n_batch),
-    kv_cache_manager(kv_manager) {}
+    kv_cache_manager(kv_manager),
+    curr_info{} {}
 
 bool llama_paged_scheduler_impl::check_deadlock(uint32_t n_candidates, uint32_t n_swapped, uint32_t n_waiting) const {
     if (n_candidates == 0 && (n_swapped > 0 || n_waiting > 0)) {

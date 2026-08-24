@@ -52,7 +52,9 @@ services:
       SLOT_PROMPT_CACHE_THRESHOLD: ${SLOT_PROMPT_CACHE_THRESHOLD:-0.5}
       LLAMA_ARG_CACHE_RAM: "16384"
       LLAMA_ARG_LOG_VERBOSITY: "3"
-    entrypoint: ["/bin/bash", "/qwen38/run-upstream-server.sh"]
+    # MODEL_ENTRYPOINT switches launchers: the qwen38 script is the default,
+    # model configs for other models point at run-model-server.sh instead.
+    entrypoint: ["/bin/bash", "${MODEL_ENTRYPOINT:-/qwen38/run-upstream-server.sh}"]
 
   fork-candidate:
     <<: *runtime
