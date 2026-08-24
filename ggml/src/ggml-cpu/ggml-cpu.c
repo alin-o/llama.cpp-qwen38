@@ -3298,6 +3298,11 @@ static struct ggml_threadpool * ggml_threadpool_new_impl(
                struct ggml_cgraph * cgraph,
                 struct ggml_cplan * cplan) {
 
+    // n_threads <= 0 means "auto" (e.g. a common_params that was not post-processed
+    // from the CLI); fall back to the default count like ggml_graph_plan does,
+    // otherwise the workers buffer size underflows to (size_t)-1
+    const int n_threads = tpp->n_threads > 0 ? tpp->n_threads : GGML_DEFAULT_N_THREADS;
+
     struct ggml_threadpool * threadpool =
         ggml_aligned_malloc(sizeof(struct ggml_threadpool));
     {
@@ -3311,18 +3316,18 @@ static struct ggml_threadpool * ggml_threadpool_new_impl(
         threadpool->pause            = tpp->paused;
         threadpool->abort            = -1;
         threadpool->workers          = NULL;
-        threadpool->n_threads        = tpp->n_threads;
+        threadpool->n_threads        = n_threads;
         threadpool->poll             = tpp->poll;
         threadpool->prio             = tpp->prio;
         threadpool->ec               = GGML_STATUS_SUCCESS;
     }
 
     // Allocate and init workers state
-    const size_t workers_size = sizeof(struct ggml_compute_state) * tpp->n_threads;
+    const size_t workers_size = sizeof(struct ggml_compute_state) * n_threads;
     struct ggml_compute_state * workers = ggml_aligned_malloc(workers_size);
 
     memset(workers, 0, workers_size);
-    for (int j = 0; j < tpp->n_threads; j++) {
+    for (int j = 0; j < n_threads; j++) {
         workers[j].threadpool = threadpool;
         workers[j].ith        = j;
     }
@@ -3333,7 +3338,7 @@ static struct ggml_threadpool * ggml_threadpool_new_impl(
     int32_t cpumask_iter = 0;
 
     // Compute CPU masks for each thread
-    for (int j = 0; j < tpp->n_threads; j++) {
+    for (int j = 0; j < n_threads; j++) {
         ggml_thread_cpumask_next(tpp->cpumask, workers[j].cpumask, tpp->strict_cpu, &cpumask_iter);
     }
 #else // GGML_USE_OPENMP
@@ -3345,7 +3350,7 @@ static struct ggml_threadpool * ggml_threadpool_new_impl(
 
     int32_t cpumask_iter = 0;
 
-    for (int j = 1; j < tpp->n_threads; j++) {
+    for (int j = 1; j < n_threads; j++) {
         ggml_thread_cpumask_next(tpp->cpumask, workers[j].cpumask, tpp->strict_cpu, &cpumask_iter);
 
         int32_t rc = ggml_thread_create(&workers[j].thrd, NULL, ggml_graph_compute_secondary_thread, &workers[j]);

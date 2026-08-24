@@ -31,7 +31,6 @@ Environmental (sandbox constraints; may pass elsewhere or when the host GPU is i
 - `test-backend-ops`: the full op matrix exhausts the sandbox's free VRAM (the host normally uses most of the card; only ~2 GB is free) and segfaults late in the run. Isolated op runs (`-o <op>`) pass; rerun the full matrix when the host GPU is idle
 
 Fork code bugs (pre-existing; need dedicated fix tasks - do not fix them silently as a side effect of other work):
-- `test-paged-kv-e2e`: SEGFAULT - context init attempts a (size_t)-1 byte allocation; reproduces with `-ngl 0` (CPU) and with CUDA; tied to the paged-KV work (commits `420a3ec1b` / `28ef673fa`)
 - `test-quantize-fns`: SEGFAULT, CPU-only quantization functions; predates sandbox GPU enablement
 - `test-quantize-perf`: SEGFAULT in the q2_0 `quantize_row_q_reference` benchmark; CPU-only; predates sandbox GPU enablement
 

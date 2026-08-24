@@ -46,7 +46,6 @@ cmake --build "$BUILD_DIR" -j"$(nproc)" || exit 1
 baseline="test-tokenizers-ggml-vocabs
 test-arg-parser
 test-backend-ops
-test-paged-kv-e2e
 test-quantize-fns
 test-quantize-perf"
 
