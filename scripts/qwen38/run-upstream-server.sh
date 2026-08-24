@@ -89,7 +89,7 @@ ARGS=(
     -ub 2048
     -ngl 999
     --parallel "${NP:-1}"
-    --kv-unified
+    --kv-paged
     --jinja
     --chat-template-file "$CHAT_TEMPLATE_FILE"
     --reasoning-format deepseek
