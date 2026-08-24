@@ -89,7 +89,6 @@ ARGS=(
     -ub 2048
     -ngl 999
     --parallel "${NP:-1}"
-    --kv-unified
     --jinja
     --chat-template-file "$CHAT_TEMPLATE_FILE"
     --reasoning-format deepseek
@@ -104,6 +103,19 @@ ARGS=(
 )
 #--cont-batching
 #--cache-idle-slots
+
+# KV cache backend: unified buffer by default, paged block pool when KV_PAGED.
+if [[ "${KV_PAGED:-0}" == "1" || "${KV_PAGED:-0}" == "on" ]]; then
+    KV_MODE="paged"
+    ARGS+=(--kv-paged)
+    [[ -n "${KV_BLOCK_SIZE:-}" ]]      && ARGS+=(--kv-block-size "$KV_BLOCK_SIZE")
+    [[ -n "${N_GPU_BLOCKS:-}" ]]       && ARGS+=(--n-gpu-blocks "$N_GPU_BLOCKS")
+    [[ -n "${N_CPU_BLOCKS:-}" ]]       && ARGS+=(--n-cpu-blocks "$N_CPU_BLOCKS")
+    [[ -n "${KV_PAGED_WATERMARK:-}" ]] && ARGS+=(--kv-paged-watermark "$KV_PAGED_WATERMARK")
+else
+    KV_MODE="unified"
+    ARGS+=(--kv-unified)
+fi
 
 if [[ "$SPEC" == "mtp" ]]; then
     ARGS+=(
@@ -129,5 +141,5 @@ elif [[ "$SPEC" != "off" ]]; then
     exit 2
 fi
 
-echo "qwen38: engine=upstream profile=${PROFILE} spec=${SPEC} ctx=${CTX:-102400} np=${NP:-1} cache_reuse=${CACHE_REUSE:-256}" >&2
+echo "qwen38: engine=upstream profile=${PROFILE} spec=${SPEC} ctx=${CTX:-102400} np=${NP:-1} kv=${KV_MODE} cache_reuse=${CACHE_REUSE:-256}" >&2
 exec "$SERVER" "${ARGS[@]}" "$@"

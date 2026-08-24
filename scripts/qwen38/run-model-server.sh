@@ -10,6 +10,9 @@
 #           MMPROJ_GGUF   attach a vision tower when the file exists
 #           SPEC=mtp      load a separate MTP head from MTP_GGUF
 #                         (no embedded-head detection here; pass the file)
+#           KV_PAGED=1    experimental paged KV block pool instead of the
+#                         unified buffer (tune with KV_BLOCK_SIZE,
+#                         N_GPU_BLOCKS, N_CPU_BLOCKS, KV_PAGED_WATERMARK)
 set -euo pipefail
 
 SERVER="${LLAMA_SERVER:-/usr/local/bin/llama-server}"
@@ -59,7 +62,6 @@ ARGS=(
     -b 2048
     -ub 2048
     --parallel "${NP:-1}"
-    --kv-unified
     --jinja
     --metrics
     --slots
@@ -70,6 +72,19 @@ ARGS=(
     --threads "${THREADS:-4}"
     --threads-http "${THREADS_HTTP:-4}"
 )
+
+# KV cache backend: unified buffer by default, paged block pool when KV_PAGED.
+if [[ "${KV_PAGED:-0}" == "1" || "${KV_PAGED:-0}" == "on" ]]; then
+    KV_MODE="paged"
+    ARGS+=(--kv-paged)
+    [[ -n "${KV_BLOCK_SIZE:-}" ]]      && ARGS+=(--kv-block-size "$KV_BLOCK_SIZE")
+    [[ -n "${N_GPU_BLOCKS:-}" ]]       && ARGS+=(--n-gpu-blocks "$N_GPU_BLOCKS")
+    [[ -n "${N_CPU_BLOCKS:-}" ]]       && ARGS+=(--n-cpu-blocks "$N_CPU_BLOCKS")
+    [[ -n "${KV_PAGED_WATERMARK:-}" ]] && ARGS+=(--kv-paged-watermark "$KV_PAGED_WATERMARK")
+else
+    KV_MODE="unified"
+    ARGS+=(--kv-unified)
+fi
 
 if [[ -n "${MMPROJ_GGUF:-}" ]]; then
     [[ -f "$MMPROJ_GGUF" ]] || { echo "error: missing mmproj: $MMPROJ_GGUF" >&2; exit 1; }
@@ -91,5 +106,5 @@ elif [[ "${SPEC:-off}" != "off" ]]; then
     exit 2
 fi
 
-echo "model: engine=generic profile=${PROFILE} spec=${SPEC:-off} ctx=${CTX:-32768} np=${NP:-1} model=${MODEL}" >&2
+echo "model: engine=generic profile=${PROFILE} spec=${SPEC:-off} ctx=${CTX:-32768} np=${NP:-1} kv=${KV_MODE} model=${MODEL}" >&2
 exec "$SERVER" "${ARGS[@]}" "$@"

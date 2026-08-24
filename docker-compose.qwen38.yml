@@ -50,6 +50,11 @@ services:
       NP: ${NP:-1}
       CACHE_REUSE: ${CACHE_REUSE:-0}
       SLOT_PROMPT_CACHE_THRESHOLD: ${SLOT_PROMPT_CACHE_THRESHOLD:-0.5}
+      KV_PAGED: ${KV_PAGED:-0}
+      KV_BLOCK_SIZE: ${KV_BLOCK_SIZE:-}
+      N_GPU_BLOCKS: ${N_GPU_BLOCKS:-}
+      N_CPU_BLOCKS: ${N_CPU_BLOCKS:-}
+      KV_PAGED_WATERMARK: ${KV_PAGED_WATERMARK:-}
       LLAMA_ARG_CACHE_RAM: "16384"
       LLAMA_ARG_LOG_VERBOSITY: "3"
     # MODEL_ENTRYPOINT switches launchers: the qwen38 script is the default,
