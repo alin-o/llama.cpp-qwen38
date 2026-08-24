@@ -1,24 +1,15 @@
 # syntax=docker/dockerfile:1
 
-FROM nvidia/cuda:13.1.0-devel-ubuntu24.04 AS build
+FROM nvidia/cuda:13.3.1-devel-ubuntu26.04 AS build
 
 RUN apt-get update && apt-get install -y \
     cmake build-essential git libssl-dev libcurl4-openssl-dev \
-    cuda-nvcc-13-1 cuda-cudart-dev-13-1 libcublas-dev-13-2 \
-    && rm -rf /var/lib/apt/lists/* \
-    && ln -sf /usr/local/cuda-13.2/targets/x86_64-linux/lib/libcublas* \
-    /usr/local/cuda-13.1/targets/x86_64-linux/lib/ \
-    && ln -sf /usr/local/cuda-13.2/targets/x86_64-linux/lib/stubs/libcublas* \
-    /usr/local/cuda-13.1/targets/x86_64-linux/lib/stubs/ \
-    && ln -sf /usr/local/cuda-13.2/targets/x86_64-linux/include/cublas* \
-    /usr/local/cuda-13.1/targets/x86_64-linux/include/ \
-    && ln -sf /usr/local/cuda-13.2/targets/x86_64-linux/lib/static/libcublas* \
-    /usr/local/cuda-13.1/targets/x86_64-linux/lib/static/ 2>/dev/null; true
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
 COPY . .
 
-RUN --mount=type=cache,id=qwen38-cmake-cuda-sm89,target=/workspace/build,sharing=locked \
+RUN --mount=type=cache,id=qwen38-cmake-cuda133-sm89,target=/workspace/build,sharing=locked \
     cmake -B build \
     -DGGML_CUDA=ON \
     -DBUILD_SHARED_LIBS=OFF \
@@ -31,13 +22,13 @@ RUN --mount=type=cache,id=qwen38-cmake-cuda-sm89,target=/workspace/build,sharing
     -DGGML_CUDA_FORCE_CUBLAS=OFF \        
     -DGGML_CUDA_PEER_MAX_BATCH=4096 \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.1/bin/nvcc \
+    -DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.3/bin/nvcc \
     && cmake --build build --config Release --target llama-server llama-cli llama-bench llama-perplexity test-chat test-arg-parser test-backend-ops -j$(nproc) \
     && rm -rf /out \
     && mkdir -p /out \
     && cp -a build/bin/. /out/
 
-FROM nvidia/cuda:13.1.0-runtime-ubuntu24.04
+FROM nvidia/cuda:13.3.1-runtime-ubuntu26.04
 
 RUN apt-get update && apt-get install -y \
     curl libssl3t64 libcurl4t64 python3 \
