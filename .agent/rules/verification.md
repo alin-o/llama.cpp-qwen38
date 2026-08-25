@@ -12,7 +12,7 @@ Canonical command, run from the repo root:
 Steps:
 1. `python3 -m flake8 .` (skipped with a notice when flake8 is not installed)
 2. `ty check --output-format=github` (skipped when `ty` is not installed)
-3. Incremental build of `build-verify` (CMake/Ninja, Release, `GGML_CUDA=ON`); configures it automatically on a fresh checkout
+3. Incremental build of `build-verify` (CMake/Ninja, Release, `GGML_CUDA=ON`, capped at `--parallel 4`); configures it automatically on a fresh checkout
 4. `ctest -L main --timeout 900 --output-on-failure` inside `build-verify`
 
 Exit status: nonzero only for lint/type failures, build failures, or test failures that are NOT in the baseline list below. Known baseline failures are printed as a summary and the command still exits 0. The baseline list is embedded in `verify.sh` - keep the two in sync when the baseline changes.

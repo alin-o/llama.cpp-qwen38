@@ -37,7 +37,7 @@ if [ ! -f "$BUILD_DIR/build.ninja" ]; then
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_CUDA=ON || exit 1
 fi
-cmake --build "$BUILD_DIR" -j"$(nproc)" || exit 1
+cmake --build "$BUILD_DIR" --parallel 4 || exit 1
 
 # Known baseline failures in this sandbox (see .agent/rules/verification.md).
 # verify.sh fails only on failures that are NOT in this list; baseline
