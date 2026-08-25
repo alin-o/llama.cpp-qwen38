@@ -49,8 +49,9 @@ struct request_result {
 static void add_request_from_pool(struct llama_paged_scheduler * scheduler,
                                   llama_context *                ctx,
                                   size_t                         pool_index,
-                                  int                            seq_id) {
-    const std::string        input_prompt = k_prompts[pool_index % k_n_prompts];
+                                  int                            seq_id,
+                                  const std::string &            prompt) {
+    const std::string &      input_prompt = prompt.empty() ? k_prompts[pool_index % k_n_prompts] : prompt;
     std::vector<llama_token> tokens       = common_tokenize(ctx, input_prompt, true);
 
     bool success = llama_paged_scheduler_add_request(scheduler, tokens.data(), tokens.size(), seq_id);
@@ -123,7 +124,7 @@ int main(int argc, char ** argv) {
 
     std::unordered_map<int32_t, common_sampler *> samplers;
     for (int i = 0; i < params.n_sequences; ++i) {
-        add_request_from_pool(scheduler, ctx, (size_t) i, i);
+        add_request_from_pool(scheduler, ctx, (size_t) i, i, params.prompt);
         samplers[i] = common_sampler_init(model, params.sampling);
     }
 
@@ -137,6 +138,11 @@ int main(int argc, char ** argv) {
         __func__, params.n_sequences, params.n_predict, params.n_gpu_blocks, params.n_cpu_blocks);
 
     const int64_t t_start_us = ggml_time_us();
+    int64_t       prefill_us = 0;
+    int64_t       decode_us  = 0;
+    int64_t       mixed_us   = 0;
+    int32_t       prefill_tokens = 0;
+    int32_t       decode_tokens  = 0;
 
     while (true) {
         const bool success = llama_paged_scheduler_prepare_batch(scheduler, &batch);
@@ -148,17 +154,45 @@ int main(int argc, char ** argv) {
                 params.n_batch, params.n_sequences, params.n_parallel);
         GGML_ASSERT(batch.n_tokens <= params.n_batch && "batch exceeds n_batch");
 
+        const llama_paged_batch_info * info = llama_paged_scheduler_get_batch_info(scheduler);
+        GGML_ASSERT(info != nullptr && "llama_paged_batch_info is nullptr.");
+
+        bool batch_has_prefill = false;
+        bool batch_has_decode  = false;
+        for (int i = 0; i < info->n_seq; ++i) {
+            const int32_t request_id = batch.seq_id[info->batch_offsets[i]][0];
+            llama_paged_seq_state state = {};
+            GGML_ASSERT(llama_paged_scheduler_get_seq_state(scheduler, request_id, &state));
+            if (state.n_decoded == 0) {
+                batch_has_prefill = true;
+            } else {
+                batch_has_decode = true;
+            }
+        }
+
+        const int64_t t_decode_start_us = ggml_time_us();
         if (llama_decode(ctx, batch) != 0) {
             LOG_INF("%s: llama_decode failed\n", __func__);
             break;
         }
         llama_synchronize(ctx);
+        const int64_t decode_elapsed_us = ggml_time_us() - t_decode_start_us;
+
+        if (params.paged_timing) {
+            if (batch_has_prefill && !batch_has_decode) {
+                prefill_us += decode_elapsed_us;
+                prefill_tokens += batch.n_tokens;
+            } else if (batch_has_decode && !batch_has_prefill) {
+                decode_us += decode_elapsed_us;
+                decode_tokens += batch.n_tokens;
+            } else {
+                mixed_us += decode_elapsed_us;
+            }
+        }
 
         std::vector<llama_token> sampled_tokens;
         std::vector<int8_t>      stop_flags;
 
-        const llama_paged_batch_info * info = llama_paged_scheduler_get_batch_info(scheduler);
-        GGML_ASSERT(info != nullptr && "llama_paged_batch_info is nullptr.");
         for (int i = 0; i < info->n_seq; ++i) {
             int32_t request_id = batch.seq_id[info->batch_offsets[i]][0];
 
@@ -256,6 +290,8 @@ int main(int argc, char ** argv) {
     const float   avg_tpot_ms = n_results > 0 ? sum_tpot_ms / n_results : 0.f;
     const float   avg_e2e_ms  = n_results > 0 ? sum_e2e_ms / n_results : 0.f;
     const float   agg_tps     = elapsed_s > 0 ? total_decoded_tokens / elapsed_s : 0.f;
+    const double  pp_tps      = prefill_us > 0 ? prefill_tokens * 1e6 / prefill_us : 0.0;
+    const double  tg_tps      = decode_us > 0 ? decode_tokens * 1e6 / decode_us : 0.0;
 
     LOG_INF("\n");
     LOG_INF("=== Paged KV Cache Summary ===\n");
@@ -268,6 +304,17 @@ int main(int argc, char ** argv) {
     LOG_INF("  total prompt tokens  : %d\n", total_prompt_tokens);
     LOG_INF("  total decoded tokens : %d\n", total_decoded_tokens);
     LOG_INF("  aggregate tps        : %.2f tokens/s\n", agg_tps);
+    if (params.paged_timing) {
+        LOG_INF("  prefill tokens       : %d\n", prefill_tokens);
+        LOG_INF("  prefill time         : %.3f ms\n", prefill_us / 1000.0);
+        LOG_INF("  pp t/s               : %.2f\n", pp_tps);
+        LOG_INF("  decode tokens        : %d\n", decode_tokens);
+        LOG_INF("  decode time          : %.3f ms\n", decode_us / 1000.0);
+        LOG_INF("  tg t/s               : %.2f\n", tg_tps);
+        if (mixed_us > 0) {
+            LOG_INF("  mixed phase time     : %.3f ms (excluded)\n", mixed_us / 1000.0);
+        }
+    }
     LOG_INF("  --- per-request latency ---\n");
     LOG_INF("  ttft  avg / min / max : %.1f / %.1f / %.1f ms\n", avg_ttft_ms, min_ttft_ms, max_ttft_ms);
     LOG_INF("  tpot  avg             : %.1f ms/token\n", avg_tpot_ms);

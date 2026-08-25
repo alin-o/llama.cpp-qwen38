@@ -18,6 +18,12 @@ llama-paged -m model.gguf -kvp -ngl 100 -sm none -mg 0 \
 - `-ns N`: number of sequences to queue
 - `-np N`: maximum sequences decoded in parallel (must equal `-ns` in this example)
 
+## Timing mode
+
+Pass `--timing` to report prefill (`pp t/s`) and decode (`tg t/s`) throughput measured around `llama_decode` and synchronization. Tokenization, sampling, scheduler work, and model loading are excluded. Use `-p PROMPT` to run every sequence with the same benchmark prompt; without it, the built-in prompt pool is used.
+
+For directly comparable phase timings, use equal-length prompts submitted together. A scheduler batch that mixes prefill and decode work is reported as `mixed phase time` and excluded from both rates.
+
 ## Phase 1 restrictions
 The paged path currently requires:
 - Single device (fully loaded on one GPU or CPU). Use `-sm none -mg <id>` to pin to one GPU on multi-GPU machines.

@@ -1728,6 +1728,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_KV_PAGED").set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_PAGED}));
     add_opt(common_arg(
+        {"--timing"},
+        "report separate prefill and decode throughput",
+        [](common_params & params) {
+            params.paged_timing = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_PAGED}));
+    add_opt(common_arg(
         {"-ncpub", "--n-cpu-blocks"}, "N",
         "number of physical CPU blocks for paged KV cache (default: 1)",
         [](common_params & params, int value) {
