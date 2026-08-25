@@ -28,10 +28,9 @@ Known baseline failures in the agent sandbox (not regressions; do not chase them
 Environmental (sandbox constraints; may pass elsewhere or when the host GPU is idle):
 - `test-tokenizers-ggml-vocabs`: needs git-lfs fixtures; the files here are LFS pointers and git-lfs is not installed
 - `test-arg-parser`: the "test good URL" step does a live HTTP GET to http://ggml.ai; the sandbox has no network egress
-- `test-backend-ops`: the full op matrix exhausts the sandbox's free VRAM (the host normally uses most of the card; only ~2 GB is free) and segfaults late in the run. Isolated op runs (`-o <op>`) pass; rerun the full matrix when the host GPU is idle
 
 Fork code bugs (pre-existing; need dedicated fix tasks - do not fix them silently as a side effect of other work):
 - `test-quantize-fns`: SEGFAULT, CPU-only quantization functions; predates sandbox GPU enablement
 - `test-quantize-perf`: SEGFAULT in the q2_0 `quantize_row_q_reference` benchmark; CPU-only; predates sandbox GPU enablement
 
-A failure is a regression only when it is not in the list above, or when a previously passing test now fails. The tiny test model `tinyllamas/stories15M-q4_0.gguf` (fetched by the `test-download-model` fixture into `build-verify/tinyllamas/`) can be run in the sandbox on the limited GPU (force `-dev cuda0`, single turn `-st`); the 27B working set and servers must stay on the host.
+A failure is a regression only when it is not in the list above, or when a previously passing test now fails. The tiny test model `tinyllamas/stories15M-q4_0.gguf` (fetched by the `test-download-model` fixture into `build-verify/tinyllamas/`) and the 27B working set can be run in the sandbox when relevant (force `-dev cuda0` and use a single turn with `-st` for focused tiny-model checks).

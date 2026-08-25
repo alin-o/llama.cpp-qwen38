@@ -1,11 +1,11 @@
 ---
 trigger: model_decision
-description: Use when building, running, or testing llama.cpp binaries or models in this sandbox; covers the 2 GB GPU-slice sandbox, the /models cache mount, and the run.sh + model-configs/ execution flow.
+description: Use when building, running, or testing llama.cpp binaries or models in this sandbox; covers full-GPU execution, the /models cache mount, and the run.sh + model-configs/ execution flow.
 ---
 
 # Sandbox and execution environment
 
-- Agents run in a docker sandbox with a 2 GB VRAM slice of the host GPU. Small test models (the ctest fixture set, a few MB to tens of MB each) fit, so CUDA test paths can run here. The 27B working set does not fit and runs on the host.
+- Agents run in a docker sandbox with access to the host GPU's full available memory. CUDA test paths and the 27B working set can run in the sandbox, subject to normal model and workload requirements.
 - `/models` is the host cache root (`/mnt/S/.cache/llama.cpp/`), writable. It holds the `qwen38/` working set (trunks, MTP/DSpark drafters, wikitext) plus other store entries. Top-level HF/Ollama entries whose real weights live in the unmounted `blobs/` dir are dead symlinks - repair by re-download (see hf-model-downloads.md).
 - Path trap: inside the compose run container, `/models` is the model dir named by `QWEN38_MODEL_DIR` (compose default: the cache root; the qwen38 configs point it at the `qwen38/unsloth-...` dir) and `/qwen38-cache` the cache root - same path names as in the sandbox, different trees.
 - To run a model, use `./run.sh [model]` (verbs: list, status, logs, stop). Per-model settings live in `model-configs/<model>.env` (KEY=VALUE, sourced into the compose environment; non-empty caller env vars override with a printed note). It wraps `docker compose -f docker-compose.yml --profile upstream up -d --build upstream-candidate` built from `docker/Dockerfile`, waits for /health, then tails the logs.
@@ -20,4 +20,4 @@ description: Use when building, running, or testing llama.cpp binaries or models
 - Ornith is reasoning-first: its tokens land in reasoning_content, so visible content is empty until the reasoning block closes - test with a generous max_tokens to see real text.
 
 - When a downloaded GGUF fails to load, read its general.architecture from the GGUF header (first KV string) and grep src/llama-arch.cpp for that name to confirm the build supports it, rather than assuming the image is too old. Ornith's header reports qwen35moe, which this tree supports (src/models/qwen35moe.cpp) - no rebuild needed.
-- Agents verify code changes with `.agent/verify.sh` (build + `ctest -L main`), which may load the small test models on the 2 GB GPU. For real-model validation (the 27B qwen38 working set), state exactly in the task evidence what the user should run on the host.
+- Agents verify code changes with `.agent/verify.sh` (build + `ctest -L main`), which may load test models on the full GPU. Real-model validation, including the 27B qwen38 working set, can run in the sandbox when relevant.
