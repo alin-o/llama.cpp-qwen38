@@ -8,8 +8,8 @@
 # Optional: CTX NP CACHE_PROFILE CACHE_REUSE THREADS THREADS_HTTP HOST PORT
 #           SLOT_PROMPT_CACHE_THRESHOLD SLOT_SAVE_PATH
 #           MMPROJ_GGUF   attach a vision tower when the file exists
-#           SPEC=mtp      load a separate MTP head from MTP_GGUF
-#                         (no embedded-head detection here; pass the file)
+#           SPEC=mtp      run the MTP head: a separate file from MTP_GGUF,
+#                         or the head embedded in MODEL_GGUF (nextn.* tensors)
 #           KV_PAGED=1    experimental paged KV block pool instead of the
 #                         unified buffer (tune with KV_BLOCK_SIZE,
 #                         N_GPU_BLOCKS, N_CPU_BLOCKS, KV_PAGED_WATERMARK)
@@ -91,12 +91,23 @@ if [[ -n "${MMPROJ_GGUF:-}" ]]; then
     ARGS+=(--mmproj "$MMPROJ_GGUF" --no-mmproj-offload)
 fi
 
+# An MTP head can live inside the trunk GGUF itself (NextN/MTP tensors,
+# blk.<n>.nextn.*). Detect it by scanning the file, as the qwen38 entrypoint
+# does; --spec-type draft-mtp then runs the head without --spec-draft-model.
+has_embedded_mtp_head() {
+    LC_ALL=C grep -aq 'nextn\.' "$1" 2>/dev/null
+}
 if [[ "${SPEC:-off}" == "mtp" ]]; then
-    [[ -n "${MTP_GGUF:-}" && -f "${MTP_GGUF}" ]] \
-        || { echo "error: SPEC=mtp needs MTP_GGUF (separate head file)" >&2; exit 1; }
+    if [[ -n "${MTP_GGUF:-}" ]]; then
+        [[ -f "${MTP_GGUF}" ]] || { echo "error: missing MTP head: $MTP_GGUF" >&2; exit 1; }
+        ARGS+=(--spec-type draft-mtp --spec-draft-model "$MTP_GGUF")
+    elif has_embedded_mtp_head "$MODEL"; then
+        ARGS+=(--spec-type draft-mtp)
+    else
+        echo "error: SPEC=mtp needs MTP_GGUF (separate head file) or an embedded MTP head (nextn.* tensors) in the model" >&2
+        exit 1
+    fi
     ARGS+=(
-        --spec-type draft-mtp
-        --spec-draft-model "$MTP_GGUF"
         --spec-draft-n-max "${DRAFT_MAX:-4}"
         --spec-draft-type-k "${DRAFT_CACHE_K:-q8_0}"
         --spec-draft-type-v "${DRAFT_CACHE_V:-q8_0}"

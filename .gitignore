@@ -85,6 +85,7 @@
 /tools/server/*.js.hpp
 /tools/server/*.mjs.hpp
 /tools/server/*.gz.hpp
+!/build.sh
 !/build_64.sh
 !/examples/*.bat
 !/examples/*/*.kts

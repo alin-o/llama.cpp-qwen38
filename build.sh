@@ -1,0 +1,1 @@
+docker compose --profile upstream build upstream-candidate
