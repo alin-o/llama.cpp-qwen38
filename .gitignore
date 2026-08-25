@@ -158,3 +158,5 @@ AGENTS.local.md
 AGENTS.override.md
 .pi/SYSTEM.md
 .hf-cache
+
+/benchmark-results/
