@@ -43,6 +43,7 @@ services:
     environment:
       MODEL_GGUF: ${MODEL_GGUF:-}
       MTP_GGUF: ${MTP_GGUF:-}
+      MMPROJ_GGUF: ${MMPROJ_GGUF:-}
       CACHE_ROOT: ${CACHE_ROOT:-/qwen38-cache}
       CACHE_PROFILE: ${CACHE_PROFILE:-turbo4}
       SPEC: ${SPEC:-mtp}
