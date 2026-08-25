@@ -1563,7 +1563,7 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
         common_set_adapter_lora(lctx, params.lora_adapters);
     }
 
-    if (params.warmup) {
+    if (params.warmup && !params.kv_paged) {
         COM_TRC("%s", "warming up the model with an empty run - please wait ... (--no-warmup to disable)\n");
 
         std::vector<llama_token> tmp;

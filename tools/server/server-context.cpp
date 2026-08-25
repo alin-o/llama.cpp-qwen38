@@ -836,6 +836,56 @@ private:
     llama_context * ctx_tgt = nullptr;
 
     server_batch batch;
+    std::unique_ptr<llama_paged_scheduler, decltype(&llama_paged_scheduler_free)> paged_scheduler{nullptr, llama_paged_scheduler_free};
+    llama_batch paged_batch = {};
+
+    bool update_slots_paged() {
+        if (!llama_paged_scheduler_prepare_batch(paged_scheduler.get(), &paged_batch)) {
+            throw std::runtime_error("paged scheduler failed to prepare batch");
+        }
+        if (paged_batch.n_tokens == 0) {
+            return false;
+        }
+        const auto * info = llama_paged_scheduler_get_batch_info(paged_scheduler.get());
+        if (info == nullptr) {
+            throw std::runtime_error("paged scheduler returned no batch info");
+        }
+        std::vector<llama_token> sampled_tokens(info->n_seq);
+        std::vector<int8_t> stop_flags(info->n_seq, 0);
+        for (int i = 0; i < info->n_seq; ++i) {
+            const int slot_id = paged_batch.seq_id[info->batch_offsets[i]][0];
+            server_slot & slot = slots[slot_id];
+            if (slot.state == SLOT_STATE_STARTED) {
+                slot.prompt.clear();
+                slot.prompt.tokens.insert(slot.task->tokens.get_text_tokens());
+                slot.state = SLOT_STATE_PROCESSING_PROMPT;
+                slot.stats.update_prompt_start();
+                slot.stats.n_prompt_processed = slot.prompt.n_tokens();
+                slot.init_sampler();
+                slot.state = SLOT_STATE_DONE_PROMPT;
+            }
+            const int token_idx = info->batch_offsets[i] + info->batch_lens[i] - 1;
+            const llama_token id = common_sampler_sample(slot.smpl.get(), ctx_tgt, token_idx);
+            common_sampler_accept(slot.smpl.get(), id, true);
+            completion_token_output result;
+            result.tok = id;
+            result.text_to_send = common_token_to_piece(ctx_tgt, id, params_base.special);
+            result.prob = 1.0f;
+            slot.stats.n_gen++;
+            sampled_tokens[i] = id;
+            if (!process_token(result, slot)) {
+                stop_flags[i] = 1;
+                slot.print_timings();
+                send_final_response(slot);
+                slot.release();
+            } else {
+                slot.prompt.tokens.push_back(id);
+                slot.state = SLOT_STATE_GENERATING;
+            }
+        }
+        llama_paged_scheduler_update(paged_scheduler.get(), &paged_batch, sampled_tokens.data(), stop_flags.data());
+        return true;
+    }
 
     llama_model   * model_dft = nullptr;
     llama_context * ctx_dft   = nullptr;
@@ -972,7 +1022,9 @@ private:
                                         params_base.speculative.types.end(),
                                         COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end();
         const bool has_spec = has_draft || spec_mtp;
-
+        if (params.kv_paged && (has_spec || params.ctx_shift || params.n_cache_reuse)) {
+            throw std::runtime_error("--kv-paged does not support speculative decoding, context shift, or KV cache reuse");
+        }
         if (callback_state) {
             std::vector<std::string> stages = {"text_model"};
             if (has_spec) {
@@ -1158,7 +1210,7 @@ private:
 
         slots.clear();
 
-        ctx_tgt_seq_rm_type = common_context_can_seq_rm(ctx_tgt);
+        ctx_tgt_seq_rm_type = params_base.kv_paged ? COMMON_CONTEXT_SEQ_RM_TYPE_NO : common_context_can_seq_rm(ctx_tgt);
         if (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
             SRV_WRN("%s", "speculative decoding not supported by this context\n");
         }
@@ -1174,6 +1226,13 @@ private:
         // initialize slots
         for (int i = 0; i < params_base.n_parallel; i++) {
             slots.emplace_back();
+        }
+        if (params_base.kv_paged) {
+            paged_scheduler.reset(llama_paged_scheduler_init(ctx_tgt));
+            if (!paged_scheduler) {
+                SRV_ERR("%s", "failed to initialize paged KV scheduler\n");
+                return false;
+            }
         }
 
         // try speculative decoding
@@ -1703,6 +1762,10 @@ private:
         // the per-request limit takes priority over the global one
         slot.n_predict_max = task.params.n_predict != -1 ? task.params.n_predict : params_base.n_predict;
 
+        if (params_base.kv_paged && !llama_paged_scheduler_add_request(paged_scheduler.get(), task.tokens.get_text_tokens().data(), task.tokens.size(), slot.id)) {
+            send_error(task, "failed to queue request in paged KV scheduler", ERROR_TYPE_SERVER);
+            return false;
+        }
         slot.task = std::make_unique<const server_task>(std::move(task));
 
         slot.state = slot.task->is_child()
@@ -2703,6 +2766,10 @@ private:
             }
         }
 
+        if (params_base.kv_paged) {
+            update_slots_paged();
+            return;
+        }
         try {
             scoped_timer t(t_pre_decode, n_pre_decode);
             pre_decode();
