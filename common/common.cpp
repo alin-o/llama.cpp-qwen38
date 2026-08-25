@@ -1300,7 +1300,7 @@ static void common_fit_paged_kv_blocks(common_params & params, const llama_model
 
     const uint32_t n_heads_kv = llama_model_n_head_kv(model);
     const uint32_t n_layers   = llama_model_n_layer(model);
-    const uint32_t head_dim   = llama_model_n_embd(model) / llama_model_n_head(model);
+    const uint32_t head_dim   = llama_model_n_embd_head_v(model);
     const uint32_t block_size = params.block_size;
 
     const size_t bytes_per_block = (size_t)2 * head_dim * n_heads_kv * block_size * n_layers * ggml_type_size(GGML_TYPE_F16);

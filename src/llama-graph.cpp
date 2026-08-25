@@ -3496,11 +3496,11 @@ llm_graph_input_attn_kv_msa * llm_graph_context::build_attn_inp_kv_msa(bool msa_
     return (llm_graph_input_attn_kv_msa *) res->add_input(std::move(inp));
 }
 
-llm_graph_input_attn_kv_paged * llm_graph_context::build_attn_inp_kv_paged() const {
-    return build_attn_inp_kv_paged(static_cast<const llama_kv_cache_paged_context *>(mctx));
-}
-
-llm_graph_input_attn_kv_paged * llm_graph_context::build_attn_inp_kv_paged(const llama_kv_cache_paged_context * mctx_paged) const {
+static std::unique_ptr<llm_graph_input_attn_kv_paged> build_attn_inp_kv_paged_impl(
+        ggml_context * ctx0,
+        const llama_hparams & hparams,
+        const llama_cparams & cparams,
+        const llama_kv_cache_paged_context * mctx_paged) {
     auto inp = std::make_unique<llm_graph_input_attn_kv_paged>(hparams, cparams, mctx_paged);
     const int32_t n_tokens = cparams.n_batch;
     const int32_t batch_size = mctx_paged->get_batch_size();
@@ -3515,6 +3515,15 @@ llm_graph_input_attn_kv_paged * llm_graph_context::build_attn_inp_kv_paged(const
     ggml_set_input(inp->paged_context_lens);
     ggml_set_input(inp->paged_batch_offsets);
     ggml_set_input(inp->paged_batch_lens);
+
+    return inp;
+}
+
+llm_graph_input_attn_kv_paged * llm_graph_context::build_attn_inp_kv_paged() const {
+    const auto * mctx_cur = static_cast<const llama_kv_cache_paged_context *>(mctx);
+
+    auto inp = build_attn_inp_kv_paged_impl(ctx0, hparams, cparams, mctx_cur);
+
     return (llm_graph_input_attn_kv_paged *) res->add_input(std::move(inp));
 }
 
@@ -3741,9 +3750,11 @@ llm_graph_input_mem_hybrid * llm_graph_context::build_inp_mem_hybrid() const {
 
 llm_graph_input_mem_hybrid_paged * llm_graph_context::build_inp_mem_hybrid_paged() const {
     const auto * mctx_cur = static_cast<const llama_memory_hybrid_paged_context *>(mctx);
-    auto inp_rs = build_rs_inp_impl(ctx0, ubatch, mctx_cur->get_recr());
-    auto inp_attn = std::unique_ptr<llm_graph_input_attn_kv_paged>(build_attn_inp_kv_paged(mctx_cur->get_attn()));
+    auto inp_rs   = build_rs_inp_impl(ctx0, ubatch, mctx_cur->get_recr());
+    auto inp_attn = build_attn_inp_kv_paged_impl(ctx0, hparams, cparams, mctx_cur->get_attn());
+
     auto inp = std::make_unique<llm_graph_input_mem_hybrid_paged>(cparams, std::move(inp_attn), std::move(inp_rs), mctx_cur);
+
     return (llm_graph_input_mem_hybrid_paged *) res->add_input(std::move(inp));
 }
 

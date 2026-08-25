@@ -1343,7 +1343,6 @@ struct llm_graph_context {
 
     llm_graph_input_attn_k_iswa * build_attn_inp_k_iswa() const;
 
-    llm_graph_input_attn_kv_paged * build_attn_inp_kv_paged(const llama_kv_cache_paged_context * mctx) const;
     // note: if k_cur is not provided, it will not be stored in the memory
     // note: the K cache is used as V (MLA-style attention)
     ggml_tensor * build_attn(

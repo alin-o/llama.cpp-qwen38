@@ -1,6 +1,7 @@
 #include "ggml.h"
 #include "llama-context.h"
 #include "llama-impl.h"
+#include "llama-memory-hybrid-paged.h"
 #include "llama-paged-scheduler-impl.h"
 
 struct llama_paged_scheduler {
@@ -15,8 +16,11 @@ LLAMA_API struct llama_paged_scheduler * llama_paged_scheduler_init(struct llama
         return nullptr;
     }
 
-    // Get the paged kv cache
-    auto * paged_kv = dynamic_cast<llama_kv_cache_paged *>(ctx->get_memory());
+    auto * memory = ctx->get_memory();
+    auto * paged_kv = dynamic_cast<llama_kv_cache_paged *>(memory);
+    if (auto * hybrid = dynamic_cast<llama_memory_hybrid_paged *>(memory)) {
+        paged_kv = hybrid->get_mem_attn();
+    }
     if (!paged_kv) {
         LLAMA_LOG_ERROR(
             "%s: context does not have a paged KV cache. "
