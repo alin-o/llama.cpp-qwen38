@@ -95,8 +95,8 @@
 # Python
 
 /.venv
-qwen38/.venv-speed-bench/
-qwen38/results/
+docker/.venv-speed-bench/
+docker/results/
 __pycache__/
 */poetry.lock
 poetry.toml

@@ -18,5 +18,4 @@ download Qwen3.8-27B-UD-Q4_K_XL.gguf
 download MTP/mtp-Qwen3.8-27B-Q4_0.gguf
 download mmproj-BF16.gguf
 
-(cd "$MODEL_DIR" && sha256sum -c "${ROOT}/qwen38/artifacts.sha256")
-
+(cd "$MODEL_DIR" && sha256sum -c "${ROOT}/docker/artifacts.sha256")

@@ -6,13 +6,16 @@ set -euo pipefail
 # Usage: CACHE_PROFILE=turbo3,turbo4,t3k-t4v,t4k-t3v DEPTH=8192 ./bench-turbo.sh
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-COMPOSE=(docker compose -f "${ROOT}/docker-compose.qwen38.yml")
+# /models must be the unsloth store for these runs (compose default is the
+# cache root); this bench references /models/<file> paths directly.
+export QWEN38_MODEL_DIR="${QWEN38_MODEL_DIR:-/mnt/S/.cache/llama.cpp/qwen38/unsloth-Qwen3.8-27B-GGUF-27af057e}"
+COMPOSE=(docker compose -f "${ROOT}/docker-compose.yml")
 MODEL=/models/Qwen3.8-27B-UD-Q4_K_XL.gguf
 PROFILES="${CACHE_PROFILE:-turbo4,turbo3,t3k-t4v,t4k-t3v}"
 DEPTH="${DEPTH:-16384}"
 PP="${PP:-512}"
 TG="${TG:-256}"
-RESULTS_DIR="${RESULTS_DIR:-${ROOT}/qwen38/results/$(date -u +%Y%m%dT%H%M%SZ)-bench-turbo}"
+RESULTS_DIR="${RESULTS_DIR:-${ROOT}/docker/results/$(date -u +%Y%m%dT%H%M%SZ)-bench-turbo}"
 mkdir -p "$RESULTS_DIR"
 
 for profile in ${PROFILES//,/ }; do

@@ -3,11 +3,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 BASE_URL="${BASE_URL:-http://127.0.0.1:8882/v1}"
-RESULTS_DIR="${RESULTS_DIR:-${ROOT}/qwen38/results/codex-smoke}"
+RESULTS_DIR="${RESULTS_DIR:-${ROOT}/docker/results/codex-smoke}"
 FIXTURE_DIR="$(mktemp -d)"
 trap 'rm -rf "$FIXTURE_DIR"' EXIT
 
-cp -a "${ROOT}/qwen38/codex-fixture/." "$FIXTURE_DIR/"
+cp -a "${ROOT}/docker/codex-fixture/." "$FIXTURE_DIR/"
 git -C "$FIXTURE_DIR" init -q
 mkdir -p "$RESULTS_DIR"
 
@@ -27,6 +27,6 @@ codex exec \
     2>&1 | tee "${RESULTS_DIR}/codex.log"
 
 python3 "${FIXTURE_DIR}/test_math_utils.py"
-cmp "${ROOT}/qwen38/codex-fixture/test_math_utils.py" "${FIXTURE_DIR}/test_math_utils.py"
+cmp "${ROOT}/docker/codex-fixture/test_math_utils.py" "${FIXTURE_DIR}/test_math_utils.py"
 cp "$FIXTURE_DIR/math_utils.py" "${RESULTS_DIR}/math_utils.py"
-cp "${ROOT}/qwen38/codex-fixture/PASS" "${RESULTS_DIR}/status.txt"
+cp "${ROOT}/docker/codex-fixture/PASS" "${RESULTS_DIR}/status.txt"

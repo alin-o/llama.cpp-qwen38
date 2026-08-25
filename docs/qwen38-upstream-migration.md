@@ -1,6 +1,6 @@
 # Qwen3.8 27B upstream migration
 
-This checkout is pinned by `qwen38/upstream.lock`. The existing TurboQuant repository is a read-only comparison target and remains the rollback deployment.
+This checkout is pinned by `docker/upstream.lock`. The existing TurboQuant repository is a read-only comparison target and remains the rollback deployment.
 
 ## Artifacts
 
@@ -20,18 +20,18 @@ python3 scripts/qwen38/verify-gguf.py \
   --target /mnt/S/.cache/llama.cpp/qwen38/unsloth-Qwen3.8-27B-GGUF-27af057e/Qwen3.8-27B-UD-Q4_K_XL.gguf \
   --mtp /mnt/S/.cache/llama.cpp/qwen38/unsloth-Qwen3.8-27B-GGUF-27af057e/MTP/mtp-Qwen3.8-27B-Q4_0.gguf \
   --mmproj /mnt/S/.cache/llama.cpp/qwen38/unsloth-Qwen3.8-27B-GGUF-27af057e/mmproj-BF16.gguf \
-  --json qwen38/results/artifact-preflight.json
+  --json docker/results/artifact-preflight.json
 ```
 
-The SHA-256 values are recorded in `qwen38/artifacts.sha256`. Runtime commands use explicit local paths and never use `-hf`.
+The SHA-256 values are recorded in `docker/artifacts.sha256`. Runtime commands use explicit local paths and never use `-hf`.
 
 ## Build and short matrix
 
 Both images use CUDA 13.1, compute capability 8.9, static libraries, flash attention, and the same compiler image.
 
 ```bash
-docker compose -f docker-compose.qwen38.yml --profile upstream build upstream-candidate
-docker compose -f docker-compose.qwen38.yml --profile fork build fork-candidate
+docker compose -f docker-compose.yml --profile upstream build upstream-candidate
+docker compose -f docker-compose.yml --profile fork build fork-candidate
 ./scripts/qwen38/run-matrix.sh
 ```
 
@@ -85,7 +85,7 @@ python3 scripts/qwen38/soak.py \
   --base-url http://127.0.0.1:8882 \
   --hours 24 \
   --minimum-requests 100 \
-  --output qwen38/results/soak.json
+  --output docker/results/soak.json
 
 BASE_URL=http://127.0.0.1:8882/v1 ./scripts/qwen38/codex-smoke.sh
 ```
@@ -96,18 +96,18 @@ Generate the single decision report after every gate has finished:
 
 ```bash
 python3 scripts/qwen38/finalize-report.py \
-  --matrix-dir qwen38/results/MATRIX_DIR \
-  --quality qwen38/results/PPL_DIR/quality.json \
-  --soak qwen38/results/soak.json \
-  --codex-status qwen38/results/codex-smoke/status.txt \
-  --output qwen38/results/comparison-report.md
+  --matrix-dir docker/results/MATRIX_DIR \
+  --quality docker/results/PPL_DIR/quality.json \
+  --soak docker/results/soak.json \
+  --codex-status docker/results/codex-smoke/status.txt \
+  --output docker/results/comparison-report.md
 ```
 
 Before finalizing, refresh the environment record used by the report:
 
 ```bash
 python3 scripts/qwen38/record-environment.py \
-  --output qwen38/results/environment.json
+  --output docker/results/environment.json
 ```
 
 ## Rollout and rollback

@@ -3,7 +3,9 @@ name: qwen38-evaluation
 x-runtime: &runtime
   restart: "no"
   volumes:
-    - ${QWEN38_MODEL_DIR:-/mnt/S/.cache/llama.cpp/qwen38/unsloth-Qwen3.8-27B-GGUF-27af057e}:/models:ro
+    # /models = the model dir named by QWEN38_MODEL_DIR (set per model in
+    # model-configs/<model>.env; default: the cache root).
+    - ${QWEN38_MODEL_DIR:-/mnt/S/.cache/llama.cpp}:/models:ro
   cpuset: "0-7"
   deploy:
     resources:
@@ -28,14 +30,15 @@ services:
     profiles: [upstream]
     build:
       context: .
-      dockerfile: qwen38/Dockerfile
+      dockerfile: docker/Dockerfile
     image: qwen38-upstream:b10502
     ports:
       - "${QWEN38_UPSTREAM_PORT:-8882}:8080"
     volumes:
-      - ${QWEN38_MODEL_DIR:-/mnt/S/.cache/llama.cpp/qwen38/unsloth-Qwen3.8-27B-GGUF-27af057e}:/models:ro
+      - ${QWEN38_MODEL_DIR:-/mnt/S/.cache/llama.cpp}:/models:ro
       - ${QWEN38_CACHE_ROOT:-/mnt/S/.cache/llama.cpp/qwen38}:/qwen38-cache:ro
       - ./scripts/qwen38:/qwen38:ro
+      - ./docker/run-model-server.sh:/docker/run-model-server.sh:ro
       - qwen38_upstream_state:/state
     environment:
       MODEL_GGUF: ${MODEL_GGUF:-}
@@ -58,7 +61,7 @@ services:
       LLAMA_ARG_CACHE_RAM: "16384"
       LLAMA_ARG_LOG_VERBOSITY: "3"
     # MODEL_ENTRYPOINT switches launchers: the qwen38 script is the default,
-    # model configs for other models point at run-model-server.sh instead.
+    # model configs for other models point at /docker/run-model-server.sh.
     entrypoint: ["/bin/bash", "${MODEL_ENTRYPOINT:-/qwen38/run-upstream-server.sh}"]
 
   fork-candidate:
@@ -71,7 +74,7 @@ services:
     ports:
       - "${QWEN38_FORK_PORT:-8883}:8080"
     volumes:
-      - ${QWEN38_MODEL_DIR:-/mnt/S/.cache/llama.cpp/qwen38/unsloth-Qwen3.8-27B-GGUF-27af057e}:/models:ro
+      - ${QWEN38_MODEL_DIR:-/mnt/S/.cache/llama.cpp}:/models:ro
       - ${QWEN38_CACHE_ROOT:-/mnt/S/.cache/llama.cpp/qwen38}:/qwen38-cache:ro
       - ./scripts/qwen38:/qwen38:ro
       - qwen38_fork_state:/state

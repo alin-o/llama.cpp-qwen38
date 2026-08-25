@@ -25,7 +25,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-COMPOSE_FILE="docker-compose.qwen38.yml"
+COMPOSE_FILE="docker-compose.yml"
 SERVICE="upstream-candidate"
 CONFIG_DIR="model-configs"
 DEFAULT_MODEL="qwen38-xl"

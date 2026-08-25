@@ -5,7 +5,7 @@ This is a private fork of ggml-org/llama.cpp for a single-user setup. Agents do 
 ## Setup
 
 - Hardware target: one RTX 4090, 24 GB VRAM, CUDA backend. Pick context length, batch size, and quantization to fit that; do not assume more VRAM or more than one GPU.
-- Remotes: `origin` is this fork, `upstream` is ggml-org/llama.cpp. Sync from upstream only when the user asks, on the branch they name. On conflicts in fork-specific files (this file, `model-configs/`, `scripts/qwen38/`, `docker-compose.qwen38.yml`, `run.sh`), keep the fork version unless the user says otherwise.
+- Remotes: `origin` is this fork, `upstream` is ggml-org/llama.cpp. Sync from upstream only when the user asks, on the branch they name. On conflicts in fork-specific files (this file, `model-configs/`, `scripts/qwen38/`, `docker-compose.yml`, `run.sh`), keep the fork version unless the user says otherwise.
 - Real-model inference and model servers (docker-compose, qwen38 scripts) run on the host by the user. Agents build in the sandbox and may run the small ctest/tiny test models there on the limited 2 GB GPU slice, but never run the 27B working set or start servers (see `.agent/rules/sandbox-and-execution.md`).
 
 ## Verification

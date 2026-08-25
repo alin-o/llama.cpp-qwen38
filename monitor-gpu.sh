@@ -16,7 +16,7 @@ for command in docker nvidia-smi; do
 done
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-compose=(docker compose -f "$script_dir/docker-compose.qwen38.yml" --profile upstream)
+compose=(docker compose -f "$script_dir/docker-compose.yml" --profile upstream)
 service=upstream-candidate
 
 begin_frame() {

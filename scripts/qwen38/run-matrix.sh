@@ -2,8 +2,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-COMPOSE=(docker compose -f "${ROOT}/docker-compose.qwen38.yml")
-RESULTS_DIR="${RESULTS_DIR:-${ROOT}/qwen38/results/$(date -u +%Y%m%dT%H%M%SZ)-matrix}"
+# /models must be the unsloth store for these runs (compose default is the
+# cache root); both entrypoints resolve trunk/MTP/mmproj under /models.
+export QWEN38_MODEL_DIR="${QWEN38_MODEL_DIR:-/mnt/S/.cache/llama.cpp/qwen38/unsloth-Qwen3.8-27B-GGUF-27af057e}"
+COMPOSE=(docker compose -f "${ROOT}/docker-compose.yml")
+RESULTS_DIR="${RESULTS_DIR:-${ROOT}/docker/results/$(date -u +%Y%m%dT%H%M%SZ)-matrix}"
 LONG_CONTEXT="${LONG_CONTEXT:-0}"
 PROFILE_SET="${PROFILE_SET:-all}"
 mkdir -p "$RESULTS_DIR"

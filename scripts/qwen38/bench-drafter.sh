@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # speed-bench comparison of drafters: off vs mtp vs dspark, all on turbo4 KV.
 # Restarts the upstream-candidate container per config (port 8881) and runs the
-# speed-bench client against it. Results go to qwen38/results/<ts>-bench-drafter/.
+# speed-bench client against it. Results go to docker/results/<ts>-bench-drafter/.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-VENV_PY="$ROOT/qwen38/.venv-speed-bench/bin/python"
-export HF_HOME="$ROOT/qwen38/.hf-cache"
+VENV_PY="$ROOT/docker/.venv-speed-bench/bin/python"
+export HF_HOME="$ROOT/docker/.hf-cache"
 SB="$ROOT/tools/server/bench/speed-bench/speed_bench.py"
-COMPOSE_FILE="$ROOT/docker-compose.qwen38.yml"
+# /models must be the unsloth store for these runs (compose default is the
+# cache root); this bench references /models/<file> paths directly.
+export QWEN38_MODEL_DIR="${QWEN38_MODEL_DIR:-/mnt/S/.cache/llama.cpp/qwen38/unsloth-Qwen3.8-27B-GGUF-27af057e}"
+COMPOSE_FILE="$ROOT/docker-compose.yml"
 PORT="${QWEN38_UPSTREAM_PORT:-8881}"
-RESULTS_DIR="$ROOT/qwen38/results/$(date -u +%Y%m%dT%H%M%SZ)-bench-drafter"
+RESULTS_DIR="$ROOT/docker/results/$(date -u +%Y%m%dT%H%M%SZ)-bench-drafter"
 mkdir -p "$RESULTS_DIR"
 
 # fixed bench params (identical for every config/category)

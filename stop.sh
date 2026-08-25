@@ -1,2 +1,2 @@
-docker compose -f docker-compose.qwen38.yml \
+docker compose -f docker-compose.yml \
   --profile upstream stop upstream-candidate
