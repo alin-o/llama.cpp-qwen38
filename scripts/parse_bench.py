@@ -1,0 +1,15 @@
+import sys, json
+d = json.load(sys.stdin)
+t = d.get("timings", {})
+u = d.get("usage", {})
+out = u.get("completion_tokens")
+ptok = u.get("prompt_tokens")
+cached = u.get("prompt_tokens_details", {}).get("cached_tokens", 0)
+tps = t.get("prompt_per_second")
+ttft = t.get("prompt_ms", 0) / 1000.0
+gps = t.get("predicted_per_second")
+tpot = t.get("predicted_per_token_ms")
+dn = t.get("draft_n", 0)
+dna = t.get("draft_n_accepted", 0)
+acc = 100.0 * dna / max(1, dn)
+print(f"out={out} prompt_tok={ptok} cached={cached} | prompt={tps:.0f}tok/s TTFT={ttft:.2f}s | gen={gps:.0f}tok/s TPOT={tpot:.2f}ms | MTP draft={dn} acc={dna} ({acc:.0f}%)")
