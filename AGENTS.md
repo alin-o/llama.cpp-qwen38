@@ -1,17 +1,18 @@
 # Instructions for llama.cpp (private fork)
 
-This is a private fork of ggml-org/llama.cpp for a single-user setup. Agents do all coding, testing, and review; the user runs real-model inference on the host. Nothing here goes upstream.
+This is a private fork of ggml-org/llama.cpp for a single-user setup. Agents do all coding, testing, review, and real-model inference validation. Nothing here goes upstream.
 
 ## Setup
 
 - Hardware target: one RTX 4090, 24 GB VRAM, CUDA backend. Pick context length, batch size, and quantization to fit that; do not assume more VRAM or more than one GPU.
 - Remotes: `origin` is this fork, `upstream` is ggml-org/llama.cpp. Sync from upstream only when the user asks, on the branch they name. On conflicts in fork-specific files (this file, `model-configs/`, `scripts/qwen38/`, `docker-compose.yml`, `run.sh`), keep the fork version unless the user says otherwise.
-- Real-model inference and model servers (docker-compose, qwen38 scripts) run on the host by the user. Agents build in the sandbox and may run the small ctest/tiny test models there on the limited 2 GB GPU slice, but never run the 27B working set or start servers (see `.agent/rules/sandbox-and-execution.md`).
+- The agent sandbox has direct access to the single RTX 4090 and the `/models` cache. Agents must run relevant 27B inference, benchmarks, and bounded server validation themselves with source-matched binaries from `build-verify`.
+- Docker and Docker Compose are not available in the sandbox. Do not hand inference testing to the user for that reason: translate the applicable `model-configs/` and container entrypoint settings into direct `build-verify/bin/llama-*` arguments. Compose deployment itself is not an agent-side validation surface.
 
 ## Verification
 
 - Canonical command: `.agent/verify.sh [extra ctest args...]` - python lint (flake8, ty when installed), Release CUDA build in `build-verify`, `ctest -L main`.
-- Sandbox baseline failures (LFS fixtures, no network egress, no CUDA init) are documented in `.agent/rules/verification.md`. Treat anything else as a regression; do not weaken checks to force a pass.
+- Sandbox baseline failures (LFS fixtures and restricted network egress) are documented in `.agent/rules/verification.md`. Treat anything else as a regression; do not weaken checks to force a pass.
 
 ## Code standards
 

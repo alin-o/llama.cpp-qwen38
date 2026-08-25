@@ -850,6 +850,10 @@ private:
         if (info == nullptr) {
             throw std::runtime_error("paged scheduler returned no batch info");
         }
+        if (llama_decode(ctx_tgt, paged_batch) != 0) {
+            throw std::runtime_error("paged scheduler decode failed");
+        }
+        llama_synchronize(ctx_tgt);
         std::vector<llama_token> sampled_tokens(info->n_seq);
         std::vector<int8_t> stop_flags(info->n_seq, 0);
         for (int i = 0; i < info->n_seq; ++i) {
