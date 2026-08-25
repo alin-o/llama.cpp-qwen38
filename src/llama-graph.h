@@ -32,6 +32,7 @@ class llama_kv_cache_paged_context;
 class llama_memory_recurrent_context;
 class llama_memory_hybrid_context;
 class llama_memory_hybrid_iswa_context;
+class llama_memory_hybrid_paged_context;
 
 // certain models (typically multi-modal) can produce different types of graphs
 enum llm_graph_type {
@@ -567,14 +568,13 @@ public:
     const llama_kv_cache_iswa_context * mctx;
 };
 
-class llm_graph_input_attn_kv_paged : public llm_graph_input_i {
+class llm_graph_input_attn_kv_paged : public llm_graph_input_attn_kv {
 public:
     llm_graph_input_attn_kv_paged(
             const llama_hparams & hparams,
             const llama_cparams & cparams,
             const llama_kv_cache_paged_context * mctx) :
-        hparams(hparams),
-        cparams(cparams),
+        llm_graph_input_attn_kv(hparams, cparams, nullptr),
         mctx(mctx) {
     }
     ~llm_graph_input_attn_kv_paged() = default;
@@ -582,18 +582,13 @@ public:
     void set_input(const llama_ubatch * ubatch) override;
     bool can_reuse(const llm_graph_params & params) override;
 
-    // The tensors the attention kernel will actually use
     ggml_tensor * paged_write_slots   = nullptr;
     ggml_tensor * paged_block_table   = nullptr;
     ggml_tensor * paged_context_lens  = nullptr;
     ggml_tensor * paged_batch_offsets = nullptr;
     ggml_tensor * paged_batch_lens    = nullptr;
 
-    const llama_hparams hparams;
-    const llama_cparams cparams;
-
-    int32_t last_n_tokens;
-
+    int32_t last_n_tokens = 0;
     const llama_kv_cache_paged_context * mctx;
 };
 
@@ -783,6 +778,28 @@ public:
     bool can_reuse(const llm_graph_params & params) override;
 
     std::map<llama_seq_id, llama_sampler *> samplers;
+};
+
+
+class llm_graph_input_mem_hybrid_paged : public llm_graph_input_i {
+public:
+    llm_graph_input_mem_hybrid_paged(
+            const llama_cparams & cparams,
+            std::unique_ptr<llm_graph_input_attn_kv_paged> inp_attn,
+            std::unique_ptr<llm_graph_input_rs> inp_rs,
+            const llama_memory_hybrid_paged_context * mctx) :
+        inp_attn(std::move(inp_attn)), inp_rs(std::move(inp_rs)), cparams(cparams), mctx(mctx) {}
+
+    void set_input(const llama_ubatch * ubatch) override;
+    bool can_reuse(const llm_graph_params & params) override;
+
+    llm_graph_input_attn_kv * get_attn() const { return inp_attn.get(); }
+    llm_graph_input_rs * get_recr() const { return inp_rs.get(); }
+
+    std::unique_ptr<llm_graph_input_attn_kv_paged> inp_attn;
+    std::unique_ptr<llm_graph_input_rs> inp_rs;
+    const llama_cparams cparams;
+    const llama_memory_hybrid_paged_context * mctx;
 };
 
 //
@@ -1326,6 +1343,7 @@ struct llm_graph_context {
 
     llm_graph_input_attn_k_iswa * build_attn_inp_k_iswa() const;
 
+    llm_graph_input_attn_kv_paged * build_attn_inp_kv_paged(const llama_kv_cache_paged_context * mctx) const;
     // note: if k_cur is not provided, it will not be stored in the memory
     // note: the K cache is used as V (MLA-style attention)
     ggml_tensor * build_attn(
@@ -1421,6 +1439,7 @@ struct llm_graph_context {
     llm_graph_input_mem_hybrid_k * build_inp_mem_hybrid_k() const;
 
     llm_graph_input_mem_hybrid_iswa * build_inp_mem_hybrid_iswa() const;
+    llm_graph_input_mem_hybrid_paged * build_inp_mem_hybrid_paged() const;
 
     //
     // pooling

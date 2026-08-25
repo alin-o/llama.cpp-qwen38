@@ -43,6 +43,7 @@ class llama_kv_cache_paged : public llama_memory_i {
 
     llama_memory_context_ptr init_full() override;
     llama_memory_context_ptr init_update(llama_context * lctx, bool optimize) override;
+    llama_memory_context_ptr prepare(const std::vector<llama_ubatch> & ubatches);
 
     struct ggml_tensor * get_kv_tensor(int layer_idx) const;
 
@@ -138,6 +139,7 @@ class llama_kv_cache_paged_context : public llama_memory_context_i {
 
     void    set_batch_data(const llama_paged_batch_info & info);
     int32_t get_n_tokens() const;
+    int32_t tokens() const { return n_tokens; }
     int32_t get_batch_size() const;
     int32_t get_max_blocks() const;
 

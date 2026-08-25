@@ -17,6 +17,7 @@
 #include "llama-kv-cache-paged.h"
 #include "llama-memory-hybrid.h"
 #include "llama-memory-hybrid-iswa.h"
+#include "llama-memory-hybrid-paged.h"
 #include "llama-memory-recurrent.h"
 
 #include "llama.h"
@@ -2387,9 +2388,29 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             return il < hparams.n_layer() && hparams.is_recr(il);
                         };
                     }
-
-                    if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
-                        // Use hybrid-iswa for hybrid models with SWA
+                    if (cparams.kv_paged && (arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_QWEN35MOE)) {
+                        GGML_ASSERT(!cparams.kv_unified && "conflicting parameters: kv_unified cannot be used with kv_paged.");
+                        res = new llama_memory_hybrid_paged(
+                            *this,
+                            hparams.n_embd_head_v(),
+                            hparams.n_head_kv(),
+                            cparams.block_size,
+                            hparams.n_layer(),
+                            cparams.n_ubatch,
+                            cparams.n_seq_max,
+                            backend_gpu,
+                            backend_cpu,
+                            params.type_k,
+                            cparams.n_gpu_blocks,
+                            cparams.n_cpu_blocks,
+                            cparams.kv_paged_watermark,
+                            GGML_TYPE_F32,
+                            GGML_TYPE_F32,
+                            std::max((uint32_t) 1, cparams.n_seq_max),
+                            cparams.n_rs_seq,
+                            cparams.offload_kqv,
+                            std::move(filter_recr));
+                    } else if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
                         res = new llama_memory_hybrid_iswa(
                             /* model             */ *this,
                             /* attn_type_k       */ params.type_k,
