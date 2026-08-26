@@ -191,6 +191,13 @@ static void test(void) {
     assert(params.model.path == "abc.gguf");
     assert(params.n_predict == 6789);
     assert(params.n_batch == 9090);
+    {
+        common_params paged_params;
+        argv = {"binary_name", "--model", "model.gguf", "--n-gpu-blocks", "64", "--n-cpu-blocks", "16"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), paged_params, LLAMA_EXAMPLE_PAGED));
+        assert(paged_params.n_gpu_blocks == 64 && paged_params.n_gpu_blocks_set);
+        assert(paged_params.n_cpu_blocks == 16 && paged_params.n_cpu_blocks_set);
+    }
 
     // --draft cannot be used outside llama-speculative
     argv = {"binary_name", "--spec-draft-n-max", "123"};

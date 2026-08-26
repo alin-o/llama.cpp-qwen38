@@ -23,7 +23,8 @@ class llama_kv_cache_paged : public llama_memory_i {
 
     void init(ggml_backend_t backend_gpu,
               ggml_backend_t backend_cpu,
-              enum ggml_type type,
+              enum ggml_type type_k,
+              enum ggml_type type_v,
               uint32_t       n_gpu_blocks,
               uint32_t       n_cpu_blocks,
               float          watermark);  // percentage
@@ -45,7 +46,8 @@ class llama_kv_cache_paged : public llama_memory_i {
     llama_memory_context_ptr init_update(llama_context * lctx, bool optimize) override;
     llama_memory_context_ptr prepare(const std::vector<llama_ubatch> & ubatches);
 
-    struct ggml_tensor * get_kv_tensor(int layer_idx) const;
+    struct ggml_tensor * get_k_tensor(int layer_idx) const;
+    struct ggml_tensor * get_v_tensor(int layer_idx) const;
 
     bool get_can_shift() const override { return false; }
 
@@ -89,14 +91,13 @@ class llama_kv_cache_paged : public llama_memory_i {
     void concat_block_ids(llama_block_ids & to_block_table, const llama_block_ids & from_block_table);
     void do_block_copy(const llama_block_ids & src_ids, const llama_block_ids & new_ids, bool to_gpu);
 
-    // Master physical buffer
-    // For CUDA: memory is interleaved
-    // For other backends: we treat the exact same memory buffer as two virtual views
-    std::vector<struct ggml_tensor *> kv_gpu_layers;
-    std::vector<struct ggml_tensor *> kv_cpu_layers;
+    std::vector<struct ggml_tensor *> k_gpu_layers;
+    std::vector<struct ggml_tensor *> v_gpu_layers;
+    std::vector<struct ggml_tensor *> k_cpu_layers;
+    std::vector<struct ggml_tensor *> v_cpu_layers;
 
-    enum ggml_type kv_type;
-
+    enum ggml_type kv_type_k;
+    enum ggml_type kv_type_v;
     llama_block_manager block_manager;
 
     // Non-owning pointer to the batch currently being processed.
@@ -114,7 +115,8 @@ class llama_kv_cache_paged : public llama_memory_i {
     const uint32_t n_seq_max;
     uint32_t       num_gpu_blocks;
     uint32_t       num_cpu_blocks;
-    uint32_t       block_bytes;
+    uint32_t       block_bytes_k;
+    uint32_t       block_bytes_v;
 
     ggml_backend_t gpu_backend;
     ggml_backend_t cpu_backend;

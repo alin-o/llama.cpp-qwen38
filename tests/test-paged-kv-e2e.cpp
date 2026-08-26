@@ -41,12 +41,23 @@ static constexpr int          N_COMPARE         = 4;  // token-equivalence windo
 static constexpr int          TOP_K             = 5;
 static constexpr int          MIN_TOP_K_OVERLAP = 4;  // at least 4 of top-5 must match
 
-// Result of running one path: prefill-final logits + sampled token sequence.
+// Result of running one path: logits and sampled token sequence.
 struct path_result {
-    std::vector<float>       prefill_logits;  // [n_vocab]
-    std::vector<llama_token> tokens;          // [N_PREDICT]
-    int                      n_vocab = 0;
+    std::vector<std::vector<float>> logits;  // [N_PREDICT][n_vocab]
+    std::vector<llama_token>        tokens;  // [N_PREDICT]
+    int                             n_vocab = 0;
 };
+
+static llama_token argmax_logits(const std::vector<float> & logits) {
+    return (llama_token) std::distance(logits.begin(), std::max_element(logits.begin(), logits.end()));
+}
+
+static std::vector<float> get_logits(llama_context * ctx, int32_t idx, int n_vocab) {
+    const float * raw = llama_get_logits_ith(ctx, idx);
+    EXPECT_TRUE(raw != nullptr);
+    return { raw, raw + n_vocab };
+}
+
 
 static path_result run_non_paged(const std::string & model_path) {
     common_params params;
@@ -68,44 +79,32 @@ static path_result run_non_paged(const std::string & model_path) {
     const llama_vocab * vocab   = llama_model_get_vocab(model);
     const int           n_vocab = llama_vocab_n_tokens(vocab);
 
-    std::vector<llama_token> prompt_tokens = common_tokenize(ctx, TEST_PROMPT, true);
+    const auto tokenize_prompt = static_cast<std::vector<llama_token> (*)(const llama_context *, const std::string &, bool, bool)>(&common_tokenize);
+    std::vector<llama_token> prompt_tokens = tokenize_prompt(ctx, TEST_PROMPT, true, false);
     EXPECT_TRUE(!prompt_tokens.empty());
 
-    // Prefill
     llama_batch batch = llama_batch_get_one(prompt_tokens.data(), prompt_tokens.size());
     EXPECT_TRUE(llama_decode(ctx, batch) == 0);
 
-    // Capture prefill-final logits BEFORE any further decode steps overwrite them.
     path_result result;
     result.n_vocab = n_vocab;
-    {
-        const float * raw = llama_get_logits_ith(ctx, -1);  // last logit
-        EXPECT_TRUE(raw != nullptr);
-        result.prefill_logits.assign(raw, raw + n_vocab);
-    }
 
-    // Sample N_PREDICT tokens for the secondary token-equivalence check.
-    common_sampler * smpl = common_sampler_init(model, params.sampling);
-    EXPECT_TRUE(smpl != nullptr);
-
-    llama_token cur = -1;
     for (int i = 0; i < N_PREDICT; ++i) {
-        cur = common_sampler_sample(smpl, ctx, -1);
-        common_sampler_accept(smpl, cur, true);
-        result.tokens.push_back(cur);
-        if (llama_vocab_is_eog(vocab, cur)) {
+        result.logits.push_back(get_logits(ctx, -1, n_vocab));
+        llama_token next = argmax_logits(result.logits.back());
+        result.tokens.push_back(next);
+        if (llama_vocab_is_eog(vocab, next)) {
             break;
         }
 
-        llama_batch step = llama_batch_get_one(&cur, 1);
+        llama_batch step = llama_batch_get_one(&next, 1);
         EXPECT_TRUE(llama_decode(ctx, step) == 0);
     }
 
-    common_sampler_free(smpl);
     return result;
 }
 
-static path_result run_paged(const std::string & model_path) {
+static path_result run_paged(const std::string & model_path, const std::vector<llama_token> & forced_tokens) {
     common_params params;
     params.model.path    = model_path;
     params.n_ctx         = 256;
@@ -117,6 +116,8 @@ static path_result run_paged(const std::string & model_path) {
     params.kv_paged      = true;
     params.n_gpu_blocks  = 64;
     params.n_cpu_blocks  = 16;
+    params.n_gpu_blocks_set = true;
+    params.n_cpu_blocks_set = true;
     params.n_sequences   = 1;
     params.n_parallel    = 1;
 
@@ -138,17 +139,12 @@ static path_result run_paged(const std::string & model_path) {
     bool ok = llama_paged_scheduler_add_request(sched, prompt_tokens.data(), prompt_tokens.size(), 0);
     EXPECT_TRUE(ok);
 
-    common_sampler * smpl = common_sampler_init(model, params.sampling);
-    EXPECT_TRUE(smpl != nullptr);
-
     path_result result;
-    result.n_vocab                      = n_vocab;
-    bool        captured_prefill_logits = false;
-    llama_batch batch                   = {};
+    result.n_vocab    = n_vocab;
+    llama_batch batch = {};
 
     while ((int) result.tokens.size() < N_PREDICT) {
-        bool prepared = llama_paged_scheduler_prepare_batch(sched, &batch);
-        EXPECT_TRUE(prepared);
+        EXPECT_TRUE(llama_paged_scheduler_prepare_batch(sched, &batch));
         if (batch.n_tokens == 0) {
             break;
         }
@@ -160,93 +156,78 @@ static path_result run_paged(const std::string & model_path) {
         EXPECT_TRUE(info != nullptr && info->n_seq == 1);
 
         const int32_t last_idx = info->batch_offsets[0] + info->batch_lens[0] - 1;
+        result.logits.push_back(get_logits(ctx, last_idx, n_vocab));
 
-        // First decode is the prefill — capture its final logits before
-        // sampling anything else.
-        if (!captured_prefill_logits) {
-            const float * raw = llama_get_logits_ith(ctx, last_idx);
-            EXPECT_TRUE(raw != nullptr);
-            result.prefill_logits.assign(raw, raw + n_vocab);
-            captured_prefill_logits = true;
-        }
-
-        llama_token next = common_sampler_sample(smpl, ctx, last_idx);
-        common_sampler_accept(smpl, next, true);
+        const llama_token argmax = argmax_logits(result.logits.back());
+        const llama_token next = result.tokens.size() < forced_tokens.size() ?
+            forced_tokens[result.tokens.size()] : argmax;
         result.tokens.push_back(next);
 
-        bool   stop      = llama_vocab_is_eog(vocab, next) || (int) result.tokens.size() >= N_PREDICT;
-        int8_t stop_flag = stop ? 1 : 0;
+        const bool stop = llama_vocab_is_eog(vocab, next) || (int) result.tokens.size() >= N_PREDICT;
+        const int8_t stop_flag = stop ? 1 : 0;
         llama_paged_scheduler_update(sched, &batch, &next, &stop_flag);
         if (stop) {
             break;
         }
     }
-
-    common_sampler_free(smpl);
     llama_paged_scheduler_free(sched);
     return result;
 }
 
-static void compare_results(const path_result & ref, const path_result & paged) {
-    auto top_k = [](const std::vector<float> & l, int k) {
-        std::vector<int> idx(l.size());
-        std::iota(idx.begin(), idx.end(), 0);
-        std::partial_sort(idx.begin(), idx.begin() + k, idx.end(), [&l](int a, int b) { return l[a] > l[b]; });
-        idx.resize(k);
-        return idx;
-    };
+static std::vector<int> top_k(const std::vector<float> & logits) {
+    std::vector<int> result(logits.size());
+    std::iota(result.begin(), result.end(), 0);
+    std::partial_sort(result.begin(), result.begin() + TOP_K, result.end(), [&logits](int a, int b) {
+        return logits[a] > logits[b];
+    });
+    result.resize(TOP_K);
+    return result;
+}
 
-    const auto top_ref   = top_k(ref.prefill_logits, TOP_K);
-    const auto top_paged = top_k(paged.prefill_logits, TOP_K);
+static void compare_logits(int step, const std::vector<float> & ref, const std::vector<float> & paged) {
+    const auto top_ref = top_k(ref);
+    const auto top_paged = top_k(paged);
 
-    // Argmax must match: the most-confident next token should be identical.
-    EXPECT_TRUE(top_ref[0] == top_paged[0]);
-
-    // Top-K set overlap: at least MIN_TOP_K_OVERLAP of the K most likely
-    // tokens must appear in both distributions.
     std::set<int> ref_set(top_ref.begin(), top_ref.end());
-    int           overlap = 0;
-    for (int t : top_paged) {
-        if (ref_set.count(t)) {
-            overlap++;
-        }
+    int overlap = 0;
+    for (int token : top_paged) {
+        overlap += ref_set.count(token);
     }
 
-    fprintf(stderr, "test-paged-kv-e2e: top-%d argmax match: ref=%d paged=%d\n", TOP_K, top_ref[0], top_paged[0]);
-    fprintf(stderr, "test-paged-kv-e2e: top-%d set overlap: %d/%d (require >= %d)\n", TOP_K, overlap, TOP_K,
-            MIN_TOP_K_OVERLAP);
-
-    if (overlap < MIN_TOP_K_OVERLAP) {
-        fprintf(stderr,
-                "FAIL: top-%d distributions diverge too much. Only %d of %d most-likely "
-                "tokens match between ref and paged. Real correctness issue likely.\n",
-                TOP_K, overlap, TOP_K);
-        fprintf(stderr, "  ref:   ");
-        for (int t : top_ref) {
-            fprintf(stderr, "%d(%.3f) ", t, ref.prefill_logits[t]);
-        }
-        fprintf(stderr, "\n  paged: ");
-        for (int t : top_paged) {
-            fprintf(stderr, "%d(%.3f) ", t, paged.prefill_logits[t]);
-        }
-        fprintf(stderr, "\n");
-        throw std::runtime_error("FAILED test.");
+    if (top_ref[0] == top_paged[0] && overlap >= MIN_TOP_K_OVERLAP) {
+        return;
     }
 
-    // Token-level secondary check: first N_COMPARE tokens must match.
-    // We don't compare beyond N_COMPARE because greedy sampling on small
-    // models is sensitive to argmax tiebreakers, and minor floating-point
-    // accumulation differences between the paged and non-paged paths can
-    // flip individual tokens after a handful of decode steps.
+    fprintf(stderr, "FAIL: forced step %d differs: ref argmax=%d paged argmax=%d, top-%d overlap=%d/%d\n",
+            step, top_ref[0], top_paged[0], TOP_K, overlap, TOP_K);
+    fprintf(stderr, "  ref:   ");
+    for (int token : top_ref) {
+        fprintf(stderr, "%d(%.3f) ", token, ref[token]);
+    }
+    fprintf(stderr, "\n  paged: ");
+    for (int token : top_paged) {
+        fprintf(stderr, "%d(%.3f) ", token, paged[token]);
+    }
+    fprintf(stderr, "\n");
+    throw std::runtime_error("FAILED test.");
+}
+
+static void compare_results(const path_result & ref, const path_result & paged_greedy, const path_result & paged_forced) {
     EXPECT_TRUE((int) ref.tokens.size() >= N_COMPARE);
-    EXPECT_TRUE((int) paged.tokens.size() >= N_COMPARE);
+    EXPECT_TRUE((int) paged_greedy.tokens.size() >= N_COMPARE);
     for (int i = 0; i < N_COMPARE; ++i) {
-        if (ref.tokens[i] != paged.tokens[i]) {
-            fprintf(stderr, "FAIL: token %d differs in the equivalence window: ref=%d paged=%d\n", i, ref.tokens[i],
-                    paged.tokens[i]);
+        if (ref.tokens[i] != paged_greedy.tokens[i]) {
+            fprintf(stderr, "FAIL: greedy token %d differs: ref=%d paged=%d\n", i, ref.tokens[i], paged_greedy.tokens[i]);
             throw std::runtime_error("FAILED test.");
         }
     }
+
+    EXPECT_TRUE(ref.logits.size() >= N_COMPARE);
+    EXPECT_TRUE(paged_forced.logits.size() >= N_COMPARE);
+    for (int i = 0; i < N_COMPARE; ++i) {
+        compare_logits(i, ref.logits[i], paged_forced.logits[i]);
+    }
+
     fprintf(stderr, "test-paged-kv-e2e: PASSED\n");
 }
 
@@ -268,11 +249,15 @@ int main(int argc, char ** argv) {
     path_result ref = run_non_paged(params.model.path);
     fprintf(stderr, "  got %zu tokens, %d-vocab logits\n", ref.tokens.size(), ref.n_vocab);
 
-    fprintf(stderr, "test-paged-kv-e2e: running paged path\n");
-    path_result paged = run_paged(params.model.path);
-    fprintf(stderr, "  got %zu tokens, %d-vocab logits\n", paged.tokens.size(), paged.n_vocab);
+    fprintf(stderr, "test-paged-kv-e2e: running independent paged path\n");
+    path_result paged_greedy = run_paged(params.model.path, {});
+    fprintf(stderr, "  got %zu tokens, %d-vocab logits\n", paged_greedy.tokens.size(), paged_greedy.n_vocab);
 
-    compare_results(ref, paged);
+    fprintf(stderr, "test-paged-kv-e2e: running forced paged path\n");
+    path_result paged_forced = run_paged(params.model.path, ref.tokens);
+    fprintf(stderr, "  got %zu tokens, %d-vocab logits\n", paged_forced.tokens.size(), paged_forced.n_vocab);
+
+    compare_results(ref, paged_greedy, paged_forced);
 
     llama_backend_free();
     return 0;

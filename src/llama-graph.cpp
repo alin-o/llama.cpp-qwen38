@@ -3324,8 +3324,9 @@ ggml_tensor * llm_graph_context::build_attn(
     GGML_ASSERT(paged_mctx && "llama_kv_cache_context_paged is nullptr.");
 
     const int32_t max_blocks = paged_mctx->get_max_blocks();
-    ggml_tensor * k_physical = paged_mctx->get_k(il); // interleaved KV
-    ggml_tensor * v_physical = paged_mctx->get_v(il); // interleaved KV
+    ggml_tensor * k_physical = paged_mctx->get_k(il);
+    ggml_tensor * v_physical = paged_mctx->get_v(il);
+
 
     ggml_tensor * cur = build_attn_mha_paged(
         q_cur, k_cur, v_cur, k_physical, v_physical,

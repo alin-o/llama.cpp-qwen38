@@ -14,7 +14,8 @@ llama_memory_hybrid_paged::llama_memory_hybrid_paged(
         uint32_t n_seq_max,
         ggml_backend_t backend_gpu,
         ggml_backend_t backend_cpu,
-        ggml_type paged_type,
+        ggml_type type_k,
+        ggml_type type_v,
         uint32_t n_gpu_blocks,
         uint32_t n_cpu_blocks,
         float watermark,
@@ -28,7 +29,7 @@ llama_memory_hybrid_paged::llama_memory_hybrid_paged(
     mem_recr(new llama_memory_recurrent(
         model, type_r, type_s, offload, rs_size, n_seq_max, n_rs_seq,
         filter_recr == nullptr ? [&](int32_t il) { return model.hparams.is_recr(il); } : filter_recr)) {
-    mem_attn->init(backend_gpu, backend_cpu, paged_type, n_gpu_blocks, n_cpu_blocks, watermark);
+    mem_attn->init(backend_gpu, backend_cpu, type_k, type_v, n_gpu_blocks, n_cpu_blocks, watermark);
 }
 
 llama_memory_context_ptr llama_memory_hybrid_paged::init_batch(llama_batch_allocr & balloc, uint32_t n_ubatch, bool embd_all) {

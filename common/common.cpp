@@ -1323,7 +1323,8 @@ static void common_fit_paged_kv_blocks(common_params & params, const llama_model
 
     const size_t bytes_per_block = (size_t) 2 * n_heads_kv * block_size * ggml_row_size(params.cache_type_k, head_dim) * n_layers;
 
-    const size_t blocks_per_seq = ((size_t) params.n_ctx / std::max(1, params.n_parallel) + block_size - 1) / block_size;
+    const uint32_t effective_n_ctx = params.n_ctx == 0 ? llama_model_n_ctx_train(model) : params.n_ctx;
+    const size_t blocks_per_seq = ((size_t) effective_n_ctx / std::max(1, params.n_parallel) + block_size - 1) / block_size;
     const size_t min_gpu_blocks = (size_t) std::ceil(blocks_per_seq / (1.0f - params.kv_paged_watermark));
     const size_t margin = std::max(
         params.fit_params_target.empty() ? (size_t) 0 : params.fit_params_target[0],
@@ -1405,6 +1406,7 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
             params.fit_params_min_ctx,
             has_draft || spec_mtp ? &extra : nullptr,
             params.verbosity >= LOG_LEVEL_DEBUG ? GGML_LOG_LEVEL_DEBUG : GGML_LOG_LEVEL_ERROR);
+        params.n_ctx = cparams.n_ctx;
     }
 
     llama_model * model = llama_model_load_from_file(params.model.path.c_str(), mparams);
