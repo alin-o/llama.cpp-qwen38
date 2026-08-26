@@ -41,12 +41,6 @@ void llama_kv_cache_paged::init(ggml_backend_t backend_gpu,
 
     GGML_ASSERT(n_gpu_blocks && "n_gpu_blocks need to be greater than 0.");
     GGML_ASSERT(n_cpu_blocks && "n_cpu_blocks need to be greater than 0.");
-    if (type_k != GGML_TYPE_F16 || type_v != GGML_TYPE_F16) {
-        LLAMA_LOG_WARN("%s: paged KV quantization is not validated; falling back from K=%s V=%s to f16.\n", __func__,
-                       ggml_type_name(type_k), ggml_type_name(type_v));
-        type_k = GGML_TYPE_F16;
-        type_v = GGML_TYPE_F16;
-    }
 
 
     LLAMA_LOG_INFO("%s: initializing paged KV cache. n_gpu_blocks=%d, n_cpu_blocks=%d, block_size=%d, watermark=%0.2f\n", __func__,
@@ -57,8 +51,8 @@ void llama_kv_cache_paged::init(ggml_backend_t backend_gpu,
     kv_type_v      = type_v;
     gpu_backend    = backend_gpu;
     cpu_backend    = backend_cpu;
-    block_bytes_k  = block_size * n_heads_kv * head_dim * ggml_type_size(kv_type_k);
-    block_bytes_v  = block_size * n_heads_kv * head_dim * ggml_type_size(kv_type_v);
+    block_bytes_k  = block_size * n_heads_kv * ggml_row_size(kv_type_k, head_dim);
+    block_bytes_v  = block_size * n_heads_kv * ggml_row_size(kv_type_v, head_dim);
 
     ggml_init_params gpu_params = {
         /*.mem_size   =*/ ggml_tensor_overhead() * 2 * n_layers,
