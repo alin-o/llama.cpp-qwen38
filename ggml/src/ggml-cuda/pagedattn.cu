@@ -148,6 +148,85 @@ __global__ void paged_attention_decode_kernel(const float * __restrict__ q,
     }
 }
 
+// One warp owns one query. Four warps per block expose prefill parallelism
+// without adding a block-wide reduction to the token loop.
+__global__ void paged_attention_prefill_kernel(const float * __restrict__ q,
+                                               const half * __restrict__ kv_cache,
+                                               const int * __restrict__ block_table,
+                                               const int * __restrict__ context_lens,
+                                               const int * __restrict__ batch_offsets,
+                                               const int * __restrict__ batch_lens,
+                                               const size_t stride_token,
+                                               const size_t stride_head,
+                                               const size_t stride_block,
+                                               const int n_heads_kv,
+                                               const int block_size,
+                                               const int max_blocks,
+                                               const int head_dim,
+                                               const float scale,
+                                               float * __restrict__ out) {
+    constexpr int queries_per_block = 4;
+    constexpr int max_head_dim      = 256;
+
+    const int head_idx = blockIdx.x;
+    const int seq_idx  = blockIdx.y;
+    const int lane     = threadIdx.x & 31;
+    const int warp     = threadIdx.x >> 5;
+    const int q_idx    = blockIdx.z * queries_per_block + warp;
+    const int n_heads  = gridDim.x;
+
+    if (q_idx >= batch_lens[seq_idx]) {
+        return;
+    }
+
+    const int seq_start   = batch_offsets[seq_idx];
+    const int token_idx   = seq_start + q_idx;
+    const int kv_head_idx = head_idx / (n_heads / n_heads_kv);
+    const int ctx_len     = context_lens[seq_idx];
+    const int q_pos       = ctx_len - batch_lens[seq_idx] + q_idx;
+
+    float qk_max  = -FLT_MAX;
+    float exp_sum = 0.0f;
+    float acc[max_head_dim / 32] = { 0.0f };
+
+    for (int bid = 0; bid <= q_pos / block_size; ++bid) {
+        const int physical_block = block_table[seq_idx * max_blocks + bid];
+        const int start_token    = bid * block_size;
+        const int end_token      = min(start_token + block_size, q_pos + 1);
+
+        for (int token = start_token; token < end_token; ++token) {
+            const int token_in_block = token % block_size;
+            const size_t k_base = token_in_block * stride_token + kv_head_idx * stride_head + physical_block * stride_block;
+            const size_t v_base = token_in_block * stride_token + (n_heads_kv + kv_head_idx) * stride_head + physical_block * stride_block;
+
+            float qk = 0.0f;
+    for (int d = lane; d < head_dim; d += 32) {
+                qk += q[(size_t) token_idx * n_heads * head_dim + (size_t) head_idx * head_dim + d] *
+                      __half2float(kv_cache[k_base + d]);
+            }
+            qk *= scale;
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                qk += __shfl_down_sync(0xffffffffu, qk, offset);
+            }
+            qk = __shfl_sync(0xffffffffu, qk, 0);
+
+            const float qk_max_new = fmaxf(qk_max, qk);
+            const float exp_old    = __expf(qk_max - qk_max_new);
+            const float exp_new    = __expf(qk - qk_max_new);
+            exp_sum = exp_sum * exp_old + exp_new;
+    for (int d = lane; d < head_dim; d += 32) {
+                const int i = d / 32;
+                acc[i] = acc[i] * exp_old + exp_new * __half2float(kv_cache[v_base + d]);
+            }
+            qk_max = qk_max_new;
+        }
+    }
+
+    for (int d = lane; d < head_dim; d += 32) {
+        out[(size_t) token_idx * n_heads * head_dim + (size_t) head_idx * head_dim + d] = acc[d / 32] / (exp_sum + 1e-6f);
+    }
+}
+
 void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * q             = dst->src[0];
     const ggml_tensor * k_new         = dst->src[1];
@@ -191,6 +270,19 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
     // Shared memory
     const size_t n_warps    = ((size_t) head_dim + 31) / 32;
     const size_t smem_bytes = n_warps * sizeof(float);
+
+    // The scalar kernel keeps decode occupancy high. Prefill needs query tiles
+    // so one long request produces enough blocks to fill the GPU.
+    if (n_seq == 1 && q->ne[2] >= 4 && head_dim <= 256) {
+        constexpr int queries_per_block = 4;
+        const int query_tiles = (q->ne[2] + queries_per_block - 1) / queries_per_block;
+        paged_attention_prefill_kernel<<<dim3(n_heads, n_seq, query_tiles), dim3(128), 0, ctx.stream()>>>(
+            (const float *) q->data, (const half *) kv_cache->data, (const int *) block_table->data,
+            (const int *) context_lens->data, (const int *) batch_offsets->data, (const int *) batch_lens->data,
+            stride_token, stride_head, stride_block, n_heads_kv, block_size, max_blocks, head_dim, scale,
+            (float *) dst->data);
+        return;
+    }
 
     // Manually request extended shared memory if needed (>48 KB)
     // https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/compute-capabilities.html
