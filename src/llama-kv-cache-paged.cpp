@@ -104,8 +104,9 @@ void llama_kv_cache_paged::init(ggml_backend_t backend_gpu,
 }
 
 bool llama_kv_cache_paged::allocate(int32_t num_tokens, llama_sequence_group & group) {
-    uint32_t curr_block_count     = group.block_table.size();
-    uint32_t total_num_tokens     = group.n_prompt + group.n_decoded + num_tokens;
+    const uint32_t curr_block_count = group.block_table.size();
+    const uint32_t total_num_tokens = group.n_decoded == 0 ? std::max(group.n_prompt, (uint32_t) num_tokens)
+                                                           : group.n_decoded + num_tokens;
     uint32_t num_requested_blocks = std::ceil((float) total_num_tokens / block_size) - curr_block_count;
     LLAMA_LOG_DEBUG("%s: curr_block_count=%d, total_num_tokens=%d, num_requested_blocks=%d\n", __func__,
                     curr_block_count, total_num_tokens, num_requested_blocks);
@@ -200,14 +201,16 @@ bool llama_kv_cache_paged::swap_in(llama_sequence_group & group) {
         return true;
     }
 
-    // A potential optimization to reduce thrashing is to have a heuristic to check if
-    // if we can continue decoding after swap_in.
-    if (!block_manager.has_free_gpu_blocks(num_blocks)) {
+    const uint32_t required_blocks = std::max(
+        num_blocks,
+        (uint32_t) std::ceil((float) (group.n_past + 1) / block_size));
+    if (!block_manager.has_free_gpu_blocks(required_blocks)) {
         return false;
     }
 
-    llama_block_ids new_ids = block_manager.checkout_gpu_blocks(num_blocks);
-    do_block_copy(group.block_table, new_ids, /*to_gpu=*/true);
+    llama_block_ids new_ids = block_manager.checkout_gpu_blocks(required_blocks);
+    llama_block_ids restored_ids(new_ids.begin(), new_ids.begin() + num_blocks);
+    do_block_copy(group.block_table, restored_ids, /*to_gpu=*/true);
 
     free_blocks(group);
     group.block_table = new_ids;
