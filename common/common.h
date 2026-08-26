@@ -569,9 +569,10 @@ struct common_params {
 
     uint32_t n_gpu_blocks    = 1;
     uint32_t n_cpu_blocks    = 1;
+    bool     n_gpu_blocks_set = false;
+    bool     n_cpu_blocks_set = false;
 
-    float cpu_to_gpu_blocks_ratio = 0.25;
-    float kv_paged_watermark      = 0.05;  // percentage
+    float kv_paged_watermark = 0.10;  // percentage
 
     bool input_prefix_bos  = false; // prefix BOS to user inputs, preceding input_prefix
     bool verbose_prompt    = false; // print prompt tokens before generation

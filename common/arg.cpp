@@ -1738,14 +1738,22 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         {"-ncpub", "--n-cpu-blocks"}, "N",
         "number of physical CPU blocks for paged KV cache (default: 1)",
         [](common_params & params, int value) {
-            params.n_cpu_blocks = value;
+            if (value <= 0) {
+                throw std::invalid_argument("--n-cpu-blocks must be positive");
+            }
+            params.n_cpu_blocks     = value;
+            params.n_cpu_blocks_set = true;
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_PAGED}));
     add_opt(common_arg(
         {"-ngpub", "--n-gpu-blocks"}, "N",
         "number of physical GPU blocks for paged KV cache (default: 1)",
         [](common_params & params, int value) {
-            params.n_gpu_blocks = value;
+            if (value <= 0) {
+                throw std::invalid_argument("--n-gpu-blocks must be positive");
+            }
+            params.n_gpu_blocks     = value;
+            params.n_gpu_blocks_set = true;
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_PAGED}));
     add_opt(common_arg(
@@ -1760,7 +1768,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
     ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_PAGED}));
     add_opt(common_arg(
         {"--kv-paged-watermark"}, "N",
-        "fraction of blocks reserved before processing new requests (default: 0.05, range [0.0, 1.0))",
+        "fraction of blocks reserved before processing new requests (default: 0.10, range [0.0, 1.0))",
         [](common_params & params, const std::string & value) {
             float potential_watermark = std::stof(value);
             if (potential_watermark < 0.0f || potential_watermark >= 1.0f) {

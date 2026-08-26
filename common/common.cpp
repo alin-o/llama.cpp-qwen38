@@ -25,6 +25,7 @@
 #include <regex>
 #include <sstream>
 #include <string>
+#include <limits>
 #include <thread>
 #include <unordered_set>
 #include <vector>
@@ -1286,6 +1287,23 @@ struct common_init_result::impl {
     std::vector<llama_sampler_seq_config> samplers_seq_config;
 };
 
+static size_t common_get_available_ram() {
+#if defined(__linux__)
+    std::ifstream meminfo("/proc/meminfo");
+    std::string key;
+    size_t value = 0;
+    std::string unit;
+
+    while (meminfo >> key >> value >> unit) {
+        if (key == "MemAvailable:") {
+            return value * 1024;
+        }
+    }
+#endif
+
+    return 0;
+}
+
 static void common_fit_paged_kv_blocks(common_params & params, const llama_model * model) {
     GGML_ASSERT(model && "model must be loaded before fitting paged KV blocks.");
     ggml_backend_dev_t dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU);
@@ -1303,34 +1321,48 @@ static void common_fit_paged_kv_blocks(common_params & params, const llama_model
     const uint32_t head_dim   = llama_model_n_embd_head_v(model);
     const uint32_t block_size = params.block_size;
 
-    const size_t bytes_per_block = (size_t)2 * head_dim * n_heads_kv * block_size * n_layers * ggml_type_size(GGML_TYPE_F16);
+    const size_t bytes_per_block = (size_t) 2 * n_heads_kv * block_size * ggml_row_size(params.cache_type_k, head_dim) * n_layers;
 
-    const size_t margin = params.fit_params_target.empty()
-        ? (size_t)(total_vram * 0.05f)
-        : (size_t)params.fit_params_target[0];
+    const size_t blocks_per_seq = ((size_t) params.n_ctx / std::max(1, params.n_parallel) + block_size - 1) / block_size;
+    const size_t min_gpu_blocks = (size_t) std::ceil(blocks_per_seq / (1.0f - params.kv_paged_watermark));
+    const size_t margin = std::max(
+        params.fit_params_target.empty() ? (size_t) 0 : params.fit_params_target[0],
+        std::min({ (size_t) (total_vram * 0.20f), (size_t) (free_vram * 0.80f),
+                   free_vram > min_gpu_blocks * bytes_per_block ? free_vram - min_gpu_blocks * bytes_per_block : (size_t) 0 }));
 
-    if (free_vram <= margin) {
+    if (!params.n_gpu_blocks_set && free_vram <= margin) {
         LOG_ERR("%s: not enough free VRAM for paged KV blocks. "
                 "free_vram=%.1f MiB <= margin=%.1f MiB. "
                 "Try reducing --margin or offloading fewer layers to GPU.\n",
-                __func__, free_vram / 1024.0f / 1024.0f, margin    / 1024.0f / 1024.0f);
-        return; // leave params.n_gpu_blocks at its existing value
-    }
-
-    const size_t available = (free_vram > margin) ? free_vram - margin : 0;
-
-    if (bytes_per_block == 0 || available < bytes_per_block) {
-        LOG_ERR("%s: available VRAM (%.1f MiB) is less than one block (%.1f MiB). "
-                "Try increasing n_gpu_blocks manually or reducing block_size.\n",
-                __func__, available      / 1024.0f / 1024.0f, bytes_per_block / 1024.0f / 1024.0f);
+                __func__, free_vram / 1024.0f / 1024.0f, margin / 1024.0f / 1024.0f);
         return;
     }
 
-    const uint32_t n_gpu_blocks = (uint32_t)(available / bytes_per_block);
-    const uint32_t n_cpu_blocks = (uint32_t)(n_gpu_blocks * params.cpu_to_gpu_blocks_ratio);
+    const size_t available = free_vram > margin ? free_vram - margin : 0;
 
-    LOG_INF("%s: free_vram=%0.1f MiB, bytes_per_block=%ld, n_gpu_blocks=%d, n_cpu_blocks=%d\n",
-            __func__, free_vram / 1024.0f / 1024.0f, bytes_per_block, n_gpu_blocks, n_cpu_blocks);
+    if (!params.n_gpu_blocks_set && (bytes_per_block == 0 || available < bytes_per_block)) {
+        LOG_ERR("%s: available VRAM (%.1f MiB) is less than one block (%.1f MiB). "
+                "Try increasing n_gpu_blocks manually or reducing block_size.\n",
+                __func__, available / 1024.0f / 1024.0f, bytes_per_block / 1024.0f / 1024.0f);
+        return;
+    }
+
+    const uint32_t n_gpu_blocks = params.n_gpu_blocks_set
+        ? params.n_gpu_blocks
+        : (uint32_t) std::min(available / bytes_per_block, (size_t) std::numeric_limits<uint32_t>::max());
+
+    const size_t free_ram = common_get_available_ram();
+    const size_t available_ram = free_ram == 0 ? bytes_per_block : (size_t) (free_ram * 0.75f);
+    const size_t paused_blocks = blocks_per_seq * std::max(1, params.n_parallel - 1);
+    const uint32_t n_cpu_blocks = params.n_cpu_blocks_set
+        ? params.n_cpu_blocks
+        : (uint32_t) std::max((size_t) 1, std::min({ available_ram / bytes_per_block, paused_blocks,
+                                                     (size_t) std::numeric_limits<uint32_t>::max() }));
+
+    LOG_INF("%s: free_vram=%0.1f MiB, free_ram=%0.1f MiB, margin=%0.1f MiB, bytes_per_block=%zu, n_gpu_blocks=%d, n_cpu_blocks=%d%s%s\n",
+            __func__, free_vram / 1024.0f / 1024.0f, free_ram / 1024.0f / 1024.0f, margin / 1024.0f / 1024.0f,
+            bytes_per_block, n_gpu_blocks, n_cpu_blocks, params.n_gpu_blocks_set ? " (set)" : " (fit)",
+            params.n_cpu_blocks_set ? " (set)" : " (fit)");
 
     params.n_gpu_blocks = n_gpu_blocks;
     params.n_cpu_blocks = n_cpu_blocks;
