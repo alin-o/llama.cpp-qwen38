@@ -583,6 +583,8 @@ public:
     bool can_reuse(const llm_graph_params & params) override;
 
     ggml_tensor * paged_write_slots   = nullptr;
+    ggml_tensor * paged_write_rows    = nullptr;
+
     ggml_tensor * paged_block_table   = nullptr;
     ggml_tensor * paged_context_lens  = nullptr;
     ggml_tensor * paged_batch_offsets = nullptr;

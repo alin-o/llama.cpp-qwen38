@@ -88,6 +88,8 @@ class llama_kv_cache_paged : public llama_memory_i {
     void set_seq_max_pos(llama_seq_id seq_id, llama_pos new_max);
 
   private:
+    friend class llama_kv_cache_paged_context;
+
     void concat_block_ids(llama_block_ids & to_block_table, const llama_block_ids & from_block_table);
     void do_block_copy(const llama_block_ids & src_ids, const llama_block_ids & new_ids, bool to_gpu);
 
@@ -147,6 +149,8 @@ class llama_kv_cache_paged_context : public llama_memory_context_i {
 
     int32_t * get_write_slots() const;
     int32_t * get_block_table() const;
+    const int32_t * get_write_rows() const;
+
     int32_t * get_context_lens() const;
     int32_t * get_batch_offsets() const;
     int32_t * get_batch_lens() const;
@@ -181,6 +185,8 @@ class llama_kv_cache_paged_context : public llama_memory_context_i {
     int32_t * paged_context_lens  = nullptr;  // [batch_size]
     int32_t * paged_batch_offsets = nullptr;  // [batch_size]
     int32_t * paged_batch_lens    = nullptr;  // [batch_size]
+    std::vector<int32_t> paged_write_rows;
+
 
     int32_t n_tokens   = 0;
     int32_t batch_size = 0;

@@ -46,6 +46,8 @@ struct path_result {
     std::vector<std::vector<float>> logits;  // [N_PREDICT][n_vocab]
     std::vector<llama_token>        tokens;  // [N_PREDICT]
     int                             n_vocab = 0;
+    int                             head_dim = 0;
+
 };
 
 static llama_token argmax_logits(const std::vector<float> & logits) {
@@ -88,6 +90,8 @@ static path_result run_non_paged(const std::string & model_path) {
 
     path_result result;
     result.n_vocab = n_vocab;
+    result.head_dim = llama_model_n_embd_head_v(model);
+
 
     for (int i = 0; i < N_PREDICT; ++i) {
         result.logits.push_back(get_logits(ctx, -1, n_vocab));
@@ -104,7 +108,10 @@ static path_result run_non_paged(const std::string & model_path) {
     return result;
 }
 
-static path_result run_paged(const std::string & model_path, const std::vector<llama_token> & forced_tokens) {
+static path_result run_paged(const std::string & model_path,
+                             const std::vector<llama_token> & forced_tokens,
+                             ggml_type type_k,
+                             ggml_type type_v) {
     common_params params;
     params.model.path    = model_path;
     params.n_ctx         = 256;
@@ -119,6 +126,8 @@ static path_result run_paged(const std::string & model_path, const std::vector<l
     params.n_gpu_blocks_set = true;
     params.n_cpu_blocks_set = true;
     params.n_sequences   = 1;
+    params.cache_type_k  = type_k;
+    params.cache_type_v  = type_v;
     params.n_parallel    = 1;
 
     auto            init  = common_init_from_params(params);
@@ -241,20 +250,30 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "skip: no --model provided\n");
         return 0;
     }
+    const ggml_type type_k = params.cache_type_k == GGML_TYPE_F16 ? GGML_TYPE_Q8_0 : params.cache_type_k;
+    const ggml_type type_v = params.cache_type_v == GGML_TYPE_F16 ? GGML_TYPE_Q8_0 : params.cache_type_v;
+
 
     common_init();
     llama_backend_init();
 
     fprintf(stderr, "test-paged-kv-e2e: running non-paged reference\n");
     path_result ref = run_non_paged(params.model.path);
+    if (ref.head_dim % ggml_blck_size(type_k) != 0 || ref.head_dim % ggml_blck_size(type_v) != 0) {
+        fprintf(stderr, "skip: model head dimension %d is incompatible with paged K=%s V=%s\n", ref.head_dim,
+                ggml_type_name(type_k), ggml_type_name(type_v));
+        llama_backend_free();
+        return 0;
+    }
+
     fprintf(stderr, "  got %zu tokens, %d-vocab logits\n", ref.tokens.size(), ref.n_vocab);
 
     fprintf(stderr, "test-paged-kv-e2e: running independent paged path\n");
-    path_result paged_greedy = run_paged(params.model.path, {});
+    path_result paged_greedy = run_paged(params.model.path, {}, type_k, type_v);
     fprintf(stderr, "  got %zu tokens, %d-vocab logits\n", paged_greedy.tokens.size(), paged_greedy.n_vocab);
 
     fprintf(stderr, "test-paged-kv-e2e: running forced paged path\n");
-    path_result paged_forced = run_paged(params.model.path, ref.tokens);
+    path_result paged_forced = run_paged(params.model.path, ref.tokens, type_k, type_v);
     fprintf(stderr, "  got %zu tokens, %d-vocab logits\n", paged_forced.tokens.size(), paged_forced.n_vocab);
 
     compare_results(ref, paged_greedy, paged_forced);

@@ -235,7 +235,7 @@ TEST(test_free_blocks_releases_to_pool) {
 
     auto kv = make_kv();
     kv.init(/*backend_gpu=*/backend,
-            /*backend_cpu=*/backend, GGML_TYPE_F16, GGML_TYPE_F16, n_gpu_blocks, n_cpu_blocks, watermark);
+            /*backend_cpu=*/backend, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, n_gpu_blocks, n_cpu_blocks, watermark);
 
     // allocate() pulls from the GPU block pool. After releasing, the count
     // must return to the initial value.
@@ -328,7 +328,7 @@ static paged_test_fixture make_fixture(uint32_t n_ctx        = 128,
         /*n_layers=*/2u,
         /*n_ubatch=*/n_batch,
         /*n_seq_max=*/8u));
-    fixture.kv->init(fixture.backend, fixture.backend, GGML_TYPE_F16, GGML_TYPE_F16, n_gpu_blocks, n_cpu_blocks, /*watermark=*/0.0f);
+    fixture.kv->init(fixture.backend, fixture.backend, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, n_gpu_blocks, n_cpu_blocks, /*watermark=*/0.0f);
 
     fixture.sched = std::unique_ptr<llama_paged_scheduler_impl>(
         new llama_paged_scheduler_impl(n_ctx, block_size, n_batch, fixture.kv.get()));

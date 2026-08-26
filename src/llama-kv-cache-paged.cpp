@@ -2,7 +2,16 @@
 
 #include "llama-impl.h"
 
+#include <stdexcept>
+
 //
+static ggml_type paged_storage_type(ggml_type type) {
+    if (type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0) {
+        return GGML_TYPE_Q8_0;
+    }
+    return type;
+}
+
 // llama_kv_cache_paged
 //
 
@@ -32,6 +41,25 @@ void llama_kv_cache_paged::init(ggml_backend_t backend_gpu,
                                 uint32_t       n_gpu_blocks,
                                 uint32_t       n_cpu_blocks,
                                 float          watermark) {
+    const auto supported_type = [](ggml_type type) {
+        return type == GGML_TYPE_Q8_0 || type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0;
+    };
+    if (!supported_type(type_k) || !supported_type(type_v)) {
+        throw std::runtime_error(format("paged KV supports q8_0, turbo3_0, and turbo4_0 storage, got K=%s V=%s",
+                                        ggml_type_name(type_k), ggml_type_name(type_v)));
+    }
+    const ggml_type selected_type_k = paged_storage_type(type_k);
+    const ggml_type selected_type_v = paged_storage_type(type_v);
+    if (selected_type_k != type_k || selected_type_v != type_v) {
+        LLAMA_LOG_WARN("%s: turbo paged KV did not pass the quality gate; using q8_0 storage instead\n", __func__);
+    }
+    type_k = selected_type_k;
+    type_v = selected_type_v;
+    if (head_dim % ggml_blck_size(type_k) != 0 || head_dim % ggml_blck_size(type_v) != 0) {
+        throw std::runtime_error(format("paged KV head dimension %u is incompatible with K=%s V=%s", head_dim,
+                                        ggml_type_name(type_k), ggml_type_name(type_v)));
+    }
+
     GGML_ASSERT(backend_cpu && "backend_cpu is nullptr");
     GGML_ASSERT(backend_gpu && "backend_gpu is nullptr");
     const ggml_backend_dev_t dev = ggml_backend_get_device(backend_gpu);
@@ -343,7 +371,19 @@ void llama_kv_cache_paged_context::set_batch_data(const llama_paged_batch_info &
     paged_context_lens  = info.context_lens;
     paged_batch_offsets = info.batch_offsets;
     paged_batch_lens    = info.batch_lens;
-    n_tokens            = info.n_tokens;
+    n_tokens = info.n_tokens;
+    paged_write_rows.resize((size_t) n_tokens * manager->n_heads_kv);
+    for (int32_t token = 0; token < n_tokens; ++token) {
+        const int32_t slot = paged_write_slots[token];
+        const int32_t block = slot / (int32_t) manager->block_size;
+        const int32_t token_in_block = slot % (int32_t) manager->block_size;
+        for (uint32_t head = 0; head < manager->n_heads_kv; ++head) {
+            paged_write_rows[(size_t) token * manager->n_heads_kv + head] =
+                block * (int32_t) (manager->block_size * manager->n_heads_kv) +
+                (int32_t) head * manager->block_size + token_in_block;
+        }
+    }
+
     max_blocks          = info.n_blocks_per_seq;
     batch_size          = info.n_seq;
 }
@@ -391,6 +431,11 @@ int32_t llama_kv_cache_paged_context::get_max_blocks() const {
 int32_t * llama_kv_cache_paged_context::get_write_slots() const {
     return paged_write_slots;
 }
+
+const int32_t * llama_kv_cache_paged_context::get_write_rows() const {
+    return paged_write_rows.data();
+}
+
 
 int32_t * llama_kv_cache_paged_context::get_block_table() const {
     return paged_block_table;

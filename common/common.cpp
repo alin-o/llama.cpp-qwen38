@@ -1304,6 +1304,10 @@ static size_t common_get_available_ram() {
     return 0;
 }
 
+static ggml_type common_paged_storage_type(ggml_type type) {
+    return type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0 ? GGML_TYPE_Q8_0 : type;
+}
+
 static void common_fit_paged_kv_blocks(common_params & params, const llama_model * model) {
     GGML_ASSERT(model && "model must be loaded before fitting paged KV blocks.");
     ggml_backend_dev_t dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_GPU);
@@ -1321,7 +1325,10 @@ static void common_fit_paged_kv_blocks(common_params & params, const llama_model
     const uint32_t head_dim   = llama_model_n_embd_head_v(model);
     const uint32_t block_size = params.block_size;
 
-    const size_t bytes_per_block = (size_t) 2 * n_heads_kv * block_size * ggml_row_size(params.cache_type_k, head_dim) * n_layers;
+    const ggml_type type_k = common_paged_storage_type(params.cache_type_k);
+    const ggml_type type_v = common_paged_storage_type(params.cache_type_v);
+    const size_t bytes_per_block = (size_t) n_heads_kv * block_size *
+        (ggml_row_size(type_k, head_dim) + ggml_row_size(type_v, head_dim)) * n_layers;
 
     const uint32_t effective_n_ctx = params.n_ctx == 0 ? llama_model_n_ctx_train(model) : params.n_ctx;
     const size_t blocks_per_seq = ((size_t) effective_n_ctx / std::max(1, params.n_parallel) + block_size - 1) / block_size;
