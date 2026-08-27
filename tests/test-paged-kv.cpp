@@ -1,11 +1,14 @@
 #include "ggml-backend.h"
 #include "llama-block-manager.h"
 #include "llama-kv-cache-paged.h"
+#include "llama-io.h"
 #include "llama-paged-scheduler-impl.h"
 
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <vector>
 
 #define TEST(name) static void name()
 #define RUN(name)                                   \
@@ -34,6 +37,39 @@
         }                                                                    \
     } while (0)
 #define EXPECT_FALSE(x) EXPECT_TRUE(!(x))
+
+class memory_io final : public llama_io_write_i, public llama_io_read_i {
+public:
+    void write(const void * src, size_t size) override {
+        const auto * bytes = static_cast<const uint8_t *>(src);
+        data.insert(data.end(), bytes, bytes + size);
+    }
+
+    void write_tensor(ggml_tensor * tensor, size_t offset, size_t size) override {
+        const size_t begin = data.size();
+        data.resize(begin + size);
+        ggml_backend_tensor_get(tensor, data.data() + begin, offset, size);
+    }
+
+    void read(void * dst, size_t size) override {
+        EXPECT_TRUE(offset + size <= data.size());
+        std::memcpy(dst, data.data() + offset, size);
+        offset += size;
+    }
+
+    void read_tensor(ggml_tensor * tensor, size_t tensor_offset, size_t size) override {
+        EXPECT_TRUE(offset + size <= data.size());
+        ggml_backend_tensor_set(tensor, data.data() + offset, tensor_offset, size);
+        offset += size;
+    }
+
+    size_t n_bytes() override {
+        return offset;
+    }
+
+    std::vector<uint8_t> data;
+    size_t offset = 0;
+};
 
 // Testing block_manager main functionality
 
@@ -289,6 +325,119 @@ TEST(test_free_blocks_releases_to_pool) {
     ggml_backend_free(backend);
 }
 
+TEST(test_paged_state_round_trip) {
+    ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    EXPECT_TRUE(backend != nullptr);
+
+    auto kv = make_kv();
+    kv.init(backend, backend, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, 4, 2, 0.0f);
+    llama_sequence_group group;
+    group.request_id = 3;
+    group.n_prompt   = 32;
+    EXPECT_TRUE(kv.allocate(0, group));
+    kv.set_seq_min_pos(group.request_id, 0);
+    kv.set_seq_max_pos(group.request_id, 31);
+
+    auto * k = kv.get_k_tensor(0);
+    std::vector<uint8_t> expected(ggml_nbytes(k), 0x5a);
+    std::vector<uint8_t> cleared(expected.size());
+    ggml_backend_tensor_set(k, expected.data(), 0, expected.size());
+
+    memory_io io;
+    kv.state_write(io);
+    EXPECT_TRUE(!io.data.empty());
+    ggml_backend_tensor_set(k, cleared.data(), 0, cleared.size());
+    kv.clear(false);
+    io.offset = 0;
+    kv.state_read(io);
+
+    const size_t block_bytes = ggml_nbytes(k) / 4;
+    std::vector<uint8_t> restored(block_bytes);
+    for (uint32_t block_id : group.block_table) {
+        ggml_backend_tensor_get(k, restored.data(), block_id * block_bytes, block_bytes);
+        EXPECT_TRUE(restored == std::vector<uint8_t>(block_bytes, 0x5a));
+    }
+    EXPECT_EQ(kv.seq_pos_min(group.request_id), 0);
+    EXPECT_EQ(kv.seq_pos_max(group.request_id), 31);
+    EXPECT_EQ(io.offset, io.data.size());
+    ggml_backend_free(backend);
+}
+
+TEST(test_paged_sequence_state_preserves_other_sequences) {
+    ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    EXPECT_TRUE(backend != nullptr);
+
+    auto kv = make_kv();
+    kv.init(backend, backend, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, 4, 2, 0.0f);
+    llama_sequence_group first;
+    first.request_id = 1;
+    first.n_prompt = 16;
+    llama_sequence_group second;
+    second.request_id = 2;
+    second.n_prompt = 16;
+    EXPECT_TRUE(kv.allocate(0, first));
+    EXPECT_TRUE(kv.allocate(0, second));
+    kv.set_seq_min_pos(first.request_id, 0);
+    kv.set_seq_max_pos(first.request_id, 15);
+    kv.set_seq_min_pos(second.request_id, 0);
+    kv.set_seq_max_pos(second.request_id, 15);
+
+    auto * k = kv.get_k_tensor(0);
+    const size_t block_bytes = ggml_nbytes(k) / 4;
+    std::vector<uint8_t> zeros(ggml_nbytes(k));
+    std::vector<uint8_t> zero_block(block_bytes);
+    std::vector<uint8_t> first_data(block_bytes, 0x5a);
+    std::vector<uint8_t> second_data(block_bytes, 0x7b);
+    ggml_backend_tensor_set(k, zeros.data(), 0, zeros.size());
+    ggml_backend_tensor_set(k, first_data.data(), first.block_table[0] * block_bytes, block_bytes);
+    ggml_backend_tensor_set(k, second_data.data(), second.block_table[0] * block_bytes, block_bytes);
+
+    memory_io io;
+    kv.state_write(io, first.request_id);
+    ggml_backend_tensor_set(k, zeros.data(), 0, zeros.size());
+    io.offset = 0;
+    kv.state_read(io, first.request_id);
+
+    std::vector<uint8_t> restored(block_bytes);
+    ggml_backend_tensor_get(k, restored.data(), first.block_table[0] * block_bytes, block_bytes);
+    EXPECT_TRUE(restored == first_data);
+    ggml_backend_tensor_get(k, restored.data(), second.block_table[0] * block_bytes, block_bytes);
+    EXPECT_TRUE(restored == zero_block);
+
+    llama_sequence_group third;
+    third.request_id = 3;
+    third.n_prompt = 32;
+    EXPECT_TRUE(kv.allocate(0, third));
+    EXPECT_EQ(third.block_table.size(), 2u);
+    ggml_backend_free(backend);
+}
+
+TEST(test_paged_state_round_trip_after_swap) {
+    ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    EXPECT_TRUE(backend != nullptr);
+
+    auto kv = make_kv();
+    kv.init(backend, backend, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, 4, 2, 0.0f);
+    llama_sequence_group group;
+    group.request_id = 3;
+    group.n_prompt = 16;
+    EXPECT_TRUE(kv.allocate(0, group));
+    kv.set_seq_min_pos(group.request_id, 0);
+    kv.set_seq_max_pos(group.request_id, 15);
+    EXPECT_TRUE(kv.swap_out(group));
+
+    memory_io io;
+    kv.state_write(io, group.request_id);
+    group.block_table.clear();
+    io.offset = 0;
+    kv.state_read(io, group.request_id);
+    EXPECT_EQ(group.block_table.size(), 1u);
+    EXPECT_EQ(kv.seq_pos_min(group.request_id), 0);
+    EXPECT_EQ(kv.seq_pos_max(group.request_id), 15);
+    EXPECT_TRUE(kv.swap_in(group));
+    ggml_backend_free(backend);
+}
+
 // Testing scheduler
 
 // For easy testing and clean-up.
@@ -344,6 +493,74 @@ static llama_sequence_group make_group(int32_t request_id, uint32_t n_prompt) {
     group.t_arrival_time = request_id;  // control ordering based on request_id
     group.logical_seq.assign(n_prompt, /*dummy token=*/1);
     return group;
+}
+
+TEST(test_scheduler_state_restores_block_ownership) {
+    auto fixture = make_fixture();
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(3, 16)));
+
+    llama_batch batch = {};
+    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    auto * group = fixture.sched->get_group_from_id(3);
+    EXPECT_TRUE(group != nullptr);
+    const llama_block_ids expected = group->block_table;
+    fixture.kv->set_seq_min_pos(3, 0);
+    fixture.kv->set_seq_max_pos(3, 15);
+
+    memory_io io;
+    fixture.kv->state_write(io);
+    group->block_table.clear();
+    memory_io seq_io;
+    fixture.kv->state_write(seq_io, 3);
+    group->block_table.clear();
+    seq_io.offset = 0;
+    fixture.kv->state_read(seq_io, 3);
+    EXPECT_TRUE(group->block_table == expected);
+    io.offset = 0;
+    fixture.kv->state_read(io);
+    EXPECT_TRUE(group->block_table == expected);
+
+    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    llama_batch_free(batch);
+}
+
+TEST(test_scheduler_resumes_fresh_checkpoint) {
+    auto source = make_fixture();
+    EXPECT_TRUE(source.sched->queue_request(make_group(3, 16)));
+
+    llama_batch source_batch = {};
+    EXPECT_TRUE(source.sched->step(source_batch) == llama_scheduler_status::OK);
+    const int8_t continue_flag[] = { 0 };
+    source.sched->update(source_batch, { 42 }, continue_flag);
+    auto * source_group = source.sched->get_group_from_id(3);
+    EXPECT_TRUE(source_group != nullptr);
+    EXPECT_EQ(source_group->n_past, 16u);
+    EXPECT_EQ(source_group->n_decoded, 16u);
+
+    memory_io io;
+    source.kv->state_write(io);
+
+    auto restored = make_fixture();
+    io.offset = 0;
+    restored.kv->state_read(io);
+    EXPECT_TRUE(restored.sched->queue_request(make_group(3, 16)));
+    auto * restored_group = restored.sched->get_group_from_id(3);
+    EXPECT_TRUE(restored_group != nullptr);
+    EXPECT_EQ(restored_group->n_past, 16u);
+    EXPECT_EQ(restored_group->n_decoded, 16u);
+    EXPECT_EQ(restored_group->logical_seq.back(), 42);
+
+    llama_batch restored_batch = {};
+    EXPECT_TRUE(restored.sched->step(restored_batch) == llama_scheduler_status::OK);
+    EXPECT_EQ(restored_batch.n_tokens, 1);
+    EXPECT_EQ(restored_batch.token[0], 42);
+    EXPECT_EQ(restored_batch.pos[0], 16);
+    restored.sched->update(restored_batch, { 43 }, continue_flag);
+    EXPECT_EQ(restored_group->n_past, 17u);
+    EXPECT_EQ(restored_group->n_decoded, 17u);
+    EXPECT_EQ(restored_group->logical_seq.back(), 43);
+    llama_batch_free(source_batch);
+    llama_batch_free(restored_batch);
 }
 
 TEST(test_scheduler_no_deadlock_on_empty) {
@@ -441,7 +658,12 @@ int main(int /*argc*/, char ** /*argv*/) {
 
     fprintf(stderr, "test-paged-kv: llama_kv_cache_paged free_blocks\n");
     RUN(test_free_blocks_releases_to_pool);
+    RUN(test_paged_state_round_trip);
+    RUN(test_paged_sequence_state_preserves_other_sequences);
+    RUN(test_paged_state_round_trip_after_swap);
 
+    RUN(test_scheduler_state_restores_block_ownership);
+    RUN(test_scheduler_resumes_fresh_checkpoint);
     fprintf(stderr, "test-paged-kv: llama_kv_cache_paged scheduler\n");
     RUN(test_scheduler_no_deadlock_on_empty);
     RUN(test_scheduler_deadlock_oversize_waiting_request);

@@ -92,8 +92,31 @@ bool llama_paged_scheduler_impl::queue_request(llama_sequence_group group) {
     auto group_ptr = std::make_unique<llama_sequence_group>(std::move(group));
 
     id_to_group[group_ptr->request_id] = group_ptr.get();
+    const bool restored = kv_cache_manager->register_group(*group_ptr);
+    if (!restored && !group_ptr->block_table.empty()) {
+        LLAMA_LOG_ERROR("%s: request %d has restored blocks without scheduler state.\n", __func__, group_ptr->request_id);
+        id_to_group.erase(group_ptr->request_id);
+        return false;
+    }
 
-    set_waiting(std::move(group_ptr));
+    const llama_sequence_group_status restored_status = group_ptr->status;
+    group_ptr->status = llama_sequence_group_status::PENDING;
+    if (restored) {
+        if (restored_status == llama_sequence_group_status::RUNNING) {
+            set_running(std::move(group_ptr));
+        } else if (restored_status == llama_sequence_group_status::SWAPPED) {
+            set_swapped(std::move(group_ptr));
+        } else if (restored_status == llama_sequence_group_status::WAITING ||
+                   restored_status == llama_sequence_group_status::PENDING) {
+            set_waiting(std::move(group_ptr));
+        } else {
+            LLAMA_LOG_ERROR("%s: request %d has finished scheduler state.\n", __func__, group_ptr->request_id);
+            id_to_group.erase(group_ptr->request_id);
+            return false;
+        }
+    } else {
+        set_waiting(std::move(group_ptr));
+    }
     return true;
 }
 

@@ -35,6 +35,7 @@ class llama_kv_cache_paged : public llama_memory_i {
     bool swap_out(llama_sequence_group & group);
 
     void     set_paged_batch_info(const llama_paged_batch_info * info);
+    bool register_group(llama_sequence_group & group);
     uint32_t get_num_gpu_blocks() const;
 
     //
@@ -72,14 +73,13 @@ class llama_kv_cache_paged : public llama_memory_i {
 
     std::map<ggml_backend_buffer_type_t, size_t> memory_breakdown() const override;
 
-    // state write/load
-    void state_write(llama_io_write_i & /*io*/,
-                     llama_seq_id /*seq_id*/         = -1,
-                     llama_state_seq_flags /*flags*/ = 0) const override {}
+    void state_write(llama_io_write_i & io,
+                     llama_seq_id seq_id = -1,
+                     llama_state_seq_flags flags = 0) const override;
 
-    void state_read(llama_io_read_i & /*io*/,
-                    llama_seq_id /*seq_id*/         = -1,
-                    llama_state_seq_flags /*flags*/ = 0) override {}
+    void state_read(llama_io_read_i & io,
+                    llama_seq_id seq_id = -1,
+                    llama_state_seq_flags flags = 0) override;
 
     //
     // Helpers to llama_memory_i
@@ -92,6 +92,7 @@ class llama_kv_cache_paged : public llama_memory_i {
 
     void concat_block_ids(llama_block_ids & to_block_table, const llama_block_ids & from_block_table);
     void do_block_copy(const llama_block_ids & src_ids, const llama_block_ids & new_ids, bool to_gpu);
+    void release_block_ids(const llama_block_ids & block_ids);
 
     std::vector<struct ggml_tensor *> k_gpu_layers;
     std::vector<struct ggml_tensor *> v_gpu_layers;
@@ -127,8 +128,22 @@ class llama_kv_cache_paged : public llama_memory_i {
         llama_pos min = -1;
         llama_pos max = -1;
     };
+    struct restored_group_state {
+        llama_sequence_group_status status;
+        int64_t                     t_arrival_time;
+        int64_t                     t_first_token_us;
+        uint32_t                    n_prompt;
+        uint32_t                    n_decoded;
+        uint32_t                    n_past;
+        std::vector<llama_token>    logical_seq;
+    };
+
+    std::unordered_map<llama_seq_id, restored_group_state> restored_groups;
 
     std::unordered_map<llama_seq_id, seq_range> sequence_positions;
+
+    std::map<llama_seq_id, llama_block_ids> sequence_blocks;
+    std::unordered_map<llama_seq_id, llama_sequence_group *> sequence_groups;
 };
 
 class llama_kv_cache_paged_context : public llama_memory_context_i {

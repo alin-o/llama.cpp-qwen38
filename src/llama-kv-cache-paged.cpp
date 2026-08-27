@@ -1,7 +1,9 @@
 #include "llama-kv-cache-paged.h"
 
 #include "llama-impl.h"
+#include "llama-io.h"
 
+#include <algorithm>
 #include <stdexcept>
 
 //
@@ -51,7 +53,7 @@ void llama_kv_cache_paged::init(ggml_backend_t backend_gpu,
     const ggml_type selected_type_k = paged_storage_type(type_k);
     const ggml_type selected_type_v = paged_storage_type(type_v);
     if (selected_type_k != type_k || selected_type_v != type_v) {
-        LLAMA_LOG_WARN("%s: turbo paged KV did not pass the quality gate; using q8_0 storage instead\n", __func__);
+        LLAMA_LOG_WARN("%s: turbo paged KV is not enabled; using q8_0 storage instead\n", __func__);
     }
     type_k = selected_type_k;
     type_v = selected_type_v;
@@ -113,7 +115,28 @@ void llama_kv_cache_paged::init(ggml_backend_t backend_gpu,
     block_manager.init(n_gpu_blocks, n_cpu_blocks, watermark);
 }
 
+bool llama_kv_cache_paged::register_group(llama_sequence_group & group) {
+    sequence_groups[group.request_id] = &group;
+    if (const auto blocks = sequence_blocks.find(group.request_id); blocks != sequence_blocks.end()) {
+        group.block_table = blocks->second;
+    }
+    const auto restored = restored_groups.find(group.request_id);
+    if (restored == restored_groups.end()) {
+        return false;
+    }
+    group.status          = restored->second.status;
+    group.t_arrival_time  = restored->second.t_arrival_time;
+    group.t_first_token_us = restored->second.t_first_token_us;
+    group.n_prompt        = restored->second.n_prompt;
+    group.n_decoded       = restored->second.n_decoded;
+    group.n_past          = restored->second.n_past;
+    group.logical_seq     = std::move(restored->second.logical_seq);
+    restored_groups.erase(restored);
+    return true;
+}
+
 bool llama_kv_cache_paged::allocate(int32_t num_tokens, llama_sequence_group & group) {
+    register_group(group);
     const uint32_t curr_block_count = group.block_table.size();
     const uint32_t total_num_tokens = group.n_decoded == 0 ? std::max(group.n_prompt, (uint32_t) num_tokens)
                                                            : group.n_decoded + num_tokens;
@@ -132,19 +155,16 @@ bool llama_kv_cache_paged::allocate(int32_t num_tokens, llama_sequence_group & g
 
     llama_block_ids new_ids = block_manager.checkout_gpu_blocks(num_requested_blocks);
     concat_block_ids(group.block_table, new_ids);
+    sequence_blocks[group.request_id] = group.block_table;
     LLAMA_LOG_DEBUG("%s: successfully allocated %d.\n", __func__, num_requested_blocks);
     return true;
 }
 
-void llama_kv_cache_paged::free_blocks(llama_sequence_group & group) {
-    if (group.block_table.empty()) {
-        return;
-    }
-
+void llama_kv_cache_paged::release_block_ids(const llama_block_ids & block_ids) {
     llama_block_ids blocks_to_free_gpu;
     llama_block_ids blocks_to_free_cpu;
 
-    for (uint32_t block_id : group.block_table) {
+    for (uint32_t block_id : block_ids) {
         if (block_manager.is_gpu(block_id)) {
             blocks_to_free_gpu.push_back(block_id);
         } else {
@@ -158,8 +178,12 @@ void llama_kv_cache_paged::free_blocks(llama_sequence_group & group) {
     if (!blocks_to_free_cpu.empty()) {
         block_manager.release_cpu_blocks(blocks_to_free_cpu);
     }
+}
 
+void llama_kv_cache_paged::free_blocks(llama_sequence_group & group) {
+    release_block_ids(group.block_table);
     group.block_table.clear();
+    sequence_blocks.erase(group.request_id);
     seq_rm(group.request_id, llama_pos{}, llama_pos{});
 }
 
@@ -212,8 +236,9 @@ bool llama_kv_cache_paged::swap_in(llama_sequence_group & group) {
     llama_block_ids restored_ids(new_ids.begin(), new_ids.begin() + num_blocks);
     do_block_copy(group.block_table, restored_ids, /*to_gpu=*/true);
 
-    free_blocks(group);
+    release_block_ids(group.block_table);
     group.block_table = new_ids;
+    sequence_blocks[group.request_id] = group.block_table;
     return true;
 }
 
@@ -230,8 +255,9 @@ bool llama_kv_cache_paged::swap_out(llama_sequence_group & group) {
     llama_block_ids new_ids = block_manager.checkout_cpu_blocks(num_blocks);
     do_block_copy(group.block_table, new_ids, /*to_gpu=*/false);
 
-    free_blocks(group);
+    release_block_ids(group.block_table);
     group.block_table = new_ids;
+    sequence_blocks[group.request_id] = group.block_table;
     return true;
 }
 
@@ -327,11 +353,17 @@ struct ggml_tensor * llama_kv_cache_paged::get_v_tensor(int layer_idx) const {
 }
 
 void llama_kv_cache_paged::clear(bool /*data*/) {
+    sequence_groups.clear();
     sequence_positions.clear();
+    sequence_blocks.clear();
+    restored_groups.clear();
 }
 
 bool llama_kv_cache_paged::seq_rm(llama_seq_id seq_id, llama_pos /*p0*/, llama_pos /*p1*/) {
     sequence_positions.erase(seq_id);
+    sequence_blocks.erase(seq_id);
+    sequence_groups.erase(seq_id);
+    restored_groups.erase(seq_id);
     return true;
 }
 
@@ -361,6 +393,191 @@ void llama_kv_cache_paged::set_seq_min_pos(llama_seq_id seq_id, llama_pos new_mi
 
 void llama_kv_cache_paged::set_seq_max_pos(llama_seq_id seq_id, llama_pos new_max) {
     sequence_positions[seq_id].max = new_max;
+}
+
+void llama_kv_cache_paged::state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) const {
+    GGML_UNUSED(flags);
+
+    const uint32_t magic = 0x504b5633;
+    io.write(&magic, sizeof(magic));
+    io.write(&head_dim, sizeof(head_dim));
+    io.write(&n_heads_kv, sizeof(n_heads_kv));
+    io.write(&block_size, sizeof(block_size));
+    io.write(&n_layers, sizeof(n_layers));
+    io.write(&num_gpu_blocks, sizeof(num_gpu_blocks));
+    io.write(&num_cpu_blocks, sizeof(num_cpu_blocks));
+    const int32_t type_k = kv_type_k;
+    const int32_t type_v = kv_type_v;
+    io.write(&type_k, sizeof(type_k));
+    io.write(&type_v, sizeof(type_v));
+
+    std::vector<llama_seq_id> seq_ids;
+    if (seq_id == -1) {
+        seq_ids.reserve(sequence_positions.size());
+        for (const auto & item : sequence_positions) {
+            seq_ids.push_back(item.first);
+        }
+        std::sort(seq_ids.begin(), seq_ids.end());
+    } else if (sequence_positions.count(seq_id)) {
+        seq_ids.push_back(seq_id);
+    } else {
+        throw std::runtime_error("paged KV sequence state is empty");
+    }
+    const uint32_t n_sequences = seq_ids.size();
+    io.write(&n_sequences, sizeof(n_sequences));
+    std::vector<uint32_t> block_ids;
+    for (const llama_seq_id id : seq_ids) {
+        const auto & range = sequence_positions.at(id);
+        const auto blocks = sequence_blocks.find(id);
+        const uint32_t n_blocks = blocks == sequence_blocks.end() ? 0 : blocks->second.size();
+        io.write(&id, sizeof(id));
+        io.write(&range, sizeof(range));
+        io.write(&n_blocks, sizeof(n_blocks));
+        if (n_blocks) {
+            io.write(blocks->second.data(), n_blocks * sizeof(uint32_t));
+            block_ids.insert(block_ids.end(), blocks->second.begin(), blocks->second.end());
+        }
+        const auto group = sequence_groups.find(id);
+        const uint8_t has_group = group != sequence_groups.end() &&
+                                  group->second->logical_seq.size() >= group->second->n_prompt;
+        io.write(&has_group, sizeof(has_group));
+        if (has_group) {
+            const auto & saved = *group->second;
+            const uint32_t status = (uint32_t) saved.status;
+            const uint32_t logical_seq_size = saved.logical_seq.size();
+            io.write(&status, sizeof(status));
+            io.write(&saved.t_arrival_time, sizeof(saved.t_arrival_time));
+            io.write(&saved.t_first_token_us, sizeof(saved.t_first_token_us));
+            io.write(&saved.n_prompt, sizeof(saved.n_prompt));
+            io.write(&saved.n_decoded, sizeof(saved.n_decoded));
+            io.write(&saved.n_past, sizeof(saved.n_past));
+            io.write(&logical_seq_size, sizeof(logical_seq_size));
+            io.write(saved.logical_seq.data(), logical_seq_size * sizeof(llama_token));
+        }
+    }
+
+    const uint32_t n_blocks = block_ids.size();
+    io.write(&n_blocks, sizeof(n_blocks));
+    for (uint32_t block_id : block_ids) {
+        io.write(&block_id, sizeof(block_id));
+        const bool is_gpu = block_manager.is_gpu(block_id);
+        const uint32_t local_id = is_gpu ? block_id : block_id - num_gpu_blocks;
+        for (uint32_t il = 0; il < n_layers; ++il) {
+            ggml_tensor * k = is_gpu ? k_gpu_layers[il] : k_cpu_layers[il];
+            ggml_tensor * v = is_gpu ? v_gpu_layers[il] : v_cpu_layers[il];
+            io.write_tensor(k, (size_t) local_id * block_bytes_k, block_bytes_k);
+            io.write_tensor(v, (size_t) local_id * block_bytes_v, block_bytes_v);
+        }
+    }
+}
+
+void llama_kv_cache_paged::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
+    GGML_UNUSED(flags);
+
+    uint32_t magic;
+    uint32_t head_dim_ref;
+    uint32_t n_heads_kv_ref;
+    uint32_t block_size_ref;
+    uint32_t n_layers_ref;
+    uint32_t n_gpu_blocks_ref;
+    uint32_t n_cpu_blocks_ref;
+    int32_t type_k_ref;
+    int32_t type_v_ref;
+    io.read(&magic, sizeof(magic));
+    io.read(&head_dim_ref, sizeof(head_dim_ref));
+    io.read(&n_heads_kv_ref, sizeof(n_heads_kv_ref));
+    io.read(&block_size_ref, sizeof(block_size_ref));
+    io.read(&n_layers_ref, sizeof(n_layers_ref));
+    io.read(&n_gpu_blocks_ref, sizeof(n_gpu_blocks_ref));
+    io.read(&n_cpu_blocks_ref, sizeof(n_cpu_blocks_ref));
+    io.read(&type_k_ref, sizeof(type_k_ref));
+    io.read(&type_v_ref, sizeof(type_v_ref));
+    if (magic != 0x504b5633 || head_dim_ref != head_dim || n_heads_kv_ref != n_heads_kv || block_size_ref != block_size ||
+        n_layers_ref != n_layers || n_gpu_blocks_ref != num_gpu_blocks || n_cpu_blocks_ref != num_cpu_blocks ||
+        type_k_ref != kv_type_k || type_v_ref != kv_type_v) {
+        throw std::runtime_error("incompatible paged KV state");
+    }
+
+    uint32_t n_sequences;
+    io.read(&n_sequences, sizeof(n_sequences));
+    if (seq_id != -1 && n_sequences != 1) {
+        throw std::runtime_error("paged KV sequence state contains multiple sequences");
+    }
+    if (seq_id == -1) {
+        sequence_positions.clear();
+        sequence_blocks.clear();
+        restored_groups.clear();
+    }
+    for (uint32_t i = 0; i < n_sequences; ++i) {
+        llama_seq_id id;
+        seq_range range;
+        uint32_t n_blocks;
+        io.read(&id, sizeof(id));
+        io.read(&range, sizeof(range));
+        io.read(&n_blocks, sizeof(n_blocks));
+        if (id < 0 || (uint32_t) id >= n_seq_max) {
+            throw std::runtime_error("invalid paged KV sequence id");
+        }
+        const llama_seq_id target_id = seq_id == -1 ? id : seq_id;
+        auto & blocks = sequence_blocks[target_id];
+        blocks.resize(n_blocks);
+        if (n_blocks) {
+            io.read(blocks.data(), n_blocks * sizeof(uint32_t));
+        }
+        uint8_t has_group;
+        io.read(&has_group, sizeof(has_group));
+        if (has_group) {
+            uint32_t status;
+            uint32_t logical_seq_size;
+            restored_group_state restored;
+            io.read(&status, sizeof(status));
+            io.read(&restored.t_arrival_time, sizeof(restored.t_arrival_time));
+            io.read(&restored.t_first_token_us, sizeof(restored.t_first_token_us));
+            io.read(&restored.n_prompt, sizeof(restored.n_prompt));
+            io.read(&restored.n_decoded, sizeof(restored.n_decoded));
+            io.read(&restored.n_past, sizeof(restored.n_past));
+            io.read(&logical_seq_size, sizeof(logical_seq_size));
+            if (status > (uint32_t) llama_sequence_group_status::FINISHED ||
+                restored.n_past > n_blocks * block_size || logical_seq_size < restored.n_prompt) {
+                throw std::runtime_error("invalid paged scheduler state");
+            }
+            restored.status = (llama_sequence_group_status) status;
+            restored.logical_seq.resize(logical_seq_size);
+            io.read(restored.logical_seq.data(), logical_seq_size * sizeof(llama_token));
+            restored_groups[target_id] = std::move(restored);
+        }
+        sequence_positions[target_id] = range;
+    }
+
+    std::vector<uint32_t> allocated_blocks;
+    for (const auto & item : sequence_blocks) {
+        allocated_blocks.insert(allocated_blocks.end(), item.second.begin(), item.second.end());
+    }
+    if (!block_manager.restore(allocated_blocks)) {
+        throw std::runtime_error("invalid paged KV block table");
+    }
+    for (const auto & item : sequence_groups) {
+        register_group(*item.second);
+    }
+
+    uint32_t n_saved_blocks;
+    io.read(&n_saved_blocks, sizeof(n_saved_blocks));
+    for (uint32_t i = 0; i < n_saved_blocks; ++i) {
+        uint32_t block_id;
+        io.read(&block_id, sizeof(block_id));
+        if (block_id >= num_gpu_blocks + num_cpu_blocks) {
+            throw std::runtime_error("invalid paged KV block id");
+        }
+        const bool is_gpu = block_manager.is_gpu(block_id);
+        const uint32_t local_id = is_gpu ? block_id : block_id - num_gpu_blocks;
+        for (uint32_t il = 0; il < n_layers; ++il) {
+            ggml_tensor * k = is_gpu ? k_gpu_layers[il] : k_cpu_layers[il];
+            ggml_tensor * v = is_gpu ? v_gpu_layers[il] : v_cpu_layers[il];
+            io.read_tensor(k, (size_t) local_id * block_bytes_k, block_bytes_k);
+            io.read_tensor(v, (size_t) local_id * block_bytes_v, block_bytes_v);
+        }
+    }
+
 }
 
 // llama_kv_cache_paged_context

@@ -40,6 +40,7 @@ static constexpr int          N_PREDICT         = 16;
 static constexpr int          N_COMPARE         = 4;  // token-equivalence window
 static constexpr int          TOP_K             = 5;
 static constexpr int          MIN_TOP_K_OVERLAP = 4;  // at least 4 of top-5 must match
+static constexpr double       MAX_PPL_RATIO     = 1.10;
 
 // Result of running one path: logits and sampled token sequence.
 struct path_result {
@@ -221,6 +222,31 @@ static void compare_logits(int step, const std::vector<float> & ref, const std::
     throw std::runtime_error("FAILED test.");
 }
 
+static double perplexity(const path_result & result, const std::vector<llama_token> & targets) {
+    EXPECT_TRUE(result.logits.size() >= targets.size());
+    double nll = 0.0;
+    for (size_t i = 0; i < targets.size(); ++i) {
+        const auto & logits = result.logits[i];
+        const float max_logit = *std::max_element(logits.begin(), logits.end());
+        double sum = 0.0;
+        for (const float logit : logits) {
+            sum += std::exp(logit - max_logit);
+        }
+        nll += std::log(sum) + max_logit - logits[targets[i]];
+    }
+    return std::exp(nll / targets.size());
+}
+
+static void compare_perplexity(const char * name, const path_result & ref, const path_result & paged) {
+    const size_t n = std::min(ref.tokens.size(), paged.logits.size());
+    EXPECT_TRUE(n >= N_COMPARE);
+    const std::vector<llama_token> targets(ref.tokens.begin(), ref.tokens.begin() + n);
+    const double ref_ppl = perplexity(ref, targets);
+    const double paged_ppl = perplexity(paged, targets);
+    fprintf(stderr, "  %s perplexity: reference=%.6f paged=%.6f ratio=%.6f\n", name, ref_ppl, paged_ppl, paged_ppl / ref_ppl);
+    EXPECT_TRUE(paged_ppl <= ref_ppl * MAX_PPL_RATIO);
+}
+
 static void compare_results(const path_result & ref, const path_result & paged_greedy, const path_result & paged_forced) {
     EXPECT_TRUE((int) ref.tokens.size() >= N_COMPARE);
     EXPECT_TRUE((int) paged_greedy.tokens.size() >= N_COMPARE);
@@ -237,7 +263,6 @@ static void compare_results(const path_result & ref, const path_result & paged_g
         compare_logits(i, ref.logits[i], paged_forced.logits[i]);
     }
 
-    fprintf(stderr, "test-paged-kv-e2e: PASSED\n");
 }
 
 int main(int argc, char ** argv) {
@@ -250,9 +275,8 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "skip: no --model provided\n");
         return 0;
     }
-    const ggml_type type_k = params.cache_type_k == GGML_TYPE_F16 ? GGML_TYPE_Q8_0 : params.cache_type_k;
-    const ggml_type type_v = params.cache_type_v == GGML_TYPE_F16 ? GGML_TYPE_Q8_0 : params.cache_type_v;
-
+    const ggml_type type_k = GGML_TYPE_Q8_0;
+    const ggml_type type_v = GGML_TYPE_Q8_0;
 
     common_init();
     llama_backend_init();
@@ -268,15 +292,24 @@ int main(int argc, char ** argv) {
 
     fprintf(stderr, "  got %zu tokens, %d-vocab logits\n", ref.tokens.size(), ref.n_vocab);
 
-    fprintf(stderr, "test-paged-kv-e2e: running independent paged path\n");
+    fprintf(stderr, "test-paged-kv-e2e: running q8_0 paged path\n");
     path_result paged_greedy = run_paged(params.model.path, {}, type_k, type_v);
     fprintf(stderr, "  got %zu tokens, %d-vocab logits\n", paged_greedy.tokens.size(), paged_greedy.n_vocab);
 
-    fprintf(stderr, "test-paged-kv-e2e: running forced paged path\n");
-    path_result paged_forced = run_paged(params.model.path, ref.tokens, type_k, type_v);
-    fprintf(stderr, "  got %zu tokens, %d-vocab logits\n", paged_forced.tokens.size(), paged_forced.n_vocab);
+    path_result paged_q8 = run_paged(params.model.path, ref.tokens, type_k, type_v);
+    compare_results(ref, paged_greedy, paged_q8);
+    compare_perplexity("q8_0", ref, paged_q8);
 
-    compare_results(ref, paged_greedy, paged_forced);
+    for (const ggml_type type : { GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO4_0 }) {
+        fprintf(stderr, "test-paged-kv-e2e: running %s paged path\n", ggml_type_name(type));
+        path_result paged = run_paged(params.model.path, ref.tokens, type, type);
+        EXPECT_TRUE(paged.logits.size() >= N_COMPARE);
+        for (int i = 0; i < N_COMPARE; ++i) {
+            compare_logits(i, ref.logits[i], paged.logits[i]);
+        }
+        compare_perplexity(ggml_type_name(type), ref, paged);
+    }
+    fprintf(stderr, "test-paged-kv-e2e: PASSED\n");
 
     llama_backend_free();
     return 0;

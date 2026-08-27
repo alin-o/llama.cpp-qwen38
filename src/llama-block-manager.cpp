@@ -104,6 +104,33 @@ void llama_block_manager::release_cpu_blocks(const physical_block_ids & freed_bl
     }
 }
 
+bool llama_block_manager::restore(const std::vector<uint32_t> & allocated_blocks) {
+    std::vector<bool> allocated(total_num_gpu_blocks + total_num_cpu_blocks);
+    for (const uint32_t id : allocated_blocks) {
+        if (id >= allocated.size() || allocated[id]) {
+            return false;
+        }
+        allocated[id] = true;
+    }
+
+    free_gpu_ids.clear();
+    free_cpu_ids.clear();
+    for (uint32_t id = 0; id < total_num_gpu_blocks; ++id) {
+        gpu_registry[id].ref_count = allocated[id] ? 1 : 0;
+        if (!allocated[id]) {
+            free_gpu_ids.push_back(id);
+        }
+    }
+    for (uint32_t id = 0; id < total_num_cpu_blocks; ++id) {
+        const uint32_t global_id = total_num_gpu_blocks + id;
+        cpu_registry[id].ref_count = allocated[global_id] ? 1 : 0;
+        if (!allocated[global_id]) {
+            free_cpu_ids.push_back(global_id);
+        }
+    }
+    return true;
+}
+
 bool llama_block_manager::is_gpu(uint32_t block_id) const {
     return block_id < total_num_gpu_blocks;
 }

@@ -40,6 +40,7 @@ class llama_block_manager {
 
     void release_gpu_blocks(const physical_block_ids & freed_blocks);
     void release_cpu_blocks(const physical_block_ids & freed_blocks);
+    bool restore(const std::vector<uint32_t> & allocated_blocks);
 
     bool is_gpu(uint32_t block) const;
 };
