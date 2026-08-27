@@ -1,0 +1,137 @@
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 24082 MiB):
+  Device 0: NVIDIA GeForce RTX 4090, compute capability 8.9, VMM: yes, VRAM: 24082 MiB
+0.00.525.956 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
+0.00.525.962 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
+0.00.525.967 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
+0.00.525.968 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
+0.00.525.970 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
+0.00.525.975 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
+0.00.525.976 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
+0.00.525.978 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
+0.00.525.979 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
+0.00.525.981 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
+0.00.525.982 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
+0.00.525.985 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
+0.00.525.988 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
+0.00.525.989 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
+0.00.525.994 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
+0.01.542.941 I common_init_result: fitting KV paged params to device memory
+0.01.543.062 I common_fit_paged_kv_blocks: free_vram=9760.5 MiB, free_ram=29783.4 MiB, margin=4816.6 MiB, bytes_per_block=8912896, n_gpu_blocks=17, n_cpu_blocks=16 (set) (set)
+0.01.577.232 I cmn          init: llama threadpool init, n_threads = 12
+0.01.577.258 I main: Loaded model and created context
+0.01.577.260 I main: benchmark repetition 1/4
+0.01.577.311 I add_request_from_pool: Successfully added request 0:  x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x
+0.01.577.322 I main: Start continuous batching loop. n_seq=1, n_predict=8, n_gpu_blocks=17, n_cpu_blocks=16
+0.01.823.409 I main: Finished paged example.
+0.01.823.413 I main: Paged KV cache outputs:
+0.01.823.413 I Request Id: 0:<s> x x x x x x x x x<\s>
+0.01.823.413 I 
+0.01.823.413 I === Paged KV Cache Summary ===
+0.01.823.413 I   n_sequences          : 1
+0.01.823.413 I   n_predict            : 8
+0.01.823.414 I   n_batch              : 256
+0.01.823.414 I   n_gpu_blocks         : 17
+0.01.823.414 I   n_cpu_blocks         : 16
+0.01.823.417 I   total elapsed        : 0.25 s
+0.01.823.417 I   total prompt tokens  : 64
+0.01.823.417 I   total decoded tokens : 8
+0.01.823.418 I   aggregate tps        : 32.51 tokens/s
+0.01.823.418 I   prefill tokens       : 64
+0.01.823.419 I   prefill time         : 68.994 ms
+0.01.823.419 I   pp t/s               : 927.62
+0.01.823.419 I   decode tokens        : 8
+0.01.823.419 I   decode time          : 175.227 ms
+0.01.823.420 I   tg t/s               : 45.66
+0.01.823.420 I   --- per-request latency ---
+0.01.823.420 I   ttft  avg / min / max : 69.8 / 69.8 / 69.8 ms
+0.01.823.420 I   tpot  avg             : 25.2 ms/token
+0.01.823.421 I   e2e   avg             : 246.1 ms
+0.01.823.421 I   tps   min / max       : 45.4 / 45.4 tokens/s
+0.01.823.421 I ==============================
+0.01.832.182 I main: benchmark repetition 2/4
+0.01.832.222 I add_request_from_pool: Successfully added request 0:  x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x
+0.01.832.236 I main: Start continuous batching loop. n_seq=1, n_predict=8, n_gpu_blocks=17, n_cpu_blocks=16
+0.02.045.301 I main: Finished paged example.
+0.02.045.304 I main: Paged KV cache outputs:
+0.02.045.304 I Request Id: 0:<s> x x x x x x x x x<\s>
+0.02.045.304 I 
+0.02.045.304 I === Paged KV Cache Summary ===
+0.02.045.305 I   n_sequences          : 1
+0.02.045.305 I   n_predict            : 8
+0.02.045.305 I   n_batch              : 256
+0.02.045.305 I   n_gpu_blocks         : 17
+0.02.045.305 I   n_cpu_blocks         : 16
+0.02.045.308 I   total elapsed        : 0.21 s
+0.02.045.308 I   total prompt tokens  : 64
+0.02.045.308 I   total decoded tokens : 8
+0.02.045.310 I   aggregate tps        : 37.55 tokens/s
+0.02.045.310 I   prefill tokens       : 64
+0.02.045.310 I   prefill time         : 38.523 ms
+0.02.045.310 I   pp t/s               : 1661.35
+0.02.045.311 I   decode tokens        : 8
+0.02.045.311 I   decode time          : 172.707 ms
+0.02.045.311 I   tg t/s               : 46.32
+0.02.045.311 I   --- per-request latency ---
+0.02.045.311 I   ttft  avg / min / max : 39.2 / 39.2 / 39.2 ms
+0.02.045.312 I   tpot  avg             : 24.8 ms/token
+0.02.045.312 I   e2e   avg             : 213.1 ms
+0.02.045.312 I   tps   min / max       : 46.0 / 46.0 tokens/s
+0.02.045.312 I ==============================
+0.02.054.405 I main: benchmark repetition 3/4
+0.02.054.445 I add_request_from_pool: Successfully added request 0:  x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x
+0.02.054.458 I main: Start continuous batching loop. n_seq=1, n_predict=8, n_gpu_blocks=17, n_cpu_blocks=16
+0.02.267.797 I main: Finished paged example.
+0.02.267.801 I main: Paged KV cache outputs:
+0.02.267.801 I Request Id: 0:<s> x x x x x x x x x<\s>
+0.02.267.801 I 
+0.02.267.802 I === Paged KV Cache Summary ===
+0.02.267.802 I   n_sequences          : 1
+0.02.267.802 I   n_predict            : 8
+0.02.267.802 I   n_batch              : 256
+0.02.267.802 I   n_gpu_blocks         : 17
+0.02.267.802 I   n_cpu_blocks         : 16
+0.02.267.805 I   total elapsed        : 0.21 s
+0.02.267.806 I   total prompt tokens  : 64
+0.02.267.806 I   total decoded tokens : 8
+0.02.267.807 I   aggregate tps        : 37.50 tokens/s
+0.02.267.807 I   prefill tokens       : 64
+0.02.267.807 I   prefill time         : 38.898 ms
+0.02.267.807 I   pp t/s               : 1645.33
+0.02.267.808 I   decode tokens        : 8
+0.02.267.808 I   decode time          : 173.050 ms
+0.02.267.808 I   tg t/s               : 46.23
+0.02.267.809 I   --- per-request latency ---
+0.02.267.809 I   ttft  avg / min / max : 39.2 / 39.2 / 39.2 ms
+0.02.267.809 I   tpot  avg             : 24.9 ms/token
+0.02.267.809 I   e2e   avg             : 213.3 ms
+0.02.267.810 I   tps   min / max       : 45.9 / 45.9 tokens/s
+0.02.267.810 I ==============================
+0.02.276.720 I main: benchmark repetition 4/4
+0.02.276.759 I add_request_from_pool: Successfully added request 0:  x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x
+0.02.276.772 I main: Start continuous batching loop. n_seq=1, n_predict=8, n_gpu_blocks=17, n_cpu_blocks=16
+0.02.489.092 I main: Finished paged example.
+0.02.489.095 I main: Paged KV cache outputs:
+0.02.489.095 I Request Id: 0:<s> x x x x x x x x x<\s>
+0.02.489.095 I 
+0.02.489.095 I === Paged KV Cache Summary ===
+0.02.489.095 I   n_sequences          : 1
+0.02.489.095 I   n_predict            : 8
+0.02.489.095 I   n_batch              : 256
+0.02.489.096 I   n_gpu_blocks         : 17
+0.02.489.096 I   n_cpu_blocks         : 16
+0.02.489.099 I   total elapsed        : 0.21 s
+0.02.489.099 I   total prompt tokens  : 64
+0.02.489.099 I   total decoded tokens : 8
+0.02.489.100 I   aggregate tps        : 37.68 tokens/s
+0.02.489.100 I   prefill tokens       : 64
+0.02.489.100 I   prefill time         : 38.508 ms
+0.02.489.101 I   pp t/s               : 1661.99
+0.02.489.101 I   decode tokens        : 8
+0.02.489.101 I   decode time          : 172.490 ms
+0.02.489.101 I   tg t/s               : 46.38
+0.02.489.102 I   --- per-request latency ---
+0.02.489.102 I   ttft  avg / min / max : 38.8 / 38.8 / 38.8 ms
+0.02.489.102 I   tpot  avg             : 24.8 ms/token
+0.02.489.102 I   e2e   avg             : 212.3 ms
+0.02.489.103 I   tps   min / max       : 46.1 / 46.1 tokens/s
+0.02.489.103 I ==============================

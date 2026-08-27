@@ -1,0 +1,145 @@
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 24082 MiB):
+  Device 0: NVIDIA GeForce RTX 4090, compute capability 8.9, VMM: yes, VRAM: 24082 MiB
+0.00.509.466 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
+0.00.509.471 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
+0.00.509.475 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
+0.00.509.477 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
+0.00.509.478 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
+0.00.509.483 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
+0.00.509.485 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
+0.00.509.486 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
+0.00.509.488 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
+0.00.509.489 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
+0.00.509.491 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
+0.00.509.493 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
+0.00.509.496 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
+0.00.509.502 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
+0.00.509.507 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
+0.01.530.209 I common_init_result: fitting KV paged params to device memory
+0.01.530.329 I common_fit_paged_kv_blocks: free_vram=9632.5 MiB, free_ram=29926.0 MiB, margin=4816.6 MiB, bytes_per_block=8912896, n_gpu_blocks=32, n_cpu_blocks=16 (set) (set)
+0.01.566.802 I cmn          init: llama threadpool init, n_threads = 12
+0.01.566.826 I main: Loaded model and created context
+0.01.566.827 I main: benchmark repetition 1/4
+0.01.566.930 I add_request_from_pool: Successfully added request 0:  x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x
+0.01.567.005 I add_request_from_pool: Successfully added request 1:  x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x
+0.01.567.011 I main: Start continuous batching loop. n_seq=2, n_predict=8, n_gpu_blocks=32, n_cpu_blocks=16
+0.01.567.018 E check_deadlock: Scheduler deadlock detected. 0 sequence(s) are swapped out and 2 are waiting, but there are not enough free GPU blocks to make progress. Hint: increase n_gpu_blocks (currently 32) or reduce n_sequences.
+0.01.567.020 E llama_paged_scheduler_prepare_batch: Deadlock detected.
+0.01.567.020 I main: Finished paged example.
+0.01.567.020 I main: Paged KV cache outputs:
+0.01.567.021 I 
+0.01.567.021 I === Paged KV Cache Summary ===
+0.01.567.021 I   n_sequences          : 2
+0.01.567.021 I   n_predict            : 8
+0.01.567.021 I   n_batch              : 256
+0.01.567.021 I   n_gpu_blocks         : 32
+0.01.567.021 I   n_cpu_blocks         : 16
+0.01.567.022 I   total elapsed        : 0.00 s
+0.01.567.023 I   total prompt tokens  : 0
+0.01.567.023 I   total decoded tokens : 0
+0.01.567.023 I   aggregate tps        : 0.00 tokens/s
+0.01.567.023 I   prefill tokens       : 0
+0.01.567.024 I   prefill time         : 0.000 ms
+0.01.567.024 I   pp t/s               : 0.00
+0.01.567.025 I   decode tokens        : 0
+0.01.567.025 I   decode time          : 0.000 ms
+0.01.567.025 I   tg t/s               : 0.00
+0.01.567.025 I   --- per-request latency ---
+0.01.567.026 I   ttft  avg / min / max : 0.0 / 340282346638528859811704183484516925440.0 / 0.0 ms
+0.01.567.027 I   tpot  avg             : 0.0 ms/token
+0.01.567.027 I   e2e   avg             : 0.0 ms
+0.01.567.028 I   tps   min / max       : 340282346638528859811704183484516925440.0 / 0.0 tokens/s
+0.01.567.028 I ==============================
+0.01.576.829 I main: benchmark repetition 2/4
+0.01.576.912 I add_request_from_pool: Successfully added request 0:  x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x
+0.01.576.984 I add_request_from_pool: Successfully added request 1:  x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x
+0.01.576.989 I main: Start continuous batching loop. n_seq=2, n_predict=8, n_gpu_blocks=32, n_cpu_blocks=16
+0.01.576.993 E check_deadlock: Scheduler deadlock detected. 0 sequence(s) are swapped out and 2 are waiting, but there are not enough free GPU blocks to make progress. Hint: increase n_gpu_blocks (currently 32) or reduce n_sequences.
+0.01.576.993 E llama_paged_scheduler_prepare_batch: Deadlock detected.
+0.01.576.993 I main: Finished paged example.
+0.01.576.993 I main: Paged KV cache outputs:
+0.01.576.993 I 
+0.01.576.994 I === Paged KV Cache Summary ===
+0.01.576.994 I   n_sequences          : 2
+0.01.576.994 I   n_predict            : 8
+0.01.576.994 I   n_batch              : 256
+0.01.576.994 I   n_gpu_blocks         : 32
+0.01.576.995 I   n_cpu_blocks         : 16
+0.01.576.996 I   total elapsed        : 0.00 s
+0.01.576.997 I   total prompt tokens  : 0
+0.01.576.997 I   total decoded tokens : 0
+0.01.576.997 I   aggregate tps        : 0.00 tokens/s
+0.01.576.997 I   prefill tokens       : 0
+0.01.576.998 I   prefill time         : 0.000 ms
+0.01.576.998 I   pp t/s               : 0.00
+0.01.576.998 I   decode tokens        : 0
+0.01.576.998 I   decode time          : 0.000 ms
+0.01.576.998 I   tg t/s               : 0.00
+0.01.576.999 I   --- per-request latency ---
+0.01.577.000 I   ttft  avg / min / max : 0.0 / 340282346638528859811704183484516925440.0 / 0.0 ms
+0.01.577.000 I   tpot  avg             : 0.0 ms/token
+0.01.577.000 I   e2e   avg             : 0.0 ms
+0.01.577.001 I   tps   min / max       : 340282346638528859811704183484516925440.0 / 0.0 tokens/s
+0.01.577.001 I ==============================
+0.01.586.455 I main: benchmark repetition 3/4
+0.01.586.534 I add_request_from_pool: Successfully added request 0:  x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x
+0.01.586.606 I add_request_from_pool: Successfully added request 1:  x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x
+0.01.586.611 I main: Start continuous batching loop. n_seq=2, n_predict=8, n_gpu_blocks=32, n_cpu_blocks=16
+0.01.586.613 E check_deadlock: Scheduler deadlock detected. 0 sequence(s) are swapped out and 2 are waiting, but there are not enough free GPU blocks to make progress. Hint: increase n_gpu_blocks (currently 32) or reduce n_sequences.
+0.01.586.615 E llama_paged_scheduler_prepare_batch: Deadlock detected.
+0.01.586.615 I main: Finished paged example.
+0.01.586.615 I main: Paged KV cache outputs:
+0.01.586.615 I 
+0.01.586.615 I === Paged KV Cache Summary ===
+0.01.586.616 I   n_sequences          : 2
+0.01.586.616 I   n_predict            : 8
+0.01.586.616 I   n_batch              : 256
+0.01.586.616 I   n_gpu_blocks         : 32
+0.01.586.616 I   n_cpu_blocks         : 16
+0.01.586.618 I   total elapsed        : 0.00 s
+0.01.586.618 I   total prompt tokens  : 0
+0.01.586.618 I   total decoded tokens : 0
+0.01.586.619 I   aggregate tps        : 0.00 tokens/s
+0.01.586.619 I   prefill tokens       : 0
+0.01.586.619 I   prefill time         : 0.000 ms
+0.01.586.619 I   pp t/s               : 0.00
+0.01.586.619 I   decode tokens        : 0
+0.01.586.619 I   decode time          : 0.000 ms
+0.01.586.619 I   tg t/s               : 0.00
+0.01.586.619 I   --- per-request latency ---
+0.01.586.621 I   ttft  avg / min / max : 0.0 / 340282346638528859811704183484516925440.0 / 0.0 ms
+0.01.586.621 I   tpot  avg             : 0.0 ms/token
+0.01.586.621 I   e2e   avg             : 0.0 ms
+0.01.586.622 I   tps   min / max       : 340282346638528859811704183484516925440.0 / 0.0 tokens/s
+0.01.586.622 I ==============================
+0.01.595.665 I main: benchmark repetition 4/4
+0.01.595.745 I add_request_from_pool: Successfully added request 0:  x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x
+0.01.595.815 I add_request_from_pool: Successfully added request 1:  x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x
+0.01.595.820 I main: Start continuous batching loop. n_seq=2, n_predict=8, n_gpu_blocks=32, n_cpu_blocks=16
+0.01.595.823 E check_deadlock: Scheduler deadlock detected. 0 sequence(s) are swapped out and 2 are waiting, but there are not enough free GPU blocks to make progress. Hint: increase n_gpu_blocks (currently 32) or reduce n_sequences.
+0.01.595.824 E llama_paged_scheduler_prepare_batch: Deadlock detected.
+0.01.595.824 I main: Finished paged example.
+0.01.595.824 I main: Paged KV cache outputs:
+0.01.595.824 I 
+0.01.595.824 I === Paged KV Cache Summary ===
+0.01.595.824 I   n_sequences          : 2
+0.01.595.825 I   n_predict            : 8
+0.01.595.825 I   n_batch              : 256
+0.01.595.825 I   n_gpu_blocks         : 32
+0.01.595.826 I   n_cpu_blocks         : 16
+0.01.595.828 I   total elapsed        : 0.00 s
+0.01.595.829 I   total prompt tokens  : 0
+0.01.595.829 I   total decoded tokens : 0
+0.01.595.829 I   aggregate tps        : 0.00 tokens/s
+0.01.595.829 I   prefill tokens       : 0
+0.01.595.829 I   prefill time         : 0.000 ms
+0.01.595.830 I   pp t/s               : 0.00
+0.01.595.830 I   decode tokens        : 0
+0.01.595.830 I   decode time          : 0.000 ms
+0.01.595.830 I   tg t/s               : 0.00
+0.01.595.831 I   --- per-request latency ---
+0.01.595.832 I   ttft  avg / min / max : 0.0 / 340282346638528859811704183484516925440.0 / 0.0 ms
+0.01.595.832 I   tpot  avg             : 0.0 ms/token
+0.01.595.832 I   e2e   avg             : 0.0 ms
+0.01.595.833 I   tps   min / max       : 340282346638528859811704183484516925440.0 / 0.0 tokens/s
+0.01.595.834 I ==============================

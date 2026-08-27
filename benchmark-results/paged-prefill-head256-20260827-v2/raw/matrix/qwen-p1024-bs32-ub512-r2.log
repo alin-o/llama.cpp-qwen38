@@ -1,0 +1,145 @@
+ggml_cuda_init: found 1 CUDA devices (Total VRAM: 24082 MiB):
+  Device 0: NVIDIA GeForce RTX 4090, compute capability 8.9, VMM: yes, VRAM: 24082 MiB
+0.00.524.523 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
+0.00.524.528 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
+0.00.524.532 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
+0.00.524.534 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
+0.00.524.536 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
+0.00.524.541 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
+0.00.524.542 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
+0.00.524.544 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
+0.00.524.545 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
+0.00.524.547 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
+0.00.524.548 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
+0.00.524.550 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
+0.00.524.552 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
+0.00.524.554 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
+0.00.524.559 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
+0.01.560.581 I common_init_result: fitting KV paged params to device memory
+0.01.560.703 I common_fit_paged_kv_blocks: free_vram=9700.5 MiB, free_ram=29869.4 MiB, margin=4816.6 MiB, bytes_per_block=4456448, n_gpu_blocks=48, n_cpu_blocks=16 (set) (set)
+0.01.590.011 I cmn          init: llama threadpool init, n_threads = 12
+0.01.590.038 I main: Loaded model and created context
+0.01.590.040 I main: benchmark repetition 1/4
+0.01.590.151 I add_request_from_pool: Successfully added request 0:  x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x
+0.01.590.230 I add_request_from_pool: Successfully added request 1:  x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x
+0.01.590.235 I main: Start continuous batching loop. n_seq=2, n_predict=8, n_gpu_blocks=48, n_cpu_blocks=16
+0.02.420.678 I main: Finished paged example.
+0.02.420.682 I main: Paged KV cache outputs:
+0.02.420.682 I Request Id: 0:<s> x x x x x x x x x<\s>
+0.02.420.682 I Request Id: 1:<s> x x x x x x x x x<\s>
+0.02.420.682 I 
+0.02.420.683 I === Paged KV Cache Summary ===
+0.02.420.683 I   n_sequences          : 2
+0.02.420.683 I   n_predict            : 8
+0.02.420.683 I   n_batch              : 512
+0.02.420.683 I   n_gpu_blocks         : 48
+0.02.420.683 I   n_cpu_blocks         : 16
+0.02.420.687 I   total elapsed        : 0.83 s
+0.02.420.687 I   total prompt tokens  : 1024
+0.02.420.692 I   total decoded tokens : 16
+0.02.420.693 I   aggregate tps        : 19.27 tokens/s
+0.02.420.693 I   prefill tokens       : 1024
+0.02.420.694 I   prefill time         : 378.887 ms
+0.02.420.694 I   pp t/s               : 2702.65
+0.02.420.694 I   decode tokens        : 16
+0.02.420.695 I   decode time          : 447.279 ms
+0.02.420.695 I   tg t/s               : 35.77
+0.02.420.695 I   --- per-request latency ---
+0.02.420.696 I   ttft  avg / min / max : 407.3 / 205.6 / 609.0 ms
+0.02.420.696 I   tpot  avg             : 32.1 ms/token
+0.02.420.696 I   e2e   avg             : 632.4 ms
+0.02.420.696 I   tps   min / max       : 35.0 / 36.1 tokens/s
+0.02.420.697 I ==============================
+0.02.425.367 I main: benchmark repetition 2/4
+0.02.425.468 I add_request_from_pool: Successfully added request 0:  x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x
+0.02.425.549 I add_request_from_pool: Successfully added request 1:  x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x
+0.02.425.554 I main: Start continuous batching loop. n_seq=2, n_predict=8, n_gpu_blocks=48, n_cpu_blocks=16
+0.03.215.621 I main: Finished paged example.
+0.03.215.625 I main: Paged KV cache outputs:
+0.03.215.625 I Request Id: 0:<s> x x x x x x x x x<\s>
+0.03.215.625 I Request Id: 1:<s> x x x x x x x x x<\s>
+0.03.215.625 I 
+0.03.215.625 I === Paged KV Cache Summary ===
+0.03.215.626 I   n_sequences          : 2
+0.03.215.626 I   n_predict            : 8
+0.03.215.626 I   n_batch              : 512
+0.03.215.626 I   n_gpu_blocks         : 48
+0.03.215.626 I   n_cpu_blocks         : 16
+0.03.215.629 I   total elapsed        : 0.79 s
+0.03.215.630 I   total prompt tokens  : 1024
+0.03.215.634 I   total decoded tokens : 16
+0.03.215.636 I   aggregate tps        : 20.25 tokens/s
+0.03.215.636 I   prefill tokens       : 1024
+0.03.215.637 I   prefill time         : 348.321 ms
+0.03.215.637 I   pp t/s               : 2939.82
+0.03.215.637 I   decode tokens        : 16
+0.03.215.638 I   decode time          : 438.851 ms
+0.03.215.638 I   tg t/s               : 36.46
+0.03.215.638 I   --- per-request latency ---
+0.03.215.638 I   ttft  avg / min / max : 372.0 / 174.9 / 569.1 ms
+0.03.215.639 I   tpot  avg             : 31.5 ms/token
+0.03.215.639 I   e2e   avg             : 592.6 ms
+0.03.215.639 I   tps   min / max       : 36.2 / 36.3 tokens/s
+0.03.215.639 I ==============================
+0.03.220.299 I main: benchmark repetition 3/4
+0.03.220.401 I add_request_from_pool: Successfully added request 0:  x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x
+0.03.220.482 I add_request_from_pool: Successfully added request 1:  x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x
+0.03.220.488 I main: Start continuous batching loop. n_seq=2, n_predict=8, n_gpu_blocks=48, n_cpu_blocks=16
+0.04.010.695 I main: Finished paged example.
+0.04.010.699 I main: Paged KV cache outputs:
+0.04.010.699 I Request Id: 0:<s> x x x x x x x x x<\s>
+0.04.010.699 I Request Id: 1:<s> x x x x x x x x x<\s>
+0.04.010.700 I 
+0.04.010.700 I === Paged KV Cache Summary ===
+0.04.010.700 I   n_sequences          : 2
+0.04.010.700 I   n_predict            : 8
+0.04.010.700 I   n_batch              : 512
+0.04.010.700 I   n_gpu_blocks         : 48
+0.04.010.700 I   n_cpu_blocks         : 16
+0.04.010.703 I   total elapsed        : 0.79 s
+0.04.010.704 I   total prompt tokens  : 1024
+0.04.010.704 I   total decoded tokens : 16
+0.04.010.705 I   aggregate tps        : 20.25 tokens/s
+0.04.010.705 I   prefill tokens       : 1024
+0.04.010.706 I   prefill time         : 348.766 ms
+0.04.010.706 I   pp t/s               : 2936.07
+0.04.010.706 I   decode tokens        : 16
+0.04.010.706 I   decode time          : 438.591 ms
+0.04.010.707 I   tg t/s               : 36.48
+0.04.010.707 I   --- per-request latency ---
+0.04.010.707 I   ttft  avg / min / max : 372.6 / 174.9 / 570.2 ms
+0.04.010.708 I   tpot  avg             : 31.5 ms/token
+0.04.010.708 I   e2e   avg             : 593.0 ms
+0.04.010.708 I   tps   min / max       : 36.2 / 36.4 tokens/s
+0.04.010.708 I ==============================
+0.04.015.434 I main: benchmark repetition 4/4
+0.04.015.533 I add_request_from_pool: Successfully added request 0:  x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x
+0.04.015.614 I add_request_from_pool: Successfully added request 1:  x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x
+0.04.015.619 I main: Start continuous batching loop. n_seq=2, n_predict=8, n_gpu_blocks=48, n_cpu_blocks=16
+0.04.811.785 I main: Finished paged example.
+0.04.811.788 I main: Paged KV cache outputs:
+0.04.811.789 I Request Id: 0:<s> x x x x x x x x x<\s>
+0.04.811.789 I Request Id: 1:<s> x x x x x x x x x<\s>
+0.04.811.789 I 
+0.04.811.789 I === Paged KV Cache Summary ===
+0.04.811.789 I   n_sequences          : 2
+0.04.811.789 I   n_predict            : 8
+0.04.811.790 I   n_batch              : 512
+0.04.811.790 I   n_gpu_blocks         : 48
+0.04.811.790 I   n_cpu_blocks         : 16
+0.04.811.793 I   total elapsed        : 0.80 s
+0.04.811.793 I   total prompt tokens  : 1024
+0.04.811.793 I   total decoded tokens : 16
+0.04.811.794 I   aggregate tps        : 20.10 tokens/s
+0.04.811.796 I   prefill tokens       : 1024
+0.04.811.796 I   prefill time         : 350.064 ms
+0.04.811.797 I   pp t/s               : 2925.18
+0.04.811.797 I   decode tokens        : 16
+0.04.811.798 I   decode time          : 442.699 ms
+0.04.811.798 I   tg t/s               : 36.14
+0.04.811.799 I   --- per-request latency ---
+0.04.811.799 I   ttft  avg / min / max : 374.1 / 175.4 / 572.7 ms
+0.04.811.799 I   tpot  avg             : 31.8 ms/token
+0.04.811.799 I   e2e   avg             : 596.8 ms
+0.04.811.800 I   tps   min / max       : 35.8 / 36.0 tokens/s
+0.04.811.800 I ==============================
