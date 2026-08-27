@@ -1,6 +1,6 @@
 # Paged prefill acceptance evidence
 
-Source-matched CUDA build: `9a766f87d`.
+Source-matched CUDA build: `92c7dd195`.
 
 ## Fixed prompts
 
@@ -28,8 +28,8 @@ Paged Q8_0, same GPU, context, batch, prompt length, and decode length:
 build-verify-cuda/bin/llama-paged -m /models/qwen38/Qwen3.8-27B-UD-Q4_K_S.gguf -dev cuda0 -ngl 99 -c 8192 -b 4096 -ub 4096 -n 8 -f reports/paged-4096-prompt.txt -kvp -ctk q8_0 -ctv q8_0 -ngpub 320 -ncpub 320 --kv-paged-watermark 0 -ns 1 -np 1 --timing --perf --temp 0 -s 1234
 ```
 
-- pp: 54.34 tok/s
-- tg: 13.40 tok/s
+- pp: 54.22 tok/s
+- tg: 13.23 tok/s
 - completed: 4096 prompt tokens plus 8 generated tokens
 
 ## Tiel-Coder-35B-A3B-MTP-UD-Q4_K_S
