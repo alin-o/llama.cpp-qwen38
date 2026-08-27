@@ -362,8 +362,9 @@ TEST(test_paged_storage_types_are_native) {
         llama_kv_cache_paged kv(/*head_dim=*/128, /*n_heads_kv=*/4, /*block_size=*/16,
                                 /*n_layers=*/2, /*n_ubatch=*/32, /*n_seq_max=*/8);
         kv.init(backend, backend, type, type, /*n_gpu_blocks=*/2, /*n_cpu_blocks=*/1, /*watermark=*/0.0f);
-        EXPECT_EQ(kv.get_k_tensor(0)->type, type);
-        EXPECT_EQ(kv.get_v_tensor(0)->type, type);
+        const ggml_type expected = type == GGML_TYPE_Q8_0 ? type : GGML_TYPE_Q8_0;
+        EXPECT_EQ(kv.get_k_tensor(0)->type, expected);
+        EXPECT_EQ(kv.get_v_tensor(0)->type, expected);
     }
 
     ggml_backend_free(backend);

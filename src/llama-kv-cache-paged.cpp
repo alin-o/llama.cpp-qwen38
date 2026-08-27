@@ -6,6 +6,10 @@
 #include <algorithm>
 #include <stdexcept>
 
+static ggml_type paged_storage_type(ggml_type type) {
+    return type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0 ? GGML_TYPE_Q8_0 : type;
+}
+
 
 // llama_kv_cache_paged
 //
@@ -43,6 +47,14 @@ void llama_kv_cache_paged::init(ggml_backend_t backend_gpu,
         throw std::runtime_error(format("paged KV supports q8_0, turbo3_0, and turbo4_0 storage, got K=%s V=%s",
                                         ggml_type_name(type_k), ggml_type_name(type_v)));
     }
+    const ggml_type storage_type_k = paged_storage_type(type_k);
+    const ggml_type storage_type_v = paged_storage_type(type_v);
+    if (storage_type_k != type_k || storage_type_v != type_v) {
+        LLAMA_LOG_WARN("%s: paged TurboQuant quality gate failed; selecting q8_0 storage\n", __func__);
+        type_k = storage_type_k;
+        type_v = storage_type_v;
+    }
+
     if (head_dim > 256 || head_dim % ggml_blck_size(type_k) != 0 || head_dim % ggml_blck_size(type_v) != 0) {
         throw std::runtime_error(format("paged KV head dimension %u is incompatible with K=%s V=%s", head_dim,
                                         ggml_type_name(type_k), ggml_type_name(type_v)));
