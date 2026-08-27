@@ -29,6 +29,58 @@ static __device__ __forceinline__ float paged_cache_value(const char * row, int 
             return 0.0f;
     }
 }
+static __device__ __forceinline__ float4 paged_cache_value4(const char * row, int index, int type) {
+    switch (type) {
+        case GGML_TYPE_Q8_0: {
+            const block_q8_0 * block = (const block_q8_0 *) row + index / QK8_0;
+            const char4 qs = *(const char4 *) (block->qs + index % QK8_0);
+            const float d = __half2float(block->d);
+            return make_float4(d * qs.x, d * qs.y, d * qs.z, d * qs.w);
+        }
+        case GGML_TYPE_TURBO3_0: {
+            const block_turbo3_0 * block = (const block_turbo3_0 *) row + index / QK_TURBO3;
+            const int offset = index % QK_TURBO3;
+            const uint8_t qs = block->qs[offset / 4];
+            const uint8_t signs = block->signs[offset / 8];
+            const float norm = __half2float(block->norm);
+            return make_float4(
+                norm * TURBO3_CENTROIDS[((qs >> 0) & 3) | (((signs >> ((offset + 0) % 8)) & 1) << 2)],
+                norm * TURBO3_CENTROIDS[((qs >> 2) & 3) | (((signs >> ((offset + 1) % 8)) & 1) << 2)],
+                norm * TURBO3_CENTROIDS[((qs >> 4) & 3) | (((signs >> ((offset + 2) % 8)) & 1) << 2)],
+                norm * TURBO3_CENTROIDS[((qs >> 6) & 3) | (((signs >> ((offset + 3) % 8)) & 1) << 2)]);
+        }
+        case GGML_TYPE_TURBO4_0: {
+            const block_turbo4_0 * block = (const block_turbo4_0 *) row + index / QK_TURBO4;
+            const uint16_t qs = *(const uint16_t *) (block->qs + index % QK_TURBO4 / 2);
+            const float norm = __half2float(block->norm);
+            return make_float4(
+                norm * TURBO4_CENTROIDS[(qs >>  0) & 0xf], norm * TURBO4_CENTROIDS[(qs >>  4) & 0xf],
+                norm * TURBO4_CENTROIDS[(qs >>  8) & 0xf], norm * TURBO4_CENTROIDS[(qs >> 12) & 0xf]);
+        }
+        default:
+            return make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+}
+
+static __device__ __forceinline__ void paged_store_half4(half * dst, float4 value) {
+    *(half2 *) (dst + 0) = __floats2half2_rn(value.x, value.y);
+    *(half2 *) (dst + 2) = __floats2half2_rn(value.z, value.w);
+}
+
+static __device__ __forceinline__ void paged_store_transposed_half4(half (* dst)[16], int col, int row, float4 value) {
+    dst[col + 0][row] = __float2half_rn(value.x);
+    dst[col + 1][row] = __float2half_rn(value.y);
+    dst[col + 2][row] = __float2half_rn(value.z);
+    dst[col + 3][row] = __float2half_rn(value.w);
+}
+
+static __device__ __forceinline__ float4 paged_load_float4(const float * src) {
+    return *(const float4 *) src;
+}
+
+static __device__ __forceinline__ void paged_store_float4(float * dst, float4 value) {
+    *(float4 *) dst = value;
+}
 
 static __device__ __forceinline__ float block_reduce_sum_full(float value, float * smem, int tid, int head_dim) {
     const int lane = tid & 31;
@@ -145,14 +197,14 @@ __global__ void paged_attention_prefill_mma_kernel(
         float * out) {
     constexpr int Q_TILE = 16;
     constexpr int K_TILE = 16;
-    constexpr int VALUES_PER_THREAD = 16;
-    constexpr int OUTPUT_THREADS = Q_TILE * HEAD_DIM / VALUES_PER_THREAD;
 
     __shared__ half q_shared[Q_TILE][HEAD_DIM];
     __shared__ half k_shared[K_TILE][HEAD_DIM];
-    __shared__ half v_shared[K_TILE][HEAD_DIM];
+    __shared__ half v_shared[HEAD_DIM][K_TILE];
     __shared__ float scores_shared[Q_TILE][K_TILE];
-    __shared__ float weights_shared[Q_TILE][K_TILE];
+    __shared__ half weights_shared[Q_TILE][K_TILE];
+    __shared__ float values_shared[Q_TILE][HEAD_DIM];
+    __shared__ float value_acc_shared[Q_TILE][HEAD_DIM];
     __shared__ float max_shared[Q_TILE];
     __shared__ float sum_shared[Q_TILE];
     __shared__ float rescale_shared[Q_TILE];
@@ -174,19 +226,12 @@ __global__ void paged_attention_prefill_mma_kernel(
     for (int vec = tid; vec < Q_TILE * HEAD_DIM / 4; vec += blockDim.x) {
         const int q_row = vec / (HEAD_DIM / 4);
         const int q_dim = (vec % (HEAD_DIM / 4)) * 4;
-        const int q_token = q_tile_start + q_row;
+        const int q_token = context_len - num_new_tokens + q_tile_start + q_row;
         if (q_token < num_new_tokens) {
             const size_t q_offset = (size_t) (seq_start + q_token) * n_heads * HEAD_DIM + (size_t) head_idx * HEAD_DIM + q_dim;
-            const float4 q_vec = *(const float4 *) (q + q_offset);
-            q_shared[q_row][q_dim + 0] = __float2half_rn(q_vec.x);
-            q_shared[q_row][q_dim + 1] = __float2half_rn(q_vec.y);
-            q_shared[q_row][q_dim + 2] = __float2half_rn(q_vec.z);
-            q_shared[q_row][q_dim + 3] = __float2half_rn(q_vec.w);
+            paged_store_half4(&q_shared[q_row][q_dim], *(const float4 *) (q + q_offset));
         } else {
-            q_shared[q_row][q_dim + 0] = __float2half_rn(0.0f);
-            q_shared[q_row][q_dim + 1] = __float2half_rn(0.0f);
-            q_shared[q_row][q_dim + 2] = __float2half_rn(0.0f);
-            q_shared[q_row][q_dim + 3] = __float2half_rn(0.0f);
+            paged_store_half4(&q_shared[q_row][q_dim], make_float4(0.0f, 0.0f, 0.0f, 0.0f));
         }
     }
 
@@ -196,22 +241,26 @@ __global__ void paged_attention_prefill_mma_kernel(
     }
     __syncthreads();
 
-    float acc[VALUES_PER_THREAD] = { 0.0f };
+    for (int vec = tid; vec < Q_TILE * HEAD_DIM / 4; vec += blockDim.x) {
+        paged_store_float4(&value_acc_shared[0][0] + vec * 4, make_float4(0.0f, 0.0f, 0.0f, 0.0f));
+    }
+    __syncthreads();
+
     for (int token_start = 0; token_start < context_len; token_start += K_TILE) {
-        for (int element = tid; element < K_TILE * HEAD_DIM; element += blockDim.x) {
-            const int key = element / HEAD_DIM;
-            const int dim = element % HEAD_DIM;
+        for (int vec = tid; vec < K_TILE * HEAD_DIM / 4; vec += blockDim.x) {
+            const int key = vec / (HEAD_DIM / 4);
+            const int dim = (vec % (HEAD_DIM / 4)) * 4;
             const int token = token_start + key;
             if (token < context_len) {
                 const int physical_block = block_table[seq_idx * max_blocks + token / block_size];
                 const int token_in_block = token % block_size;
                 const char * k_row = k_cache + (size_t) physical_block * k_stride_block + (size_t) kv_head_idx * k_stride_head + (size_t) token_in_block * k_stride_token;
                 const char * v_row = v_cache + (size_t) physical_block * v_stride_block + (size_t) kv_head_idx * v_stride_head + (size_t) token_in_block * v_stride_token;
-                k_shared[key][dim] = __float2half_rn(paged_cache_value(k_row, dim, k_type));
-                v_shared[key][dim] = __float2half_rn(paged_cache_value(v_row, dim, v_type));
+                paged_store_half4(&k_shared[key][dim], paged_cache_value4(k_row, dim, k_type));
+                paged_store_transposed_half4(v_shared, dim, key, paged_cache_value4(v_row, dim, v_type));
             } else {
-                k_shared[key][dim] = __float2half_rn(0.0f);
-                v_shared[key][dim] = __float2half_rn(0.0f);
+                paged_store_half4(&k_shared[key][dim], make_float4(0.0f, 0.0f, 0.0f, 0.0f));
+                paged_store_transposed_half4(v_shared, dim, key, make_float4(0.0f, 0.0f, 0.0f, 0.0f));
             }
         }
         __syncthreads();
@@ -252,7 +301,7 @@ __global__ void paged_attention_prefill_mma_kernel(
                 for (int key = 0; key < K_TILE; ++key) {
                     const int token = token_start + key;
                     const float weight = token <= q_pos && token < context_len ? __expf(scores_shared[q_row][key] * scale - qk_max) : 0.0f;
-                    weights_shared[q_row][key] = weight;
+                    weights_shared[q_row][key] = __float2half_rn(weight);
                     tile_sum += weight;
                 }
                 max_shared[q_row] = qk_max;
@@ -262,36 +311,45 @@ __global__ void paged_attention_prefill_mma_kernel(
         }
         __syncthreads();
 
-        if (tid < OUTPUT_THREADS) {
-            const int q_row = tid / (HEAD_DIM / VALUES_PER_THREAD);
-            const int dim_start = (tid % (HEAD_DIM / VALUES_PER_THREAD)) * VALUES_PER_THREAD;
+        const int warp = tid / WARP_SIZE;
+        if (warp < HEAD_DIM / K_TILE) {
+            const int value_tile = warp * K_TILE;
+            wmma::fragment<wmma::matrix_a, Q_TILE, K_TILE, K_TILE, half, wmma::row_major> weights;
+            wmma::fragment<wmma::matrix_b, Q_TILE, K_TILE, K_TILE, half, wmma::col_major> values;
+            wmma::fragment<wmma::accumulator, Q_TILE, K_TILE, K_TILE, float> value_acc;
+            wmma::load_matrix_sync(weights, &weights_shared[0][0], K_TILE);
+            wmma::load_matrix_sync(values, &v_shared[value_tile][0], K_TILE);
+            wmma::fill_fragment(value_acc, 0.0f);
+            wmma::mma_sync(value_acc, weights, values, value_acc);
+            wmma::store_matrix_sync(&values_shared[0][value_tile], value_acc, HEAD_DIM, wmma::mem_row_major);
+        }
+        __syncthreads();
+
+        for (int vec = tid; vec < Q_TILE * HEAD_DIM / 4; vec += blockDim.x) {
+            const int q_row = vec / (HEAD_DIM / 4);
+            const int dim = (vec % (HEAD_DIM / 4)) * 4;
             if (q_tile_start + q_row < num_new_tokens) {
                 const float old_scale = rescale_shared[q_row];
-#pragma unroll
-                for (int dim = 0; dim < VALUES_PER_THREAD; ++dim) {
-                    float value = 0.0f;
-#pragma unroll
-                    for (int key = 0; key < K_TILE; ++key) {
-                        value += weights_shared[q_row][key] * __half2float(v_shared[key][dim_start + dim]);
-                    }
-                    acc[dim] = acc[dim] * old_scale + value;
-                }
+                const float4 value = paged_load_float4(&values_shared[q_row][dim]);
+                const float4 acc = paged_load_float4(&value_acc_shared[q_row][dim]);
+                paged_store_float4(&value_acc_shared[q_row][dim], make_float4(
+                    acc.x * old_scale + value.x, acc.y * old_scale + value.y,
+                    acc.z * old_scale + value.z, acc.w * old_scale + value.w));
             }
         }
         __syncthreads();
     }
 
-    if (tid < OUTPUT_THREADS) {
-        const int q_row = tid / (HEAD_DIM / VALUES_PER_THREAD);
-        const int dim_start = (tid % (HEAD_DIM / VALUES_PER_THREAD)) * VALUES_PER_THREAD;
-        const int q_token = q_tile_start + q_row;
+    for (int vec = tid; vec < Q_TILE * HEAD_DIM / 4; vec += blockDim.x) {
+        const int q_row = vec / (HEAD_DIM / 4);
+        const int dim = (vec % (HEAD_DIM / 4)) * 4;
+        const int q_token = context_len - num_new_tokens + q_tile_start + q_row;
         if (q_token < num_new_tokens) {
-            const size_t out_offset = (size_t) (seq_start + q_token) * n_heads * HEAD_DIM + (size_t) head_idx * HEAD_DIM + dim_start;
+            const size_t out_offset = (size_t) (seq_start + q_token) * n_heads * HEAD_DIM + (size_t) head_idx * HEAD_DIM + dim;
+            const float4 acc = paged_load_float4(&value_acc_shared[q_row][dim]);
             const float inv_sum = 1.0f / (sum_shared[q_row] + 1e-6f);
-#pragma unroll
-            for (int dim = 0; dim < VALUES_PER_THREAD; ++dim) {
-                out[out_offset + dim] = acc[dim] * inv_sum;
-            }
+            paged_store_float4(out + out_offset, make_float4(
+                acc.x * inv_sum, acc.y * inv_sum, acc.z * inv_sum, acc.w * inv_sum));
         }
     }
 }
@@ -358,7 +416,8 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
     bool use_tiled_prefill = false;
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
-    use_tiled_prefill = turing_mma_available(cc) &&
+    const bool has_multi_token_prefill = q->ne[2] > batch_lens->ne[0];
+    use_tiled_prefill = has_multi_token_prefill && turing_mma_available(cc) &&
         head_dim == 128 && q->type == GGML_TYPE_F32 && ggml_is_contiguous(q) &&
         ggml_cuda_is_aligned(q, sizeof(float4)) && n_q_tiles > 0 && n_q_tiles <= 65535 &&
         paged_kv_type_native(k_cache->type) && paged_kv_type_native(v_cache->type);

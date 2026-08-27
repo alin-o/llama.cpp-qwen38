@@ -140,6 +140,10 @@ static path_result run_paged(const std::string & model_path,
 
     const llama_vocab * vocab   = llama_model_get_vocab(model);
     const int           n_vocab = llama_vocab_n_tokens(vocab);
+    const int n_heads = llama_model_n_head(model);
+    const int n_heads_kv = llama_model_n_head_kv(model);
+    EXPECT_TRUE(n_heads > 0 && n_heads_kv > 0 && n_heads % n_heads_kv == 0);
+    fprintf(stderr, "  attention heads: Q=%d KV=%d (GQA ratio %d)\n", n_heads, n_heads_kv, n_heads / n_heads_kv);
 
     llama_paged_scheduler * sched = llama_paged_scheduler_init(ctx);
     EXPECT_TRUE(sched != nullptr);
@@ -165,6 +169,9 @@ static path_result run_paged(const std::string & model_path,
 
         const llama_paged_batch_info * info = llama_paged_scheduler_get_batch_info(sched);
         EXPECT_TRUE(info != nullptr && info->n_seq == 1);
+        if (result.tokens.empty()) {
+            EXPECT_TRUE(info->batch_lens[0] > params.block_size);
+        }
 
         const int32_t last_idx = info->batch_offsets[0] + info->batch_lens[0] - 1;
         result.logits.push_back(get_logits(ctx, last_idx, n_vocab));
