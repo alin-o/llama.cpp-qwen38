@@ -210,6 +210,31 @@ static void run_paged_checkpoint_resume(const std::string & model_path) {
     EXPECT_TRUE(source_sched != nullptr);
     std::vector<llama_token> prompt_tokens = common_tokenize(source_ctx, TEST_PROMPT, true);
     EXPECT_TRUE(llama_paged_scheduler_add_request(source_sched, prompt_tokens.data(), prompt_tokens.size(), 0));
+    const size_t queued_state_size = llama_state_get_size(source_ctx);
+    std::vector<uint8_t> queued_state(queued_state_size);
+    EXPECT_TRUE(llama_state_get_data(source_ctx, queued_state.data(), queued_state.size()) == queued_state.size());
+    EXPECT_TRUE(llama_state_set_data(source_ctx, queued_state.data(), queued_state.size()) == queued_state.size());
+    llama_paged_scheduler_free(source_sched);
+    source_init.reset();
+    {
+        auto queued_restore_init = common_init_from_params(params);
+        llama_context * queued_restore_ctx = queued_restore_init->context();
+        EXPECT_TRUE(llama_state_set_data(queued_restore_ctx, queued_state.data(), queued_state.size()) == queued_state.size());
+        llama_paged_scheduler * queued_restore_sched = llama_paged_scheduler_init(queued_restore_ctx);
+        EXPECT_TRUE(queued_restore_sched != nullptr);
+        EXPECT_TRUE(llama_paged_scheduler_add_request(queued_restore_sched, prompt_tokens.data(), prompt_tokens.size(), 0));
+        llama_batch queued_restore_batch = {};
+        EXPECT_TRUE(llama_paged_scheduler_prepare_batch(queued_restore_sched, &queued_restore_batch));
+        EXPECT_TRUE(queued_restore_batch.n_tokens == (int32_t) prompt_tokens.size());
+        EXPECT_TRUE(queued_restore_batch.token[0] == prompt_tokens[0]);
+        llama_paged_scheduler_free(queued_restore_sched);
+        llama_batch_free(queued_restore_batch);
+    }
+    source_init = common_init_from_params(params);
+    source_ctx = source_init->context();
+    source_sched = llama_paged_scheduler_init(source_ctx);
+    EXPECT_TRUE(source_sched != nullptr);
+    EXPECT_TRUE(llama_paged_scheduler_add_request(source_sched, prompt_tokens.data(), prompt_tokens.size(), 0));
 
     llama_batch source_batch = {};
     EXPECT_TRUE(llama_paged_scheduler_prepare_batch(source_sched, &source_batch));

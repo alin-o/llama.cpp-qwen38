@@ -4,8 +4,8 @@
 #include "llama-io.h"
 
 #include <algorithm>
-#include <unordered_set>
 #include <stdexcept>
+#include <unordered_set>
 
 static ggml_type paged_storage_type(ggml_type type) {
     // Tiel TurboQuant types failed the paged quality gate; q8_0 is the production fallback.
@@ -454,12 +454,19 @@ void llama_kv_cache_paged::state_write(llama_io_write_i & io, llama_seq_id seq_i
 
     std::vector<llama_seq_id> seq_ids;
     if (seq_id == -1) {
-        seq_ids.reserve(sequence_positions.size());
-        for (const auto & item : sequence_positions) {
-            seq_ids.push_back(item.first);
-        }
+        seq_ids.reserve(sequence_positions.size() + sequence_blocks.size() + sequence_groups.size() + restored_groups.size());
+        const auto append_ids = [&](const auto & sequences) {
+            for (const auto & item : sequences) {
+                seq_ids.push_back(item.first);
+            }
+        };
+        append_ids(sequence_positions);
+        append_ids(sequence_blocks);
+        append_ids(sequence_groups);
+        append_ids(restored_groups);
         std::sort(seq_ids.begin(), seq_ids.end());
-    } else if (sequence_positions.count(seq_id)) {
+        seq_ids.erase(std::unique(seq_ids.begin(), seq_ids.end()), seq_ids.end());
+    } else if (sequence_positions.count(seq_id) || sequence_blocks.count(seq_id) || sequence_groups.count(seq_id) || restored_groups.count(seq_id)) {
         seq_ids.push_back(seq_id);
     } else {
         throw std::runtime_error("paged KV sequence state is empty");
@@ -468,7 +475,8 @@ void llama_kv_cache_paged::state_write(llama_io_write_i & io, llama_seq_id seq_i
     io.write(&n_sequences, sizeof(n_sequences));
     std::vector<uint32_t> block_ids;
     for (const llama_seq_id id : seq_ids) {
-        const auto & range = sequence_positions.at(id);
+        const auto position = sequence_positions.find(id);
+        const seq_range range = position == sequence_positions.end() ? seq_range{} : position->second;
         const auto blocks = sequence_blocks.find(id);
         const uint32_t n_blocks = blocks == sequence_blocks.end() ? 0 : blocks->second.size();
         io.write(&id, sizeof(id));
@@ -478,22 +486,31 @@ void llama_kv_cache_paged::state_write(llama_io_write_i & io, llama_seq_id seq_i
             io.write(blocks->second.data(), n_blocks * sizeof(uint32_t));
             block_ids.insert(block_ids.end(), blocks->second.begin(), blocks->second.end());
         }
-        const auto group = sequence_groups.find(id);
-        const uint8_t has_group = group != sequence_groups.end() &&
-                                  group->second->logical_seq.size() >= group->second->n_prompt;
+        const auto active_group = sequence_groups.find(id);
+        const auto restored_group = restored_groups.find(id);
+        const bool has_active_group = active_group != sequence_groups.end() &&
+                                      active_group->second->logical_seq.size() >= active_group->second->n_prompt;
+        const bool has_restored_group = restored_group != restored_groups.end() &&
+                                        restored_group->second.logical_seq.size() >= restored_group->second.n_prompt;
+        const uint8_t has_group = has_active_group || has_restored_group;
         io.write(&has_group, sizeof(has_group));
         if (has_group) {
-            const auto & saved = *group->second;
-            const uint32_t status = (uint32_t) saved.status;
-            const uint32_t logical_seq_size = saved.logical_seq.size();
+            const auto status = has_active_group ? (uint32_t) active_group->second->status : (uint32_t) restored_group->second.status;
+            const auto t_arrival_time = has_active_group ? active_group->second->t_arrival_time : restored_group->second.t_arrival_time;
+            const auto t_first_token_us = has_active_group ? active_group->second->t_first_token_us : restored_group->second.t_first_token_us;
+            const auto n_prompt = has_active_group ? active_group->second->n_prompt : restored_group->second.n_prompt;
+            const auto n_decoded = has_active_group ? active_group->second->n_decoded : restored_group->second.n_decoded;
+            const auto n_past = has_active_group ? active_group->second->n_past : restored_group->second.n_past;
+            const auto & logical_seq = has_active_group ? active_group->second->logical_seq : restored_group->second.logical_seq;
+            const uint32_t logical_seq_size = logical_seq.size();
             io.write(&status, sizeof(status));
-            io.write(&saved.t_arrival_time, sizeof(saved.t_arrival_time));
-            io.write(&saved.t_first_token_us, sizeof(saved.t_first_token_us));
-            io.write(&saved.n_prompt, sizeof(saved.n_prompt));
-            io.write(&saved.n_decoded, sizeof(saved.n_decoded));
-            io.write(&saved.n_past, sizeof(saved.n_past));
+            io.write(&t_arrival_time, sizeof(t_arrival_time));
+            io.write(&t_first_token_us, sizeof(t_first_token_us));
+            io.write(&n_prompt, sizeof(n_prompt));
+            io.write(&n_decoded, sizeof(n_decoded));
+            io.write(&n_past, sizeof(n_past));
             io.write(&logical_seq_size, sizeof(logical_seq_size));
-            io.write(saved.logical_seq.data(), logical_seq_size * sizeof(llama_token));
+            io.write(logical_seq.data(), logical_seq_size * sizeof(llama_token));
         }
     }
 
@@ -600,7 +617,8 @@ void llama_kv_cache_paged::state_read(llama_io_read_i & io, llama_seq_id seq_id,
             io.read(&saved.group.n_past, sizeof(saved.group.n_past));
             io.read(&logical_seq_size, sizeof(logical_seq_size));
             if (status > (uint32_t) llama_sequence_group_status::FINISHED || saved.group.n_past > n_blocks * block_size ||
-                logical_seq_size < saved.group.n_prompt || logical_seq_size > n_blocks * block_size + 1) {
+                logical_seq_size < saved.group.n_prompt ||
+                (n_blocks != 0 && logical_seq_size > n_blocks * block_size + 1)) {
                 throw std::runtime_error("invalid paged scheduler state");
             }
             saved.group.status = (llama_sequence_group_status) status;
