@@ -444,7 +444,7 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
                 break;
             case 256:
                 CUDA_CHECK(cudaFuncSetAttribute(paged_attention_prefill_mma_kernel<256>, cudaFuncAttributeMaxDynamicSharedMemorySize, tiled_smem_bytes));
-                paged_attention_prefill_mma_kernel<256><<<dim3(n_heads, batch_lens->ne[0], n_q_tiles), dim3(256), tiled_smem_bytes, ctx.stream()>>>(
+                paged_attention_prefill_mma_kernel<256><<<dim3(n_heads, batch_lens->ne[0], n_q_tiles), dim3(512), tiled_smem_bytes, ctx.stream()>>>(
                     (const float *) q->data, (const char *) k_cache->data, (const char *) v_cache->data,
                     (const int *) block_table->data, (const int *) context_lens->data,
                     (const int *) batch_offsets->data, (const int *) batch_lens->data,
