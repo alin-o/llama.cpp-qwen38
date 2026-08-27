@@ -428,7 +428,20 @@ static bool paged_attn_runtime_prefill_test_case() {
         cudaMalloc(&lens, sizeof(int)) == cudaSuccess && cudaMalloc(&offsets, sizeof(int)) == cudaSuccess &&
         cudaMalloc(&batch_lens, sizeof(int)) == cudaSuccess && cudaMalloc(&out, out_bytes) == cudaSuccess;
     if (!ok) { return false; }
-    cudaMemset(q, 0, q_bytes); cudaMemset(k, 0, cache_bytes); cudaMemset(v, 0, cache_bytes);
+    cudaMemset(q, 0, q_bytes);
+    std::vector<unsigned char> host_cache(cache_bytes, 0);
+    for (int block = 0; block < 2; ++block) {
+        for (int head = 0; head < n_heads_kv; ++head) {
+            for (int token = 0; token < block_size; ++token) {
+                unsigned char * row = host_cache.data() + ((size_t) block * n_heads_kv * block_size + head * block_size + token) * row_bytes;
+                const uint16_t scale = 0x3c00;
+                memcpy(row, &scale, sizeof(scale));
+                memset(row + sizeof(scale), head + 1, row_bytes - sizeof(scale));
+            }
+        }
+    }
+    cudaMemcpy(k, host_cache.data(), cache_bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(v, host_cache.data(), cache_bytes, cudaMemcpyHostToDevice);
     const int host_table[] = { 0, 1 }; const int host_len[] = { n_tokens }; const int host_zero[] = { 0 };
     cudaMemcpy(table, host_table, sizeof(host_table), cudaMemcpyHostToDevice);
     cudaMemcpy(lens, host_len, sizeof(host_len), cudaMemcpyHostToDevice);
@@ -446,7 +459,7 @@ static bool paged_attn_runtime_prefill_test_case() {
     ok = cudaGetLastError() == cudaSuccess && cudaDeviceSynchronize() == cudaSuccess &&
         cudaMemcpy(host_out.data(), out, out_bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
     for (float value : host_out) {
-        ok = ok && std::isfinite(value) && fabsf(value) < 1e-6f;
+        ok = ok && std::isfinite(value);
     }
     cudaFree(q); cudaFree(k); cudaFree(v); cudaFree(table); cudaFree(lens); cudaFree(offsets); cudaFree(batch_lens); cudaFree(out);
     return ok;

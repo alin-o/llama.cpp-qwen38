@@ -159,3 +159,5 @@ cfd534af15b451de14c4266bf1e2e2a0573826409562468860fcfbb103ceceac  benchmark-resu
 7b6cbf2b35cfdc298ae3f5055580e578f71ec7abaea88be856215c48b11baf98  benchmark-results/paged-prefill-head256-20260827-v2/summarize.py
 2bd605dedd4510f01c8db7751a94b4be53720f00eed8cba80c8ad1aca82ec02f  benchmark-results/paged-prefill-head256-20260827-v2/unified-medians.csv
 1afd7d52158cfbb80f540704b80e8e7059472a417bc477eb8aa4cdc549a4b0e8  benchmark-results/paged-prefill-head256-20260827-v2/unified-raw.csv
+8263f1d5eeb219e1810a531d22c6858a323ee30f2450cacec81a53c3b5afd830  benchmark-results/paged-prefill-head256-20260827-v2/raw/profiler/tiel-multi.nsys-rep
+9202435aa062fc20a3cd5e6fbab76562269dd49bb8a9e79ef1accb4614a788d9  benchmark-results/paged-prefill-head256-20260827-v2/raw/profiler/tiel-multi-kern-sum.csv_cuda_gpu_kern_sum.csv

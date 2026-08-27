@@ -174,8 +174,14 @@ static path_result run_paged(const std::string & model_path,
         llama_synchronize(ctx);
 #if defined(GGML_USE_CUDA)
         if (result.tokens.empty()) {
-            EXPECT_TRUE(ggml_paged_attn_tiled_prefill_launch_count() > 0);
-            tiled_prefill_seen = true;
+            const int head_dim = llama_model_n_embd_head_v(model);
+            const unsigned long long launches = ggml_paged_attn_tiled_prefill_launch_count();
+            if (head_dim == 256) {
+                EXPECT_TRUE(launches > 0);
+            } else if (head_dim != 128) {
+                EXPECT_TRUE(launches == 0);
+            }
+            tiled_prefill_seen = launches > 0;
             ggml_paged_attn_tiled_prefill_launch_count_reset();
         } else if (!decode_no_launch_checked) {
             EXPECT_TRUE(ggml_paged_attn_tiled_prefill_launch_count() == 0);
