@@ -36,6 +36,10 @@ build-verify-cuda/bin/llama-paged -m /models/qwen38/Qwen3.8-27B-UD-Q4_K_S.gguf -
 
 This hybrid model requires all layers on CUDA0 for paged KV, so both runs use `-ngl 99 -sm none -mg 0`. The bounded case uses 1023 prompt tokens and 8 generated tokens.
 
+### 4096-token capacity root cause
+
+The 4096-token paged run was attempted with `-c 8192 -b 4096 -ub 4096 -ngpub 320 -ncpub 320` and the same single-GPU settings. Admission did not deadlock: the context initialization failed while reserving the CUDA prefill compute buffer. The run reported 4074.5 MiB free VRAM, 320 Q8_0 KV blocks at 696320 bytes each, then failed to allocate a 3976.11 MiB CUDA buffer for the prefill graph. The recurrent portion remains on the same CUDA device because hybrid paged KV rejects a CPU/CUDA model split. This is a VRAM compute-buffer limit, not scheduler admission or block accounting. The bounded 1023-token case is therefore used below.
+
 Unified Q8_0 reference:
 
 ```sh

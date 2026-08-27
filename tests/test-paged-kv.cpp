@@ -777,6 +777,12 @@ TEST(test_paged_attention_head_mapping_and_dispatch_selection) {
         128, GGML_TYPE_F32, true, true, 2, 2, 1, true, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
 }
 
+TEST(test_decode_only_batch_skips_tiled_prefill) {
+    // The CUDA launch guard calls this production predicate.
+    EXPECT_FALSE(ggml_paged_attn_tiled_prefill_supported(
+        128, GGML_TYPE_F32, true, true, 2, 2, 1, true, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
+}
+
 TEST(test_scheduler_rejects_oversized_prompt) {
     auto fixture = make_fixture(/*n_ctx=*/64, /*block_size=*/16, /*n_batch=*/128,
                                 /*n_gpu_blocks=*/32, /*n_cpu_blocks=*/8);
@@ -865,6 +871,7 @@ int main(int /*argc*/, char ** /*argv*/) {
     RUN(test_paged_attention_head_mapping_and_dispatch_selection);
     RUN(test_scheduler_swaps_and_resumes_request);
 
+    RUN(test_decode_only_batch_skips_tiled_prefill);
     fprintf(stderr, "test-paged-kv: ALL PASSED\n");
     return 0;
 }
