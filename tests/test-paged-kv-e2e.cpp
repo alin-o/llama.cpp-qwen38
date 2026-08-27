@@ -35,7 +35,7 @@
         }                                                                \
     } while (0)
 
-static constexpr const char * TEST_PROMPT       = "Once upon a time there was a lovely";
+static constexpr const char * TEST_PROMPT       = "Once upon a time there was a lovely little llama that lived near a quiet forest. Every morning, it counted the bright leaves, followed the river, and wrote a careful story about its adventures for all of its friends.";
 static constexpr int          N_PREDICT         = 16;
 static constexpr int          N_COMPARE         = 4;  // token-equivalence window
 static constexpr int          TOP_K             = 5;
