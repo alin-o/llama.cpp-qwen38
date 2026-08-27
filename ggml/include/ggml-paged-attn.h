@@ -40,3 +40,7 @@ void ggml_paged_attn_tiled_prefill_launch_count_reset(void);
 }
 #endif
 #endif
+
+#if defined(GGML_USE_CUDA)
+bool ggml_paged_attn_cuda_runtime_test(void);
+#endif

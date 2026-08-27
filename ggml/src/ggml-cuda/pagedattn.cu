@@ -3,6 +3,8 @@
 #include "ggml-paged-attn.h"
 #include "turbo-quant.cuh"
 #include <atomic>
+#include <cmath>
+#include <cstdio>
 
 static std::atomic<unsigned long long> g_paged_prefill_launch_count{ 0 };
 
@@ -405,6 +407,102 @@ __global__ void paged_attention_prefill_mma_kernel(
 #endif
 #endif
 
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+template <int HEAD_DIM>
+static bool paged_attn_runtime_prefill_test_case() {
+    constexpr int n_heads = 4;
+    constexpr int n_heads_kv = 2;
+    constexpr int block_size = 16;
+    constexpr int n_tokens = 32;
+    const size_t row_bytes = ggml_row_size(GGML_TYPE_Q8_0, HEAD_DIM);
+    const size_t cache_bytes = 2 * n_heads_kv * block_size * row_bytes;
+    const size_t q_bytes = (size_t) n_tokens * n_heads * HEAD_DIM * sizeof(float);
+    const size_t out_bytes = q_bytes;
+    const size_t smem_bytes =
+        (size_t) (3 * 16 * HEAD_DIM) * sizeof(half) + (size_t) (16 * 16) * (sizeof(float) + sizeof(half)) +
+        (size_t) (2 * 16 * HEAD_DIM + 3 * 16) * sizeof(float);
+    float * q = nullptr; char * k = nullptr; char * v = nullptr; int * table = nullptr;
+    int * lens = nullptr; int * offsets = nullptr; int * batch_lens = nullptr; float * out = nullptr;
+    bool ok = cudaMalloc(&q, q_bytes) == cudaSuccess && cudaMalloc(&k, cache_bytes) == cudaSuccess &&
+        cudaMalloc(&v, cache_bytes) == cudaSuccess && cudaMalloc(&table, 2 * sizeof(int)) == cudaSuccess &&
+        cudaMalloc(&lens, sizeof(int)) == cudaSuccess && cudaMalloc(&offsets, sizeof(int)) == cudaSuccess &&
+        cudaMalloc(&batch_lens, sizeof(int)) == cudaSuccess && cudaMalloc(&out, out_bytes) == cudaSuccess;
+    if (!ok) { return false; }
+    cudaMemset(q, 0, q_bytes); cudaMemset(k, 0, cache_bytes); cudaMemset(v, 0, cache_bytes);
+    const int host_table[] = { 0, 1 }; const int host_len[] = { n_tokens }; const int host_zero[] = { 0 };
+    cudaMemcpy(table, host_table, sizeof(host_table), cudaMemcpyHostToDevice);
+    cudaMemcpy(lens, host_len, sizeof(host_len), cudaMemcpyHostToDevice);
+    cudaMemcpy(offsets, host_zero, sizeof(host_zero), cudaMemcpyHostToDevice);
+    cudaMemcpy(batch_lens, host_len, sizeof(host_len), cudaMemcpyHostToDevice);
+    if constexpr (HEAD_DIM == 256) {
+        ok = cudaFuncSetAttribute(paged_attention_prefill_mma_kernel<256>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes) == cudaSuccess;
+    }
+    paged_attention_prefill_mma_kernel<HEAD_DIM><<<dim3(n_heads, 1, 2), dim3(HEAD_DIM == 256 ? 512 : 256), smem_bytes>>>(
+        q, k, v, table, lens, offsets, batch_lens, row_bytes, row_bytes * block_size,
+        row_bytes * block_size * n_heads_kv, row_bytes, row_bytes * block_size,
+        row_bytes * block_size * n_heads_kv, n_heads_kv, block_size, 2, GGML_TYPE_Q8_0,
+        GGML_TYPE_Q8_0, 1.0f, out);
+    std::vector<float> host_out((size_t) n_tokens * n_heads * HEAD_DIM);
+    ok = cudaGetLastError() == cudaSuccess && cudaDeviceSynchronize() == cudaSuccess &&
+        cudaMemcpy(host_out.data(), out, out_bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
+    for (float value : host_out) {
+        ok = ok && std::isfinite(value) && fabsf(value) < 1e-6f;
+    }
+    cudaFree(q); cudaFree(k); cudaFree(v); cudaFree(table); cudaFree(lens); cudaFree(offsets); cudaFree(batch_lens); cudaFree(out);
+    return ok;
+}
+static bool paged_attn_runtime_fallback_test_case() {
+    constexpr int head_dim = 64;
+    constexpr int n_heads = 4;
+    constexpr int n_heads_kv = 2;
+    constexpr int block_size = 16;
+    const size_t row_bytes = ggml_row_size(GGML_TYPE_Q8_0, head_dim);
+    const size_t q_bytes = 2 * n_heads * head_dim * sizeof(float);
+    const size_t cache_bytes = n_heads_kv * block_size * row_bytes;
+    float * q = nullptr; char * k = nullptr; char * v = nullptr; int * table = nullptr;
+    int * lens = nullptr; int * offsets = nullptr; int * batch_lens = nullptr; float * out = nullptr;
+    bool ok = cudaMalloc(&q, q_bytes) == cudaSuccess && cudaMalloc(&k, cache_bytes) == cudaSuccess &&
+        cudaMalloc(&v, cache_bytes) == cudaSuccess && cudaMalloc(&table, sizeof(int)) == cudaSuccess &&
+        cudaMalloc(&lens, sizeof(int)) == cudaSuccess && cudaMalloc(&offsets, sizeof(int)) == cudaSuccess &&
+        cudaMalloc(&batch_lens, sizeof(int)) == cudaSuccess && cudaMalloc(&out, q_bytes) == cudaSuccess;
+    if (!ok) { return false; }
+    cudaMemset(q, 0, q_bytes); cudaMemset(k, 0, cache_bytes); cudaMemset(v, 0, cache_bytes);
+    const int zero = 0; const int length = 2;
+    cudaMemcpy(table, &zero, sizeof(zero), cudaMemcpyHostToDevice);
+    cudaMemcpy(lens, &length, sizeof(length), cudaMemcpyHostToDevice);
+    cudaMemcpy(offsets, &zero, sizeof(zero), cudaMemcpyHostToDevice);
+    cudaMemcpy(batch_lens, &length, sizeof(length), cudaMemcpyHostToDevice);
+    ggml_paged_attn_tiled_prefill_launch_count_reset();
+    const size_t smem_bytes = ((size_t) (head_dim + 31) / 32) * sizeof(float);
+    paged_attention_decode_kernel<<<dim3(n_heads, 1), dim3(head_dim), smem_bytes>>>(
+        q, k, v, table, lens, offsets, batch_lens, row_bytes, row_bytes * block_size,
+        row_bytes * block_size * n_heads_kv, row_bytes, row_bytes * block_size,
+        row_bytes * block_size * n_heads_kv, n_heads_kv, block_size, 1, GGML_TYPE_Q8_0,
+        GGML_TYPE_Q8_0, 1.0f, false, out);
+    std::vector<float> host_out(2 * n_heads * head_dim);
+    ok = cudaGetLastError() == cudaSuccess && cudaDeviceSynchronize() == cudaSuccess &&
+        cudaMemcpy(host_out.data(), out, q_bytes, cudaMemcpyDeviceToHost) == cudaSuccess &&
+        ggml_paged_attn_tiled_prefill_launch_count() == 0;
+    for (float value : host_out) {
+        ok = ok && std::isfinite(value) && fabsf(value) < 1e-6f;
+    }
+    cudaFree(q); cudaFree(k); cudaFree(v); cudaFree(table); cudaFree(lens); cudaFree(offsets); cudaFree(batch_lens); cudaFree(out);
+    return ok;
+}
+
+#endif
+
+bool ggml_paged_attn_cuda_runtime_test(void) {
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+    const bool covered_128 = paged_attn_runtime_prefill_test_case<128>();
+    const bool covered_256 = paged_attn_runtime_prefill_test_case<256>();
+    const bool covered_fallback = paged_attn_runtime_fallback_test_case();
+    fprintf(stderr, "paged runtime coverage: 128=%d 256=%d fallback=%d\n", covered_128, covered_256, covered_fallback);
+    return covered_128 && covered_256 && covered_fallback;
+#else
+    return false;
+#endif
+}
 static bool paged_kv_type_supported(ggml_type type) {
     return type == GGML_TYPE_F16 || type == GGML_TYPE_Q8_0 || type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0;
 }

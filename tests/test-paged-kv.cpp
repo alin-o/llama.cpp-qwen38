@@ -788,6 +788,12 @@ TEST(test_decode_only_batch_skips_tiled_prefill) {
         256, GGML_TYPE_F32, true, true, 2, 2, 1, true, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
 }
 
+#if defined(GGML_USE_CUDA)
+TEST(test_paged_attention_cuda_runtime_coverage) {
+    EXPECT_TRUE(ggml_paged_attn_cuda_runtime_test());
+}
+#endif
+
 
 TEST(test_scheduler_rejects_oversized_prompt) {
     auto fixture = make_fixture(/*n_ctx=*/64, /*block_size=*/16, /*n_batch=*/128,
@@ -877,6 +883,9 @@ int main(int /*argc*/, char ** /*argv*/) {
     RUN(test_paged_attention_head_mapping_and_dispatch_selection);
     RUN(test_scheduler_swaps_and_resumes_request);
 
+#if defined(GGML_USE_CUDA)
+    RUN(test_paged_attention_cuda_runtime_coverage);
+#endif
     RUN(test_decode_only_batch_skips_tiled_prefill);
     fprintf(stderr, "test-paged-kv: ALL PASSED\n");
     return 0;
