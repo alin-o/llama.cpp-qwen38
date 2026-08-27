@@ -416,6 +416,8 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
     use_tiled_prefill = ggml_paged_attn_tiled_prefill_supported(
         head_dim, q->type, ggml_is_contiguous(q), ggml_cuda_is_aligned(q, sizeof(float4)), q->ne[2], batch_lens->ne[0],
         n_q_tiles, turing_mma_available(cc), k_cache->type, v_cache->type);
+    LLAMA_LOG_DEBUG("%s: tiled prefill dispatch=%d, q_tokens=%d, sequences=%d\n", __func__, use_tiled_prefill, (int) q->ne[2],
+                    (int) batch_lens->ne[0]);
 
     if (use_tiled_prefill) {
         paged_attention_prefill_mma_kernel<128><<<dim3(n_heads, batch_lens->ne[0], n_q_tiles), dim3(256), 0, ctx.stream()>>>(
