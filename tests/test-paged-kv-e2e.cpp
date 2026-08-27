@@ -159,6 +159,10 @@ static path_result run_paged(const std::string & model_path,
     path_result result;
     result.n_vocab    = n_vocab;
     llama_batch batch = {};
+#if defined(GGML_USE_CUDA)
+    bool tiled_prefill_seen = false;
+    bool decode_no_launch_checked = false;
+#endif
 
     while ((int) result.tokens.size() < N_PREDICT) {
         EXPECT_TRUE(llama_paged_scheduler_prepare_batch(sched, &batch));
@@ -168,6 +172,16 @@ static path_result run_paged(const std::string & model_path,
 
         EXPECT_TRUE(llama_decode(ctx, batch) == 0);
         llama_synchronize(ctx);
+#if defined(GGML_USE_CUDA)
+        if (result.tokens.empty()) {
+            EXPECT_TRUE(ggml_paged_attn_tiled_prefill_launch_count() > 0);
+            tiled_prefill_seen = true;
+            ggml_paged_attn_tiled_prefill_launch_count_reset();
+        } else if (!decode_no_launch_checked) {
+            EXPECT_TRUE(ggml_paged_attn_tiled_prefill_launch_count() == 0);
+            decode_no_launch_checked = true;
+        }
+#endif
 
         const llama_paged_batch_info * info = llama_paged_scheduler_get_batch_info(sched);
         EXPECT_TRUE(info != nullptr && info->n_seq == 1);
@@ -193,7 +207,7 @@ static path_result run_paged(const std::string & model_path,
     }
 #if defined(GGML_USE_CUDA)
     if (llama_model_n_embd_head_v(model) == 256) {
-        EXPECT_TRUE(ggml_paged_attn_tiled_prefill_launch_count() > 0);
+        EXPECT_TRUE(tiled_prefill_seen);
     }
 #endif
     llama_paged_scheduler_free(sched);
