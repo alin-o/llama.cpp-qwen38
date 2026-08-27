@@ -21,8 +21,8 @@ Raw artifacts are under `benchmark-results/paged-prefill-head256-20260827-v2/`:
 
 ## Exact models and prompt
 
-- Qwen: `/models/qwen38/Qwen3.8-27B-UD-Q4_K_S.gguf`, 15,358,213,024 bytes, Q=24, KV=4, GQA ratio 6, head dimension 256.
-- Tiel: `/models/Tiel-Coder-35B-A3B-MTP-UD-Q4_K_S.gguf`, 21,792,045,600 bytes, Q=16, KV=2, GQA ratio 8, head dimension 256.
+- Qwen: `/models/qwen38/Qwen3.8-27B-UD-Q4_K_S.gguf`, 15,358,213,024 bytes, SHA256 `75bc9c8adba2842e72f0ab5201aaa07133c5010b566305c09187fcbdcd364017`, Q=24, KV=4, GQA ratio 6, head dimension 256.
+- Tiel: `/models/Tiel-Coder-35B-A3B-MTP-UD-Q4_K_S.gguf`, 21,792,045,600 bytes, SHA256 `7de1d35107da08b7138ac32feb0986bb70850a9e57fdc8353cda0567e9d7aaa5`, Q=16, KV=2, GQA ratio 8, head dimension 256.
 - Prompt source: `reports/paged-4096-prompt.txt`, repeated ASCII ` x` tokens. Each matrix command reads exactly `2 * per_request_tokens` bytes. Application logs confirm the requested aggregate prompt token count for every executed row.
 
 ## Unified-f16 quality oracle versus paged q8_0

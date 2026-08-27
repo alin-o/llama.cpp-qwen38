@@ -206,8 +206,11 @@ static path_result run_paged(const std::string & model_path,
         }
     }
 #if defined(GGML_USE_CUDA)
-    if (llama_model_n_embd_head_v(model) == 256) {
+    const int head_dim = llama_model_n_embd_head_v(model);
+    if (head_dim == 256) {
         EXPECT_TRUE(tiled_prefill_seen);
+    } else if (head_dim != 128) {
+        EXPECT_TRUE(!tiled_prefill_seen);
     }
 #endif
     llama_paged_scheduler_free(sched);
