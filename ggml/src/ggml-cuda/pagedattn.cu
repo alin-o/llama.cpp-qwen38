@@ -1,5 +1,6 @@
 #include "pagedattn.cuh"
 
+#include "ggml-paged-attn.h"
 #include "turbo-quant.cuh"
 
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
@@ -388,10 +389,6 @@ static bool paged_kv_type_supported(ggml_type type) {
     return type == GGML_TYPE_F16 || type == GGML_TYPE_Q8_0 || type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0;
 }
 
-static bool paged_kv_type_native(ggml_type type) {
-    return type == GGML_TYPE_Q8_0 || type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0;
-}
-
 void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * q = dst->src[0];
     const ggml_tensor * k_new = dst->src[1];
@@ -416,11 +413,9 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
     bool use_tiled_prefill = false;
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
-    const bool has_multi_token_prefill = q->ne[2] > batch_lens->ne[0];
-    use_tiled_prefill = has_multi_token_prefill && turing_mma_available(cc) &&
-        head_dim == 128 && q->type == GGML_TYPE_F32 && ggml_is_contiguous(q) &&
-        ggml_cuda_is_aligned(q, sizeof(float4)) && n_q_tiles > 0 && n_q_tiles <= 65535 &&
-        paged_kv_type_native(k_cache->type) && paged_kv_type_native(v_cache->type);
+    use_tiled_prefill = ggml_paged_attn_tiled_prefill_supported(
+        head_dim, q->type, ggml_is_contiguous(q), ggml_cuda_is_aligned(q, sizeof(float4)), q->ne[2], batch_lens->ne[0],
+        n_q_tiles, turing_mma_available(cc), k_cache->type, v_cache->type);
 
     if (use_tiled_prefill) {
         paged_attention_prefill_mma_kernel<128><<<dim3(n_heads, batch_lens->ne[0], n_q_tiles), dim3(256), 0, ctx.stream()>>>(

@@ -1,4 +1,5 @@
 #include "ggml-backend.h"
+#include "ggml-paged-attn.h"
 #include "llama-block-manager.h"
 #include "llama-kv-cache-paged.h"
 #include "llama-io.h"
@@ -769,14 +770,14 @@ TEST(test_paged_attention_head_mapping_and_dispatch_selection) {
         EXPECT_TRUE(kv_head(q_head, 8, 2) == q_head / 4);
     }
 
-    const auto tiled_prefill = [](int head_dim, bool q_f32, bool contiguous, bool aligned,
-                                  int n_tokens, int n_sequences, bool native_k, bool native_v) {
-        return head_dim == 128 && q_f32 && contiguous && aligned && n_tokens > n_sequences && native_k && native_v;
-    };
-    EXPECT_TRUE(tiled_prefill(128, true, true, true, 32, 1, true, true));
-    EXPECT_FALSE(tiled_prefill(64, true, true, true, 32, 1, true, true));
-    EXPECT_FALSE(tiled_prefill(128, true, true, true, 32, 1, false, true));
-    EXPECT_FALSE(tiled_prefill(128, true, true, true, 2, 2, true, true));
+    EXPECT_TRUE(ggml_paged_attn_tiled_prefill_supported(
+        128, GGML_TYPE_F32, true, true, 32, 1, 2, true, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
+    EXPECT_FALSE(ggml_paged_attn_tiled_prefill_supported(
+        64, GGML_TYPE_F32, true, true, 32, 1, 2, true, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
+    EXPECT_FALSE(ggml_paged_attn_tiled_prefill_supported(
+        128, GGML_TYPE_F32, true, true, 32, 1, 2, true, GGML_TYPE_F16, GGML_TYPE_Q8_0));
+    EXPECT_FALSE(ggml_paged_attn_tiled_prefill_supported(
+        128, GGML_TYPE_F32, true, true, 2, 2, 1, true, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
 }
 
 TEST(test_scheduler_rejects_oversized_prompt) {
