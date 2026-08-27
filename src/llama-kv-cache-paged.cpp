@@ -552,7 +552,8 @@ void llama_kv_cache_paged::state_read(llama_io_read_i & io, llama_seq_id seq_id,
         io.read(&id, sizeof(id));
         io.read(&range, sizeof(range));
         io.read(&n_blocks, sizeof(n_blocks));
-        if (id < 0 || (uint32_t) id >= n_seq_max || (seq_id == -1 && sequence_blocks.count(id))) {
+        if ((seq_id == -1 && (id < 0 || (uint32_t) id >= n_seq_max || sequence_blocks.count(id))) ||
+            (seq_id != -1 && id < 0)) {
             throw std::runtime_error("invalid paged KV sequence id");
         }
         const llama_seq_id target_id = seq_id == -1 ? id : seq_id;

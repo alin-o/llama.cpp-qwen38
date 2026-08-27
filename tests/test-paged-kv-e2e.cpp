@@ -367,6 +367,11 @@ int main(int argc, char ** argv) {
     compare_perplexity("q8_0", ref, paged_q8);
 
     for (const ggml_type type : { GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO4_0 }) {
+        if (ref.head_dim % ggml_blck_size(type) != 0) {
+            fprintf(stderr, "skip: model head dimension %d is incompatible with paged %s\n", ref.head_dim,
+                    ggml_type_name(type));
+            continue;
+        }
         fprintf(stderr, "test-paged-kv-e2e: running %s paged path\n", ggml_type_name(type));
         path_result paged = run_paged(params.model.path, ref.tokens, type, type);
         EXPECT_TRUE(paged.logits.size() >= N_COMPARE);
