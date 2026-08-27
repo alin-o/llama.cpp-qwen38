@@ -1,6 +1,6 @@
 # Paged prefill acceptance evidence
 
-Source-matched CUDA build: `7d2051be5`, including `c5c197759`.
+Source-matched CUDA build: `8f878a437`.
 
 ## Fixed prompts
 
@@ -13,14 +13,14 @@ python3 -c "from pathlib import Path; Path('.agent/paged-1023-prompt.txt').write
 
 ## Qwen3.8-27B-UD-Q4_K_S
 
-Unified Q8_0 reference, CUDA0, 4096 prompt tokens and 8 generated tokens:
+Unified Q8_0 reference, CUDA0, the same 4096-token fixed prompt, and 8 generated tokens:
 
 ```sh
-build-verify-cuda/bin/llama bench -m /models/qwen38/Qwen3.8-27B-UD-Q4_K_S.gguf -p 4096 -n 8 -r 1 -ngl 99 -dev cuda0 -b 4096 -ub 4096 -ctk q8_0 -ctv q8_0 --no-warmup -o md
+build-verify-cuda/bin/llama completion -m /models/qwen38/Qwen3.8-27B-UD-Q4_K_S.gguf -dev cuda0 -ngl 99 -c 8192 -b 4096 -ub 4096 -n 8 -f .agent/paged-4096-prompt.txt -no-cnv -ctk q8_0 -ctv q8_0 --perf --temp 0 -s 1234
 ```
 
-- pp: 2903.87 tok/s
-- tg: 47.25 tok/s
+- pp: 2913.91 tok/s
+- tg: 47.44 tok/s
 
 Paged Q8_0, same GPU, context, batch, prompt length, and decode length:
 
@@ -40,14 +40,14 @@ This hybrid model requires all layers on CUDA0 for paged KV, so both runs use `-
 
 The 4096-token paged run was attempted with `-c 8192 -b 4096 -ub 4096 -ngpub 320 -ncpub 320` and the same single-GPU settings. Admission did not deadlock: the context initialization failed while reserving the CUDA prefill compute buffer. The run reported 4074.5 MiB free VRAM, 320 Q8_0 KV blocks at 696320 bytes each, then failed to allocate a 3976.11 MiB CUDA buffer for the prefill graph. The recurrent portion remains on the same CUDA device because hybrid paged KV rejects a CPU/CUDA model split. This is a VRAM compute-buffer limit, not scheduler admission or block accounting. The bounded 1023-token case is therefore used below.
 
-Unified Q8_0 reference:
+Unified Q8_0 reference, using the same 1023-token fixed prompt and 8 generated tokens:
 
 ```sh
-build-verify-cuda/bin/llama bench -m /models/Tiel-Coder-35B-A3B-MTP-UD-Q4_K_S.gguf -p 1023 -n 8 -r 1 -ngl 99 -sm none -mg 0 -dev cuda0 -b 1024 -ub 1024 -ctk q8_0 -ctv q8_0 --no-warmup -o md
+build-verify-cuda/bin/llama completion -m /models/Tiel-Coder-35B-A3B-MTP-UD-Q4_K_S.gguf -dev cuda0 -ngl 99 -sm none -mg 0 -c 2048 -b 1024 -ub 1024 -n 8 -f .agent/paged-1023-prompt.txt -no-cnv -ctk q8_0 -ctv q8_0 --perf --temp 0 -s 1234
 ```
 
-- pp: 1378.04 tok/s
-- tg: 129.58 tok/s
+- pp: 7658.96 tok/s
+- tg: 139.27 tok/s
 
 Paged Q8_0:
 
