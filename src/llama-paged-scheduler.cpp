@@ -90,7 +90,12 @@ LLAMA_API bool llama_paged_scheduler_add_request(struct llama_paged_scheduler * 
     }
     group.t_arrival_time = ggml_time_us();  // int64_t milliseconds
 
-    return sched->impl.queue_request(group);
+    try {
+        return sched->impl.queue_request(group);
+    } catch (const std::exception & e) {
+        LLAMA_LOG_ERROR("%s: %s\n", __func__, e.what());
+        return false;
+    }
 }
 
 LLAMA_API void llama_paged_scheduler_update(struct llama_paged_scheduler * sched,

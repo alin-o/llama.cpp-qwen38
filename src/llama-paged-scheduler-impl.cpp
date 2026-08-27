@@ -89,31 +89,33 @@ bool llama_paged_scheduler_impl::queue_request(llama_sequence_group group) {
         return false;
     }
 
+    if (id_to_group.count(group.request_id)) {
+        LLAMA_LOG_ERROR("%s: request %d is already queued.\n", __func__, group.request_id);
+        return false;
+    }
+
     auto group_ptr = std::make_unique<llama_sequence_group>(std::move(group));
 
-    id_to_group[group_ptr->request_id] = group_ptr.get();
     const bool restored = kv_cache_manager->register_group(*group_ptr);
     if (!restored && !group_ptr->block_table.empty()) {
         LLAMA_LOG_ERROR("%s: request %d has restored blocks without scheduler state.\n", __func__, group_ptr->request_id);
-        id_to_group.erase(group_ptr->request_id);
+        kv_cache_manager->seq_rm(group_ptr->request_id, -1, -1);
         return false;
     }
 
     const llama_sequence_group_status restored_status = group_ptr->status;
+    if (restored && restored_status == llama_sequence_group_status::FINISHED) {
+        LLAMA_LOG_ERROR("%s: request %d has finished scheduler state.\n", __func__, group_ptr->request_id);
+        kv_cache_manager->seq_rm(group_ptr->request_id, -1, -1);
+        return false;
+    }
+
+    id_to_group[group_ptr->request_id] = group_ptr.get();
     group_ptr->status = llama_sequence_group_status::PENDING;
-    if (restored) {
-        if (restored_status == llama_sequence_group_status::RUNNING) {
-            set_running(std::move(group_ptr));
-        } else if (restored_status == llama_sequence_group_status::SWAPPED) {
-            set_swapped(std::move(group_ptr));
-        } else if (restored_status == llama_sequence_group_status::WAITING ||
-                   restored_status == llama_sequence_group_status::PENDING) {
-            set_waiting(std::move(group_ptr));
-        } else {
-            LLAMA_LOG_ERROR("%s: request %d has finished scheduler state.\n", __func__, group_ptr->request_id);
-            id_to_group.erase(group_ptr->request_id);
-            return false;
-        }
+    if (restored && restored_status == llama_sequence_group_status::RUNNING) {
+        set_running(std::move(group_ptr));
+    } else if (restored && restored_status == llama_sequence_group_status::SWAPPED) {
+        set_swapped(std::move(group_ptr));
     } else {
         set_waiting(std::move(group_ptr));
     }

@@ -120,6 +120,7 @@ class llama_kv_cache_paged : public llama_memory_i {
     uint32_t       num_cpu_blocks;
     uint32_t       block_bytes_k;
     uint32_t       block_bytes_v;
+    bool initialized = false;
 
     ggml_backend_t gpu_backend;
     ggml_backend_t cpu_backend;

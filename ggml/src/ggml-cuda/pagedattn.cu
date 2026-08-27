@@ -4,6 +4,9 @@
 
 static __device__ __forceinline__ float paged_cache_value(const char * row, int index, int type) {
     switch (type) {
+        case GGML_TYPE_F16:
+            return __half2float(((const half *) row)[index]);
+
         case GGML_TYPE_Q8_0: {
             const block_q8_0 * block = (const block_q8_0 *) row + index / QK8_0;
             return __half2float(block->d) * block->qs[index % QK8_0];
@@ -107,7 +110,7 @@ __global__ void paged_attention_decode_kernel(
 }
 
 static bool paged_kv_type_supported(ggml_type type) {
-    return type == GGML_TYPE_Q8_0 || type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0;
+    return type == GGML_TYPE_F16 || type == GGML_TYPE_Q8_0 || type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0;
 }
 
 void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {

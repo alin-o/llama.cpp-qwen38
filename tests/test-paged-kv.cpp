@@ -242,7 +242,9 @@ TEST(test_seq_pos_seq_rm_removes) {
     kv.set_seq_max_pos(0, 17);
     EXPECT_EQ(kv.seq_pos_min(0), 5);
 
-    kv.seq_rm(0, 0, 0);
+    EXPECT_FALSE(kv.seq_rm(0, 0, 0));
+    EXPECT_EQ(kv.seq_pos_min(0), 5);
+    EXPECT_TRUE(kv.seq_rm(0, -1, -1));
     EXPECT_EQ(kv.seq_pos_min(0), -1);
     EXPECT_EQ(kv.seq_pos_max(0), -1);
 }
@@ -325,6 +327,48 @@ TEST(test_free_blocks_releases_to_pool) {
     ggml_backend_free(backend);
 }
 
+TEST(test_clear_and_seq_rm_release_blocks) {
+    ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    EXPECT_TRUE(backend != nullptr);
+
+    auto kv = make_kv();
+    kv.init(backend, backend, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, 2, 1, 0.0f);
+    llama_sequence_group first;
+    first.request_id = 1;
+    first.n_prompt = 16;
+    EXPECT_TRUE(kv.allocate(0, first));
+    EXPECT_TRUE(kv.seq_rm(first.request_id, -1, -1));
+    EXPECT_TRUE(first.block_table.empty());
+
+    llama_sequence_group second;
+    second.request_id = 2;
+    second.n_prompt = 32;
+    EXPECT_TRUE(kv.allocate(0, second));
+    kv.clear(false);
+    EXPECT_TRUE(second.block_table.empty());
+
+    llama_sequence_group third;
+    third.request_id = 3;
+    third.n_prompt = 32;
+    EXPECT_TRUE(kv.allocate(0, third));
+    ggml_backend_free(backend);
+}
+
+TEST(test_paged_storage_types_are_native) {
+    ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    EXPECT_TRUE(backend != nullptr);
+
+    for (const ggml_type type : { GGML_TYPE_Q8_0, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO4_0 }) {
+        llama_kv_cache_paged kv(/*head_dim=*/128, /*n_heads_kv=*/4, /*block_size=*/16,
+                                /*n_layers=*/2, /*n_ubatch=*/32, /*n_seq_max=*/8);
+        kv.init(backend, backend, type, type, /*n_gpu_blocks=*/2, /*n_cpu_blocks=*/1, /*watermark=*/0.0f);
+        EXPECT_EQ(kv.get_k_tensor(0)->type, type);
+        EXPECT_EQ(kv.get_v_tensor(0)->type, type);
+    }
+
+    ggml_backend_free(backend);
+}
+
 TEST(test_paged_state_round_trip) {
     ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
     EXPECT_TRUE(backend != nullptr);
@@ -335,6 +379,7 @@ TEST(test_paged_state_round_trip) {
     group.request_id = 3;
     group.n_prompt   = 32;
     EXPECT_TRUE(kv.allocate(0, group));
+    const llama_block_ids block_ids = group.block_table;
     kv.set_seq_min_pos(group.request_id, 0);
     kv.set_seq_max_pos(group.request_id, 31);
 
@@ -353,7 +398,7 @@ TEST(test_paged_state_round_trip) {
 
     const size_t block_bytes = ggml_nbytes(k) / 4;
     std::vector<uint8_t> restored(block_bytes);
-    for (uint32_t block_id : group.block_table) {
+    for (uint32_t block_id : block_ids) {
         ggml_backend_tensor_get(k, restored.data(), block_id * block_bytes, block_bytes);
         EXPECT_TRUE(restored == std::vector<uint8_t>(block_bytes, 0x5a));
     }
@@ -542,9 +587,9 @@ TEST(test_scheduler_resumes_fresh_checkpoint) {
 
     auto restored = make_fixture();
     io.offset = 0;
-    restored.kv->state_read(io);
-    EXPECT_TRUE(restored.sched->queue_request(make_group(3, 16)));
-    auto * restored_group = restored.sched->get_group_from_id(3);
+    restored.kv->state_read(io, 4);
+    EXPECT_TRUE(restored.sched->queue_request(make_group(4, 16)));
+    auto * restored_group = restored.sched->get_group_from_id(4);
     EXPECT_TRUE(restored_group != nullptr);
     EXPECT_EQ(restored_group->n_past, 16u);
     EXPECT_EQ(restored_group->n_decoded, 16u);
@@ -658,9 +703,11 @@ int main(int /*argc*/, char ** /*argv*/) {
 
     fprintf(stderr, "test-paged-kv: llama_kv_cache_paged free_blocks\n");
     RUN(test_free_blocks_releases_to_pool);
+    RUN(test_clear_and_seq_rm_release_blocks);
     RUN(test_paged_state_round_trip);
     RUN(test_paged_sequence_state_preserves_other_sequences);
     RUN(test_paged_state_round_trip_after_swap);
+    RUN(test_paged_storage_types_are_native);
 
     RUN(test_scheduler_state_restores_block_ownership);
     RUN(test_scheduler_resumes_fresh_checkpoint);

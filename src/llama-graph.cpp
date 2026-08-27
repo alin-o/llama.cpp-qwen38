@@ -2616,10 +2616,16 @@ ggml_tensor * llm_graph_context::build_attn_mha_paged(
     v_cache = ggml_reshape_4d(ctx0, ggml_set_rows(ctx0, v_flat, v_rows, write_rows),
                                v_cache->ne[0], v_cache->ne[1], v_cache->ne[2], v_cache->ne[3]);
 
+    if (k_cache->type == GGML_TYPE_TURBO3_0 || k_cache->type == GGML_TYPE_TURBO4_0) {
+        q = ggml_turbo_wht(ctx0, q, 0);
+    }
     ggml_tensor * cur = ggml_paged_attn(ctx0,
                                         q, k_cur, v_cur, k_cache, v_cache,
                                         block_table, write_rows, context_lens, batch_offsets, batch_lens,
                                         kq_scale, block_size, max_blocks);
+    if (v_cache->type == GGML_TYPE_TURBO3_0 || v_cache->type == GGML_TYPE_TURBO4_0) {
+        cur = ggml_turbo_wht(ctx0, cur, 1);
+    }
 
     return cur;
 }

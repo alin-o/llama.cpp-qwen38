@@ -60,6 +60,7 @@ static std::vector<float> get_logits(llama_context * ctx, int32_t idx, int n_voc
     EXPECT_TRUE(raw != nullptr);
     return { raw, raw + n_vocab };
 }
+static void compare_logits(int step, const std::vector<float> & ref, const std::vector<float> & paged);
 
 
 static path_result run_non_paged(const std::string & model_path) {
@@ -184,6 +185,69 @@ static path_result run_paged(const std::string & model_path,
     return result;
 }
 
+static void run_paged_checkpoint_resume(const std::string & model_path) {
+    common_params params;
+    params.model.path = model_path;
+    params.n_ctx = 256;
+    params.n_batch = 64;
+    params.n_ubatch = 64;
+    params.warmup = false;
+    params.kv_paged = true;
+    params.n_gpu_blocks = 64;
+    params.n_cpu_blocks = 16;
+    params.n_gpu_blocks_set = true;
+    params.n_cpu_blocks_set = true;
+    params.n_sequences = 1;
+    params.n_parallel = 1;
+    params.cache_type_k = GGML_TYPE_Q8_0;
+    params.cache_type_v = GGML_TYPE_Q8_0;
+
+    auto source_init = common_init_from_params(params);
+    llama_context * source_ctx = source_init->context();
+    const llama_vocab * vocab = llama_model_get_vocab(source_init->model());
+    const int n_vocab = llama_vocab_n_tokens(vocab);
+    llama_paged_scheduler * source_sched = llama_paged_scheduler_init(source_ctx);
+    EXPECT_TRUE(source_sched != nullptr);
+    std::vector<llama_token> prompt_tokens = common_tokenize(source_ctx, TEST_PROMPT, true);
+    EXPECT_TRUE(llama_paged_scheduler_add_request(source_sched, prompt_tokens.data(), prompt_tokens.size(), 0));
+
+    llama_batch source_batch = {};
+    EXPECT_TRUE(llama_paged_scheduler_prepare_batch(source_sched, &source_batch));
+    EXPECT_TRUE(llama_decode(source_ctx, source_batch) == 0);
+    llama_synchronize(source_ctx);
+    const llama_paged_batch_info * source_info = llama_paged_scheduler_get_batch_info(source_sched);
+    const llama_token next = argmax_logits(get_logits(source_ctx, source_info->batch_offsets[0] + source_info->batch_lens[0] - 1, n_vocab));
+    const int8_t continue_flag = 0;
+    llama_paged_scheduler_update(source_sched, &source_batch, &next, &continue_flag);
+
+    const size_t state_size = llama_state_get_size(source_ctx);
+    std::vector<uint8_t> state(state_size);
+    EXPECT_TRUE(llama_state_get_data(source_ctx, state.data(), state.size()) == state.size());
+    EXPECT_TRUE(llama_paged_scheduler_prepare_batch(source_sched, &source_batch));
+    EXPECT_TRUE(llama_decode(source_ctx, source_batch) == 0);
+    llama_synchronize(source_ctx);
+    source_info = llama_paged_scheduler_get_batch_info(source_sched);
+    const std::vector<float> expected = get_logits(source_ctx, source_info->batch_offsets[0] + source_info->batch_lens[0] - 1, n_vocab);
+    llama_paged_scheduler_free(source_sched);
+    llama_batch_free(source_batch);
+    source_init.reset();
+
+    auto restored_init = common_init_from_params(params);
+    llama_context * restored_ctx = restored_init->context();
+    EXPECT_TRUE(llama_state_set_data(restored_ctx, state.data(), state.size()) == state.size());
+    llama_paged_scheduler * restored_sched = llama_paged_scheduler_init(restored_ctx);
+    EXPECT_TRUE(restored_sched != nullptr);
+    EXPECT_TRUE(llama_paged_scheduler_add_request(restored_sched, prompt_tokens.data(), prompt_tokens.size(), 0));
+    llama_batch restored_batch = {};
+    EXPECT_TRUE(llama_paged_scheduler_prepare_batch(restored_sched, &restored_batch));
+    EXPECT_TRUE(restored_batch.n_tokens == 1 && restored_batch.token[0] == next && restored_batch.pos[0] == (llama_pos) prompt_tokens.size());
+    EXPECT_TRUE(llama_decode(restored_ctx, restored_batch) == 0);
+    llama_synchronize(restored_ctx);
+    const llama_paged_batch_info * restored_info = llama_paged_scheduler_get_batch_info(restored_sched);
+    compare_logits(0, expected, get_logits(restored_ctx, restored_info->batch_offsets[0] + restored_info->batch_lens[0] - 1, n_vocab));
+    llama_paged_scheduler_free(restored_sched);
+}
+
 static std::vector<int> top_k(const std::vector<float> & logits) {
     std::vector<int> result(logits.size());
     std::iota(result.begin(), result.end(), 0);
@@ -295,6 +359,8 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "test-paged-kv-e2e: running q8_0 paged path\n");
     path_result paged_greedy = run_paged(params.model.path, {}, type_k, type_v);
     fprintf(stderr, "  got %zu tokens, %d-vocab logits\n", paged_greedy.tokens.size(), paged_greedy.n_vocab);
+    fprintf(stderr, "test-paged-kv-e2e: resuming q8_0 paged checkpoint\n");
+    run_paged_checkpoint_resume(params.model.path);
 
     path_result paged_q8 = run_paged(params.model.path, ref.tokens, type_k, type_v);
     compare_results(ref, paged_greedy, paged_q8);
