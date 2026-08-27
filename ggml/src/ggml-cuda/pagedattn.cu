@@ -227,7 +227,7 @@ __global__ void paged_attention_prefill_mma_kernel(
         const int q_row = vec / (HEAD_DIM / 4);
         const int q_dim = (vec % (HEAD_DIM / 4)) * 4;
         const int q_token = context_len - num_new_tokens + q_tile_start + q_row;
-        if (q_token < num_new_tokens) {
+        if (q_tile_start + q_row < num_new_tokens) {
             const size_t q_offset = (size_t) (seq_start + q_token) * n_heads * HEAD_DIM + (size_t) head_idx * HEAD_DIM + q_dim;
             paged_store_half4(&q_shared[q_row][q_dim], *(const float4 *) (q + q_offset));
         } else {
@@ -344,7 +344,7 @@ __global__ void paged_attention_prefill_mma_kernel(
         const int q_row = vec / (HEAD_DIM / 4);
         const int dim = (vec % (HEAD_DIM / 4)) * 4;
         const int q_token = context_len - num_new_tokens + q_tile_start + q_row;
-        if (q_token < num_new_tokens) {
+        if (q_tile_start + q_row < num_new_tokens) {
             const size_t out_offset = (size_t) (seq_start + q_token) * n_heads * HEAD_DIM + (size_t) head_idx * HEAD_DIM + dim;
             const float4 acc = paged_load_float4(&value_acc_shared[q_row][dim]);
             const float inv_sum = 1.0f / (sum_shared[q_row] + 1e-6f);
