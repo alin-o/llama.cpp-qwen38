@@ -4,6 +4,7 @@
 #include "llama-io.h"
 
 #include <algorithm>
+#include <unordered_set>
 #include <stdexcept>
 
 static ggml_type paged_storage_type(ggml_type type) {
@@ -563,6 +564,7 @@ void llama_kv_cache_paged::state_read(llama_io_read_i & io, llama_seq_id seq_id,
     const uint32_t n_total_blocks = num_gpu_blocks + num_cpu_blocks;
     std::vector<saved_sequence> sequences;
     std::vector<uint32_t> serialized_blocks;
+    std::unordered_set<llama_seq_id> saved_sequence_ids;
     sequences.reserve(n_sequences);
     for (uint32_t i = 0; i < n_sequences; ++i) {
         saved_sequence saved;
@@ -572,6 +574,9 @@ void llama_kv_cache_paged::state_read(llama_io_read_i & io, llama_seq_id seq_id,
         io.read(&n_blocks, sizeof(n_blocks));
         if (saved.id < 0 || (seq_id == -1 && (uint32_t) saved.id >= n_seq_max) || n_blocks > n_total_blocks) {
             throw std::runtime_error("invalid paged KV sequence id or block count");
+        }
+        if (!saved_sequence_ids.insert(saved.id).second) {
+            throw std::runtime_error("duplicate paged KV sequence id");
         }
         saved.blocks.resize(n_blocks);
         if (n_blocks) {
@@ -653,6 +658,16 @@ void llama_kv_cache_paged::state_read(llama_io_read_i & io, llama_seq_id seq_id,
     };
     for (const auto & saved : sequences) {
         validate_group(seq_id == -1 ? saved.id : seq_id, saved);
+    }
+    if (seq_id == -1) {
+        for (const auto & item : sequence_groups) {
+            const auto saved = std::find_if(sequences.begin(), sequences.end(), [&](const saved_sequence & sequence) {
+                return sequence.id == item.first && sequence.has_group;
+            });
+            if (saved == sequences.end()) {
+                throw std::runtime_error("paged KV checkpoint omits active sequence");
+            }
+        }
     }
 
     std::unordered_map<uint32_t, uint32_t> block_remap;

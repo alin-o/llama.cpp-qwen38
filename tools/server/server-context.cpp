@@ -947,6 +947,7 @@ private:
         ctx_dft   = nullptr;
         model_dft = nullptr;
 
+        paged_scheduler.reset();
         llama_init.reset();
 
         ctx_tgt = nullptr;

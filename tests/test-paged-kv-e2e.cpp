@@ -231,6 +231,14 @@ static void run_paged_checkpoint_resume(const std::string & model_path) {
     llama_paged_scheduler_free(source_sched);
     llama_batch_free(source_batch);
     source_init.reset();
+    {
+        auto conflict_init = common_init_from_params(params);
+        llama_paged_scheduler * conflict_sched = llama_paged_scheduler_init(conflict_init->context());
+        EXPECT_TRUE(conflict_sched != nullptr);
+        EXPECT_TRUE(llama_paged_scheduler_add_request(conflict_sched, prompt_tokens.data(), prompt_tokens.size(), 1));
+        EXPECT_TRUE(llama_state_set_data(conflict_init->context(), state.data(), state.size()) == 0);
+        llama_paged_scheduler_free(conflict_sched);
+    }
 
     auto restored_init = common_init_from_params(params);
     llama_context * restored_ctx = restored_init->context();
