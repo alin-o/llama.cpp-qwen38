@@ -29,3 +29,14 @@ static inline bool ggml_paged_attn_tiled_prefill_supported(
     return n_q_tokens > n_sequences && tensor_cores_available && supported_head_dim && q_type == GGML_TYPE_F32 &&
         q_contiguous && q_aligned && n_q_tiles > 0 && n_q_tiles <= 65535 && k_native && v_native;
 }
+
+#if defined(GGML_USE_CUDA)
+#ifdef __cplusplus
+extern "C" {
+#endif
+unsigned long long ggml_paged_attn_tiled_prefill_launch_count(void);
+void ggml_paged_attn_tiled_prefill_launch_count_reset(void);
+#ifdef __cplusplus
+}
+#endif
+#endif

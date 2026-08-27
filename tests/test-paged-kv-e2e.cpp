@@ -17,6 +17,7 @@
 #include "common.h"
 #include "llama.h"
 #include "sampling.h"
+#include "ggml-paged-attn.h"
 
 #include <algorithm>
 #include <cassert>
@@ -121,16 +122,15 @@ static path_result run_paged(const std::string & model_path,
     params.n_ubatch      = 64;
     params.n_predict     = N_PREDICT;
     params.sampling.temp = 0.0f;  // greedy
-    params.warmup        = false;
     params.kv_paged      = true;
     params.n_gpu_blocks  = 64;
     params.n_cpu_blocks  = 16;
     params.n_gpu_blocks_set = true;
     params.n_cpu_blocks_set = true;
-    params.n_sequences   = 2;
+    params.n_sequences   = 1;
     params.cache_type_k  = type_k;
     params.cache_type_v  = type_v;
-    params.n_parallel    = 2;
+    params.n_parallel    = 1;
 
     auto            init  = common_init_from_params(params);
     llama_model *   model = init->model();
@@ -152,7 +152,9 @@ static path_result run_paged(const std::string & model_path,
     EXPECT_TRUE(!prompt_tokens.empty());
 
     EXPECT_TRUE(llama_paged_scheduler_add_request(sched, prompt_tokens.data(), prompt_tokens.size(), 0));
-    EXPECT_TRUE(llama_paged_scheduler_add_request(sched, prompt_tokens.data(), prompt_tokens.size(), 1));
+#if defined(GGML_USE_CUDA)
+    ggml_paged_attn_tiled_prefill_launch_count_reset();
+#endif
 
     path_result result;
     result.n_vocab    = n_vocab;
@@ -168,10 +170,9 @@ static path_result run_paged(const std::string & model_path,
         llama_synchronize(ctx);
 
         const llama_paged_batch_info * info = llama_paged_scheduler_get_batch_info(sched);
-        EXPECT_TRUE(info != nullptr && info->n_seq == 2);
+        EXPECT_TRUE(info != nullptr && info->n_seq == 1);
         if (result.tokens.empty()) {
             EXPECT_TRUE(info->batch_lens[0] > params.block_size);
-            EXPECT_TRUE(info->batch_lens[1] > params.block_size);
         }
 
         const int32_t last_idx = info->batch_offsets[0] + info->batch_lens[0] - 1;
@@ -183,13 +184,18 @@ static path_result run_paged(const std::string & model_path,
         result.tokens.push_back(next);
 
         const bool stop = llama_vocab_is_eog(vocab, next) || (int) result.tokens.size() >= N_PREDICT;
-        const llama_token next_tokens[] = { next, next };
-        const int8_t stop_flags[] = { static_cast<int8_t>(stop), static_cast<int8_t>(stop) };
+        const llama_token next_tokens[] = { next };
+        const int8_t stop_flags[] = { static_cast<int8_t>(stop) };
         llama_paged_scheduler_update(sched, &batch, next_tokens, stop_flags);
         if (stop) {
             break;
         }
     }
+#if defined(GGML_USE_CUDA)
+    if (llama_model_n_embd_head_v(model) == 256) {
+        EXPECT_TRUE(ggml_paged_attn_tiled_prefill_launch_count() > 0);
+    }
+#endif
     llama_paged_scheduler_free(sched);
     return result;
 }

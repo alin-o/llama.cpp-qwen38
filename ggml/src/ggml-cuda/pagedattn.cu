@@ -2,6 +2,17 @@
 
 #include "ggml-paged-attn.h"
 #include "turbo-quant.cuh"
+#include <atomic>
+
+static std::atomic<unsigned long long> g_paged_prefill_launch_count{ 0 };
+
+extern "C" unsigned long long ggml_paged_attn_tiled_prefill_launch_count(void) {
+    return g_paged_prefill_launch_count.load(std::memory_order_relaxed);
+}
+
+extern "C" void ggml_paged_attn_tiled_prefill_launch_count_reset(void) {
+    g_paged_prefill_launch_count.store(0, std::memory_order_relaxed);
+}
 
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
 #if defined(TURING_MMA_AVAILABLE)
@@ -457,6 +468,7 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
                 GGML_ABORT("Invalid tiled paged attention head size");
         }
         CUDA_CHECK(cudaGetLastError());
+        g_paged_prefill_launch_count.fetch_add(1, std::memory_order_relaxed);
         GGML_LOG_DEBUG("%s: launched paged_attention_prefill_mma_kernel head_dim=%d\n", __func__, head_dim);
     }
 #endif
