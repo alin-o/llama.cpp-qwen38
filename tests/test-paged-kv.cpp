@@ -3,6 +3,7 @@
 #include "llama-kv-cache-paged.h"
 #include "llama-io.h"
 #include "llama-paged-scheduler-impl.h"
+#include <stdexcept>
 
 #include <cassert>
 #include <cstdio>
@@ -52,13 +53,17 @@ public:
     }
 
     void read(void * dst, size_t size) override {
-        EXPECT_TRUE(offset + size <= data.size());
+        if (offset + size > data.size()) {
+            throw std::runtime_error("paged test input is truncated");
+        }
         std::memcpy(dst, data.data() + offset, size);
         offset += size;
     }
 
     void read_tensor(ggml_tensor * tensor, size_t tensor_offset, size_t size) override {
-        EXPECT_TRUE(offset + size <= data.size());
+        if (offset + size > data.size()) {
+            throw std::runtime_error("paged test input is truncated");
+        }
         ggml_backend_tensor_set(tensor, data.data() + offset, tensor_offset, size);
         offset += size;
     }
@@ -409,6 +414,68 @@ TEST(test_paged_state_round_trip) {
     ggml_backend_free(backend);
 }
 
+TEST(test_paged_state_read_failure_preserves_live_cache) {
+    ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    EXPECT_TRUE(backend != nullptr);
+
+    auto kv = make_kv();
+    kv.init(backend, backend, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, 4, 2, 0.0f);
+    llama_sequence_group group;
+    group.request_id = 3;
+    group.n_prompt = 16;
+    EXPECT_TRUE(kv.allocate(0, group));
+    const llama_block_ids expected = group.block_table;
+    kv.set_seq_min_pos(group.request_id, 0);
+    kv.set_seq_max_pos(group.request_id, 15);
+
+    memory_io io;
+    kv.state_write(io);
+    io.data.pop_back();
+    io.offset = 0;
+    bool failed = false;
+    try {
+        kv.state_read(io);
+    } catch (const std::runtime_error &) {
+        failed = true;
+    }
+    EXPECT_TRUE(failed);
+    EXPECT_TRUE(group.block_table == expected);
+    EXPECT_EQ(kv.seq_pos_min(group.request_id), 0);
+    EXPECT_EQ(kv.seq_pos_max(group.request_id), 15);
+    ggml_backend_free(backend);
+}
+
+TEST(test_paged_sequence_state_read_failure_preserves_live_cache) {
+    ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    EXPECT_TRUE(backend != nullptr);
+
+    auto kv = make_kv();
+    kv.init(backend, backend, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, 4, 2, 0.0f);
+    llama_sequence_group group;
+    group.request_id = 3;
+    group.n_prompt = 16;
+    EXPECT_TRUE(kv.allocate(0, group));
+    const llama_block_ids expected = group.block_table;
+    kv.set_seq_min_pos(group.request_id, 0);
+    kv.set_seq_max_pos(group.request_id, 15);
+
+    memory_io io;
+    kv.state_write(io, group.request_id);
+    io.data.pop_back();
+    io.offset = 0;
+    bool failed = false;
+    try {
+        kv.state_read(io, group.request_id);
+    } catch (const std::runtime_error &) {
+        failed = true;
+    }
+    EXPECT_TRUE(failed);
+    EXPECT_TRUE(group.block_table == expected);
+    EXPECT_EQ(kv.seq_pos_min(group.request_id), 0);
+    EXPECT_EQ(kv.seq_pos_max(group.request_id), 15);
+    ggml_backend_free(backend);
+}
+
 TEST(test_paged_sequence_state_preserves_other_sequences) {
     ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
     EXPECT_TRUE(backend != nullptr);
@@ -572,6 +639,7 @@ TEST(test_scheduler_state_restores_block_ownership) {
 
 TEST(test_scheduler_resumes_fresh_checkpoint) {
     auto source = make_fixture();
+
     EXPECT_TRUE(source.sched->queue_request(make_group(3, 16)));
 
     llama_batch source_batch = {};
@@ -607,6 +675,15 @@ TEST(test_scheduler_resumes_fresh_checkpoint) {
     EXPECT_EQ(restored_group->logical_seq.back(), 43);
     llama_batch_free(source_batch);
     llama_batch_free(restored_batch);
+}
+
+TEST(test_scheduler_teardown_unregisters_groups) {
+    auto fixture = make_fixture();
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(3, 16)));
+    fixture.sched.reset();
+    fixture.sched = std::unique_ptr<llama_paged_scheduler_impl>(
+        new llama_paged_scheduler_impl(128, 16, 64, fixture.kv.get()));
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(3, 16)));
 }
 
 TEST(test_scheduler_no_deadlock_on_empty) {
@@ -712,6 +789,9 @@ int main(int /*argc*/, char ** /*argv*/) {
 
     RUN(test_scheduler_state_restores_block_ownership);
     RUN(test_scheduler_resumes_fresh_checkpoint);
+    RUN(test_paged_sequence_state_read_failure_preserves_live_cache);
+    RUN(test_paged_state_read_failure_preserves_live_cache);
+    RUN(test_scheduler_teardown_unregisters_groups);
     fprintf(stderr, "test-paged-kv: llama_kv_cache_paged scheduler\n");
     RUN(test_scheduler_no_deadlock_on_empty);
     RUN(test_scheduler_deadlock_oversize_waiting_request);

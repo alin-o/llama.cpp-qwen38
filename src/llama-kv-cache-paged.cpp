@@ -7,6 +7,7 @@
 #include <stdexcept>
 
 static ggml_type paged_storage_type(ggml_type type) {
+    // Tiel TurboQuant types failed the paged quality gate; q8_0 is the production fallback.
     return type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0 ? GGML_TYPE_Q8_0 : type;
 }
 
@@ -513,6 +514,19 @@ void llama_kv_cache_paged::state_write(llama_io_write_i & io, llama_seq_id seq_i
 void llama_kv_cache_paged::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
     GGML_UNUSED(flags);
 
+    struct saved_sequence {
+        llama_seq_id          id;
+        seq_range             range;
+        llama_block_ids       blocks;
+        bool                  has_group = false;
+        restored_group_state  group;
+    };
+    struct saved_block {
+        uint32_t                              id;
+        std::vector<std::vector<uint8_t>>     k;
+        std::vector<std::vector<uint8_t>>     v;
+    };
+
     uint32_t magic;
     uint32_t head_dim_ref;
     uint32_t n_heads_kv_ref;
@@ -539,130 +553,62 @@ void llama_kv_cache_paged::state_read(llama_io_read_i & io, llama_seq_id seq_id,
 
     uint32_t n_sequences;
     io.read(&n_sequences, sizeof(n_sequences));
-    if (seq_id != -1 && n_sequences != 1) {
-        throw std::runtime_error("paged KV sequence state contains multiple sequences");
+    if (n_sequences > n_seq_max || (seq_id != -1 && n_sequences != 1)) {
+        throw std::runtime_error("invalid paged KV sequence count");
     }
     if (seq_id != -1 && (seq_id < 0 || (uint32_t) seq_id >= n_seq_max)) {
         throw std::runtime_error("invalid paged KV destination sequence id");
     }
 
-    if (seq_id == -1) {
-        for (const auto & item : sequence_groups) {
-            item.second->block_table.clear();
-        }
-        sequence_positions.clear();
-        sequence_blocks.clear();
-        restored_groups.clear();
-    }
+    const uint32_t n_total_blocks = num_gpu_blocks + num_cpu_blocks;
+    std::vector<saved_sequence> sequences;
     std::vector<uint32_t> serialized_blocks;
-    llama_block_ids loaded_blocks;
-    std::unordered_map<uint32_t, uint32_t> block_remap;
+    sequences.reserve(n_sequences);
     for (uint32_t i = 0; i < n_sequences; ++i) {
-        llama_seq_id id;
-        seq_range range;
+        saved_sequence saved;
         uint32_t n_blocks;
-        io.read(&id, sizeof(id));
-        io.read(&range, sizeof(range));
+        io.read(&saved.id, sizeof(saved.id));
+        io.read(&saved.range, sizeof(saved.range));
         io.read(&n_blocks, sizeof(n_blocks));
-        if ((seq_id == -1 && (id < 0 || (uint32_t) id >= n_seq_max || sequence_blocks.count(id))) ||
-            (seq_id != -1 && id < 0)) {
-            throw std::runtime_error("invalid paged KV sequence id");
+        if (saved.id < 0 || (seq_id == -1 && (uint32_t) saved.id >= n_seq_max) || n_blocks > n_total_blocks) {
+            throw std::runtime_error("invalid paged KV sequence id or block count");
         }
-        const llama_seq_id target_id = seq_id == -1 ? id : seq_id;
-        llama_block_ids blocks(n_blocks);
+        saved.blocks.resize(n_blocks);
         if (n_blocks) {
-            io.read(blocks.data(), n_blocks * sizeof(uint32_t));
-            serialized_blocks.insert(serialized_blocks.end(), blocks.begin(), blocks.end());
-        }
-        if (seq_id == -1) {
-            sequence_blocks[target_id] = std::move(blocks);
-        } else {
-            loaded_blocks = std::move(blocks);
+            io.read(saved.blocks.data(), n_blocks * sizeof(uint32_t));
+            serialized_blocks.insert(serialized_blocks.end(), saved.blocks.begin(), saved.blocks.end());
         }
         uint8_t has_group;
         io.read(&has_group, sizeof(has_group));
-        if (has_group) {
+        if (has_group > 1) {
+            throw std::runtime_error("invalid paged scheduler state");
+        }
+        saved.has_group = has_group;
+        if (saved.has_group) {
             uint32_t status;
             uint32_t logical_seq_size;
-            restored_group_state restored;
             io.read(&status, sizeof(status));
-            io.read(&restored.t_arrival_time, sizeof(restored.t_arrival_time));
-            io.read(&restored.t_first_token_us, sizeof(restored.t_first_token_us));
-            io.read(&restored.n_prompt, sizeof(restored.n_prompt));
-            io.read(&restored.n_decoded, sizeof(restored.n_decoded));
-            io.read(&restored.n_past, sizeof(restored.n_past));
+            io.read(&saved.group.t_arrival_time, sizeof(saved.group.t_arrival_time));
+            io.read(&saved.group.t_first_token_us, sizeof(saved.group.t_first_token_us));
+            io.read(&saved.group.n_prompt, sizeof(saved.group.n_prompt));
+            io.read(&saved.group.n_decoded, sizeof(saved.group.n_decoded));
+            io.read(&saved.group.n_past, sizeof(saved.group.n_past));
             io.read(&logical_seq_size, sizeof(logical_seq_size));
-            if (status > (uint32_t) llama_sequence_group_status::FINISHED ||
-                restored.n_past > n_blocks * block_size || logical_seq_size < restored.n_prompt) {
+            if (status > (uint32_t) llama_sequence_group_status::FINISHED || saved.group.n_past > n_blocks * block_size ||
+                logical_seq_size < saved.group.n_prompt || logical_seq_size > n_blocks * block_size + 1) {
                 throw std::runtime_error("invalid paged scheduler state");
             }
-            restored.status = (llama_sequence_group_status) status;
-            restored.logical_seq.resize(logical_seq_size);
-            io.read(restored.logical_seq.data(), logical_seq_size * sizeof(llama_token));
-            restored_groups[target_id] = std::move(restored);
+            saved.group.status = (llama_sequence_group_status) status;
+            saved.group.logical_seq.resize(logical_seq_size);
+            io.read(saved.group.logical_seq.data(), logical_seq_size * sizeof(llama_token));
         }
-        sequence_positions[target_id] = range;
+        sequences.push_back(std::move(saved));
     }
 
-    if (seq_id != -1) {
-        const auto group = sequence_groups.find(seq_id);
-        const auto restored = restored_groups.find(seq_id);
-        if (group != sequence_groups.end() && restored != restored_groups.end() &&
-            group->second->status != restored->second.status) {
-            throw std::runtime_error("paged KV checkpoint status conflicts with active sequence");
-        }
-    }
-
-    if (seq_id == -1) {
-        std::vector<uint32_t> allocated_blocks;
-        for (const auto & item : sequence_blocks) {
-            allocated_blocks.insert(allocated_blocks.end(), item.second.begin(), item.second.end());
-        }
-        if (!block_manager.restore(allocated_blocks)) {
-            throw std::runtime_error("invalid paged KV block table");
-        }
-        for (const auto & item : sequence_groups) {
-            register_group(*item.second);
-        }
-    } else {
-        std::vector<uint32_t> source_blocks = loaded_blocks;
-        std::sort(source_blocks.begin(), source_blocks.end());
-        if (std::adjacent_find(source_blocks.begin(), source_blocks.end()) != source_blocks.end() ||
-            (source_blocks.empty() ? false : source_blocks.back() >= num_gpu_blocks + num_cpu_blocks)) {
-            throw std::runtime_error("invalid paged KV block table");
-        }
-
-        if (const auto old = sequence_blocks.find(seq_id); old != sequence_blocks.end()) {
-            release_block_ids(old->second);
-            sequence_blocks.erase(old);
-        }
-        if (const auto group = sequence_groups.find(seq_id); group != sequence_groups.end()) {
-            group->second->block_table.clear();
-        }
-
-        const uint32_t n_gpu = std::count_if(loaded_blocks.begin(), loaded_blocks.end(),
-                                             [&](uint32_t id) { return id < num_gpu_blocks; });
-        const uint32_t n_cpu = loaded_blocks.size() - n_gpu;
-        llama_block_ids gpu_blocks = block_manager.checkout_gpu_blocks(n_gpu);
-        llama_block_ids cpu_blocks = block_manager.checkout_cpu_blocks(n_cpu);
-        if (gpu_blocks.size() != n_gpu || cpu_blocks.size() != n_cpu) {
-            release_block_ids(gpu_blocks);
-            release_block_ids(cpu_blocks);
-            throw std::runtime_error("insufficient paged KV blocks to restore sequence");
-        }
-        size_t gpu_index = 0;
-        size_t cpu_index = 0;
-        llama_block_ids destination_blocks;
-        destination_blocks.reserve(loaded_blocks.size());
-        for (uint32_t source : loaded_blocks) {
-            const uint32_t destination = source < num_gpu_blocks ? gpu_blocks[gpu_index++] : cpu_blocks[cpu_index++];
-            block_remap[source] = destination;
-            destination_blocks.push_back(destination);
-        }
-        sequence_blocks[seq_id] = std::move(destination_blocks);
-        if (const auto group = sequence_groups.find(seq_id); group != sequence_groups.end()) {
-            register_group(*group->second);
-        }
+    std::sort(serialized_blocks.begin(), serialized_blocks.end());
+    if (serialized_blocks.size() > n_total_blocks || (!serialized_blocks.empty() && serialized_blocks.back() >= n_total_blocks) ||
+        std::adjacent_find(serialized_blocks.begin(), serialized_blocks.end()) != serialized_blocks.end()) {
+        throw std::runtime_error("invalid paged KV block table");
     }
 
     uint32_t n_saved_blocks;
@@ -670,26 +616,115 @@ void llama_kv_cache_paged::state_read(llama_io_read_i & io, llama_seq_id seq_id,
     if (n_saved_blocks != serialized_blocks.size()) {
         throw std::runtime_error("invalid paged KV block data count");
     }
-    std::vector<uint32_t> expected_data_blocks = serialized_blocks;
+    std::vector<saved_block> data;
+    data.reserve(n_saved_blocks);
+    std::vector<uint32_t> expected_blocks = serialized_blocks;
     for (uint32_t i = 0; i < n_saved_blocks; ++i) {
-        uint32_t block_id;
-        io.read(&block_id, sizeof(block_id));
-        const auto expected = std::find(expected_data_blocks.begin(), expected_data_blocks.end(), block_id);
-        if (expected == expected_data_blocks.end()) {
+        saved_block saved;
+        io.read(&saved.id, sizeof(saved.id));
+        const auto expected = std::lower_bound(expected_blocks.begin(), expected_blocks.end(), saved.id);
+        if (expected == expected_blocks.end() || *expected != saved.id) {
             throw std::runtime_error("invalid paged KV block data id");
         }
-        expected_data_blocks.erase(expected);
-        const uint32_t destination_id = seq_id == -1 ? block_id : block_remap.at(block_id);
+        expected_blocks.erase(expected);
+        saved.k.resize(n_layers);
+        saved.v.resize(n_layers);
+        for (uint32_t il = 0; il < n_layers; ++il) {
+            saved.k[il].resize(block_bytes_k);
+            saved.v[il].resize(block_bytes_v);
+            io.read(saved.k[il].data(), block_bytes_k);
+            io.read(saved.v[il].data(), block_bytes_v);
+        }
+        data.push_back(std::move(saved));
+    }
+
+    const auto validate_group = [&](llama_seq_id id, const saved_sequence & saved) {
+        if (!saved.has_group) {
+            return;
+        }
+        const auto group = sequence_groups.find(id);
+        if (group != sequence_groups.end() &&
+            (group->second->status != saved.group.status || group->second->n_prompt != saved.group.n_prompt ||
+             group->second->logical_seq.size() < saved.group.n_prompt ||
+             !std::equal(group->second->logical_seq.begin(), group->second->logical_seq.begin() + saved.group.n_prompt,
+                         saved.group.logical_seq.begin()))) {
+            throw std::runtime_error("paged KV checkpoint conflicts with active sequence");
+        }
+    };
+    for (const auto & saved : sequences) {
+        validate_group(seq_id == -1 ? saved.id : seq_id, saved);
+    }
+
+    std::unordered_map<uint32_t, uint32_t> block_remap;
+    if (seq_id == -1) {
+        if (!block_manager.restore(serialized_blocks)) {
+            throw std::runtime_error("invalid paged KV block table");
+        }
+        for (const auto & item : sequence_groups) {
+            item.second->block_table.clear();
+        }
+        sequence_positions.clear();
+        sequence_blocks.clear();
+        restored_groups.clear();
+        for (const auto & saved : sequences) {
+            sequence_positions[saved.id] = saved.range;
+            sequence_blocks[saved.id] = saved.blocks;
+            if (saved.has_group) {
+                restored_groups[saved.id] = saved.group;
+            }
+        }
+        for (const auto & item : sequence_groups) {
+            register_group(*item.second);
+        }
+    } else {
+        const saved_sequence & saved = sequences.front();
+        const auto old = sequence_blocks.find(seq_id);
+        const llama_block_ids old_blocks = old == sequence_blocks.end() ? llama_block_ids{} : old->second;
+        const uint32_t old_gpu = std::count_if(old_blocks.begin(), old_blocks.end(), [&](uint32_t id) { return id < num_gpu_blocks; });
+        const uint32_t old_cpu = old_blocks.size() - old_gpu;
+        const uint32_t new_gpu = std::count_if(saved.blocks.begin(), saved.blocks.end(), [&](uint32_t id) { return id < num_gpu_blocks; });
+        const uint32_t new_cpu = saved.blocks.size() - new_gpu;
+        if (block_manager.n_free_gpu_blocks() + old_gpu < new_gpu || block_manager.n_free_cpu_blocks() + old_cpu < new_cpu) {
+            throw std::runtime_error("insufficient paged KV blocks to restore sequence");
+        }
+        release_block_ids(old_blocks);
+        if (old != sequence_blocks.end()) {
+            sequence_blocks.erase(old);
+        }
+        const llama_block_ids gpu_blocks = block_manager.checkout_gpu_blocks(new_gpu);
+        const llama_block_ids cpu_blocks = block_manager.checkout_cpu_blocks(new_cpu);
+        size_t gpu_index = 0;
+        size_t cpu_index = 0;
+        llama_block_ids destination_blocks;
+        destination_blocks.reserve(saved.blocks.size());
+        for (uint32_t source : saved.blocks) {
+            const uint32_t destination = source < num_gpu_blocks ? gpu_blocks[gpu_index++] : cpu_blocks[cpu_index++];
+            block_remap[source] = destination;
+            destination_blocks.push_back(destination);
+        }
+        sequence_blocks[seq_id] = std::move(destination_blocks);
+        sequence_positions[seq_id] = saved.range;
+        restored_groups.erase(seq_id);
+        if (saved.has_group) {
+            restored_groups[seq_id] = saved.group;
+        }
+        if (const auto group = sequence_groups.find(seq_id); group != sequence_groups.end()) {
+            group->second->block_table.clear();
+            register_group(*group->second);
+        }
+    }
+
+    for (const auto & saved : data) {
+        const uint32_t destination_id = seq_id == -1 ? saved.id : block_remap.at(saved.id);
         const bool is_gpu = block_manager.is_gpu(destination_id);
         const uint32_t local_id = is_gpu ? destination_id : destination_id - num_gpu_blocks;
         for (uint32_t il = 0; il < n_layers; ++il) {
             ggml_tensor * k = is_gpu ? k_gpu_layers[il] : k_cpu_layers[il];
             ggml_tensor * v = is_gpu ? v_gpu_layers[il] : v_cpu_layers[il];
-            io.read_tensor(k, (size_t) local_id * block_bytes_k, block_bytes_k);
-            io.read_tensor(v, (size_t) local_id * block_bytes_v, block_bytes_v);
+            ggml_backend_tensor_set(k, saved.k[il].data(), (size_t) local_id * block_bytes_k, block_bytes_k);
+            ggml_backend_tensor_set(v, saved.v[il].data(), (size_t) local_id * block_bytes_v, block_bytes_v);
         }
     }
-
 }
 
 // llama_kv_cache_paged_context

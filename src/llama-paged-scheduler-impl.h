@@ -13,6 +13,7 @@ enum class llama_scheduler_status {
 class llama_paged_scheduler_impl {
   public:
     llama_paged_scheduler_impl(uint32_t n_ctx, uint32_t block_sz, int32_t n_batch, llama_kv_cache_paged * kv_manager);
+    ~llama_paged_scheduler_impl();
 
     llama_scheduler_status step(llama_batch & batch);
     bool                   queue_request(llama_sequence_group group);

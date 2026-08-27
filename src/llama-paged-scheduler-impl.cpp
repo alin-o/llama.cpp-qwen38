@@ -13,6 +13,19 @@ llama_paged_scheduler_impl::llama_paged_scheduler_impl(uint32_t               n_
     kv_cache_manager(kv_manager),
     curr_info{} {}
 
+llama_paged_scheduler_impl::~llama_paged_scheduler_impl() {
+    kv_cache_manager->set_paged_batch_info(nullptr);
+    delete[] curr_info.write_slots;
+    delete[] curr_info.block_table;
+    delete[] curr_info.context_lens;
+    delete[] curr_info.batch_offsets;
+    delete[] curr_info.batch_lens;
+
+    for (const auto & item : id_to_group) {
+        kv_cache_manager->seq_rm(item.first, -1, -1);
+    }
+}
+
 bool llama_paged_scheduler_impl::check_deadlock(uint32_t n_candidates, uint32_t n_swapped, uint32_t n_waiting) const {
     if (n_candidates == 0 && (n_swapped > 0 || n_waiting > 0)) {
         LLAMA_LOG_ERROR(
