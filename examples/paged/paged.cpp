@@ -216,7 +216,7 @@ int main(int argc, char ** argv) {
                     common_token_to_piece(ctx, next_token).c_str(), state.n_decoded,
                     state.n_decoded == 1 ? (state.t_first_token_us - state.t_arrival_us) / 1000.0f : 0.0f);
 
-            const int32_t n_generated = state.n_decoded - state.n_prompt;
+            const int32_t n_generated = state.n_decoded - state.n_prompt + 1;
             bool stop = llama_vocab_is_eog(vocab, next_token) || n_generated >= params.n_predict;
             stop_flags.push_back(stop ? 1 : 0);
 

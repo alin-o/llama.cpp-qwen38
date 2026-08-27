@@ -760,14 +760,11 @@ TEST(test_scheduler_batches_two_cross_block_prefills) {
 }
 
 TEST(test_paged_attention_head_mapping_and_dispatch_selection) {
-    const auto kv_head = [](int q_head, int n_heads, int n_heads_kv) {
-        return q_head / (n_heads / n_heads_kv);
-    };
     for (int q_head = 0; q_head < 8; ++q_head) {
-        EXPECT_TRUE(kv_head(q_head, 8, 1) == 0);
+        EXPECT_TRUE(ggml_paged_attn_kv_head(q_head, 8, 1) == 0);
     }
     for (int q_head = 0; q_head < 8; ++q_head) {
-        EXPECT_TRUE(kv_head(q_head, 8, 2) == q_head / 4);
+        EXPECT_TRUE(ggml_paged_attn_kv_head(q_head, 8, 2) == q_head / 4);
     }
 
     EXPECT_TRUE(ggml_paged_attn_tiled_prefill_supported(

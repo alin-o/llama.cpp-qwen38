@@ -136,7 +136,7 @@ __global__ void paged_attention_decode_kernel(
     const int tid = threadIdx.x;
     const int n_heads = gridDim.x;
     const int head_dim = blockDim.x;
-    const int kv_head_idx = head_idx / (n_heads / n_heads_kv);
+    const int kv_head_idx = ggml_paged_attn_kv_head(head_idx, n_heads, n_heads_kv);
     const int seq_start = batch_offsets[seq_idx];
     const int num_new_tokens = batch_lens[seq_idx];
     if (skip_multi_token && num_new_tokens > 1) {
@@ -222,7 +222,7 @@ __global__ void paged_attention_prefill_mma_kernel(
 
     const int seq_start = batch_offsets[seq_idx];
     const int context_len = context_lens[seq_idx];
-    const int kv_head_idx = head_idx / (n_heads / n_heads_kv);
+    const int kv_head_idx = ggml_paged_attn_kv_head(head_idx, n_heads, n_heads_kv);
 
     for (int vec = tid; vec < Q_TILE * HEAD_DIM / 4; vec += blockDim.x) {
         const int q_row = vec / (HEAD_DIM / 4);

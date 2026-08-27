@@ -2,6 +2,16 @@
 
 #include "ggml.h"
 
+#if defined(__CUDACC__)
+static __host__ __device__ inline int ggml_paged_attn_kv_head(int q_head, int n_heads, int n_heads_kv) {
+    return q_head / (n_heads / n_heads_kv);
+}
+#else
+static inline int ggml_paged_attn_kv_head(int q_head, int n_heads, int n_heads_kv) {
+    return q_head / (n_heads / n_heads_kv);
+}
+#endif
+
 static inline bool ggml_paged_attn_tiled_prefill_supported(
         int       head_dim,
         enum ggml_type q_type,
