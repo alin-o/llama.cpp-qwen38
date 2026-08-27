@@ -216,7 +216,8 @@ int main(int argc, char ** argv) {
                     common_token_to_piece(ctx, next_token).c_str(), state.n_decoded,
                     state.n_decoded == 1 ? (state.t_first_token_us - state.t_arrival_us) / 1000.0f : 0.0f);
 
-            bool stop = llama_vocab_is_eog(vocab, next_token) || state.n_decoded >= params.n_predict;
+            const int32_t n_generated = state.n_decoded - state.n_prompt;
+            bool stop = llama_vocab_is_eog(vocab, next_token) || n_generated >= params.n_predict;
             stop_flags.push_back(stop ? 1 : 0);
 
             if (stop) {
@@ -225,14 +226,14 @@ int main(int argc, char ** argv) {
                 request_result r;
                 r.request_id = request_id;
                 r.n_prompt   = state.n_prompt;
-                r.n_decoded  = state.n_decoded;
+                r.n_decoded  = n_generated;
                 r.ttft_ms    = (state.t_first_token_us - state.t_arrival_us) / 1000.0f;
                 r.e2e_ms     = (t_finished - state.t_arrival_us) / 1000.0f;
-                r.tps        = state.n_decoded > 0 && t_finished > state.t_first_token_us ?
-                                   state.n_decoded / ((t_finished - state.t_first_token_us) / 1e6f) :
+                r.tps        = n_generated > 0 && t_finished > state.t_first_token_us ?
+                                   n_generated / ((t_finished - state.t_first_token_us) / 1e6f) :
                                    0.0f;
-                r.tpot_ms    = state.n_decoded > 1 && t_finished > state.t_first_token_us ?
-                                   (t_finished - state.t_first_token_us) / 1000.0f / (state.n_decoded - 1) :
+                r.tpot_ms    = n_generated > 1 && t_finished > state.t_first_token_us ?
+                                   (t_finished - state.t_first_token_us) / 1000.0f / (n_generated - 1) :
                                    0.0f;
                 r.response   = accumulated_responses.count(request_id) ? accumulated_responses[request_id] : "";
                 results.push_back(r);

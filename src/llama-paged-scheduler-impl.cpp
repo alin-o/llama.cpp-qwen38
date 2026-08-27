@@ -318,20 +318,21 @@ void llama_paged_scheduler_impl::process_waiting_list(llama_sequence_group_raw_l
         llama_sequence_group * group = it->get();
         GGML_ASSERT(group && "the waiting group is nullptr.");
 
-        const int32_t tokens_needed = group->n_prompt + 1;
-        if (tokens_needed > remaining_token_budget) {
+        const int32_t batch_tokens = group->n_decoded > 0 ? 1 : group->n_prompt;
+        const int32_t capacity_tokens = group->n_decoded > 0 ? 1 : group->n_prompt + 1;
+        if (batch_tokens > remaining_token_budget) {
             break;
         }
 
         ++count;
-        // When prefilling, we want to always guarantee at least one decode to avoid thrashing
-        const bool success = kv_cache_manager->allocate(tokens_needed, *group);
+        // Reserve room for one decode token without charging it to this prefill batch.
+        const bool success = kv_cache_manager->allocate(capacity_tokens, *group);
         if (!success) {
             // We respect FCFS, so we stop here to prevent a younger waiting request from jumping ahead.
             break;
         }
         candidates.push_back(group);
-        remaining_token_budget -= tokens_needed;
+        remaining_token_budget -= batch_tokens;
         llama_sequence_group_ptr group_ptr = std::move(*it);
         LLAMA_LOG_DEBUG("%s: (start) request_id=%d sent for processing.\n", __func__, group_ptr->request_id);
         set_running(std::move(group_ptr));

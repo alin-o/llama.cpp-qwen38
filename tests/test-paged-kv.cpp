@@ -713,6 +713,72 @@ TEST(test_scheduler_deadlock_oversize_waiting_request) {
     EXPECT_TRUE(status == llama_scheduler_status::DEADLOCK);
 }
 
+TEST(test_scheduler_admits_full_token_budget_prefill) {
+    auto fixture = make_fixture(/*n_ctx=*/128, /*block_size=*/16, /*n_batch=*/64,
+                                /*n_gpu_blocks=*/5, /*n_cpu_blocks=*/1);
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/0, /*n_prompt=*/64)));
+
+    llama_batch batch = {};
+    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    EXPECT_TRUE(batch.n_tokens == 64);
+    const auto * info = fixture.sched->get_curr_batch_info();
+    EXPECT_TRUE(info->n_seq == 1);
+    EXPECT_TRUE(info->batch_lens[0] == 64);
+    EXPECT_TRUE(info->n_blocks_per_seq == 5);
+    EXPECT_TRUE(info->write_slots[15] == info->write_slots[0] + 15);
+    EXPECT_TRUE(info->write_slots[16] == info->write_slots[0] + 16);
+
+    const int8_t continue_flag[] = { 0 };
+    fixture.sched->update(batch, { 1 }, continue_flag);
+    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    EXPECT_TRUE(batch.n_tokens == 1);
+    EXPECT_TRUE(batch.pos[0] == 64);
+    llama_batch_free(batch);
+}
+
+TEST(test_scheduler_batches_two_cross_block_prefills) {
+    auto fixture = make_fixture(/*n_ctx=*/128, /*block_size=*/16, /*n_batch=*/64,
+                                /*n_gpu_blocks=*/4, /*n_cpu_blocks=*/1);
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/0, /*n_prompt=*/20)));
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/1, /*n_prompt=*/24)));
+
+    llama_batch batch = {};
+    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    const auto * info = fixture.sched->get_curr_batch_info();
+    EXPECT_TRUE(info->n_seq == 2);
+    EXPECT_TRUE(batch.n_tokens == 44);
+    EXPECT_TRUE(info->batch_offsets[0] == 0);
+    EXPECT_TRUE(info->batch_lens[0] == 20);
+    EXPECT_TRUE(info->batch_offsets[1] == 20);
+    EXPECT_TRUE(info->batch_lens[1] == 24);
+    EXPECT_TRUE(info->n_blocks_per_seq == 2);
+    EXPECT_TRUE(info->write_slots[15] == info->write_slots[0] + 15);
+    EXPECT_TRUE(info->write_slots[16] == info->write_slots[0] + 16);
+    EXPECT_TRUE(batch.pos[43] == 23);
+    llama_batch_free(batch);
+}
+
+TEST(test_paged_attention_head_mapping_and_dispatch_selection) {
+    const auto kv_head = [](int q_head, int n_heads, int n_heads_kv) {
+        return q_head / (n_heads / n_heads_kv);
+    };
+    for (int q_head = 0; q_head < 8; ++q_head) {
+        EXPECT_TRUE(kv_head(q_head, 8, 1) == 0);
+    }
+    for (int q_head = 0; q_head < 8; ++q_head) {
+        EXPECT_TRUE(kv_head(q_head, 8, 2) == q_head / 4);
+    }
+
+    const auto tiled_prefill = [](int head_dim, bool q_f32, bool contiguous, bool aligned,
+                                  int n_tokens, int n_sequences, bool native_k, bool native_v) {
+        return head_dim == 128 && q_f32 && contiguous && aligned && n_tokens > n_sequences && native_k && native_v;
+    };
+    EXPECT_TRUE(tiled_prefill(128, true, true, true, 32, 1, true, true));
+    EXPECT_FALSE(tiled_prefill(64, true, true, true, 32, 1, true, true));
+    EXPECT_FALSE(tiled_prefill(128, true, true, true, 32, 1, false, true));
+    EXPECT_FALSE(tiled_prefill(128, true, true, true, 2, 2, true, true));
+}
+
 TEST(test_scheduler_rejects_oversized_prompt) {
     auto fixture = make_fixture(/*n_ctx=*/64, /*block_size=*/16, /*n_batch=*/128,
                                 /*n_gpu_blocks=*/32, /*n_cpu_blocks=*/8);
@@ -796,6 +862,9 @@ int main(int /*argc*/, char ** /*argv*/) {
     RUN(test_scheduler_no_deadlock_on_empty);
     RUN(test_scheduler_deadlock_oversize_waiting_request);
     RUN(test_scheduler_rejects_oversized_prompt);
+    RUN(test_scheduler_admits_full_token_budget_prefill);
+    RUN(test_scheduler_batches_two_cross_block_prefills);
+    RUN(test_paged_attention_head_mapping_and_dispatch_selection);
     RUN(test_scheduler_swaps_and_resumes_request);
 
     fprintf(stderr, "test-paged-kv: ALL PASSED\n");
