@@ -1,22 +1,22 @@
 # Paged prefill acceptance evidence
 
-Source-matched CUDA build: `8f878a437`.
+Source-matched CUDA build: `9a766f87d`.
 
 ## Fixed prompts
 
-The commands below create fixed repeated-token prompts. Qwen's prompt is 4096 tokens; Tiel's bounded prompt is 1023 tokens.
+The tracked prompt artifacts make both modes consume identical bytes and tokenizer input:
 
-```sh
-python3 -c "from pathlib import Path; Path('.agent/paged-4096-prompt.txt').write_text(' x' * 4096)"
-python3 -c "from pathlib import Path; Path('.agent/paged-1023-prompt.txt').write_text(' x' * 1023)"
-```
+- `reports/paged-4096-prompt.txt`: SHA-256 `1008707831f454b7333033c82cd4e8c3f3c0105834d34b9365e17d9aeb97e6ae`
+- `reports/paged-1023-prompt.txt`: SHA-256 `f05ba13e4bf18bf0964ab81244d82f6a60ac4fd964259a5bd6d7f83613549671`
+
+Each file is deterministic ASCII text: a leading space followed by `x` repeated 4096 or 1023 times. With `-no-cnv`, the recorded completion runs report exactly 4096 or 1023 prompt-eval tokens for the named model tokenizer.
 
 ## Qwen3.8-27B-UD-Q4_K_S
 
 Unified Q8_0 reference, CUDA0, the same 4096-token fixed prompt, and 8 generated tokens:
 
 ```sh
-build-verify-cuda/bin/llama completion -m /models/qwen38/Qwen3.8-27B-UD-Q4_K_S.gguf -dev cuda0 -ngl 99 -c 8192 -b 4096 -ub 4096 -n 8 -f .agent/paged-4096-prompt.txt -no-cnv -ctk q8_0 -ctv q8_0 --perf --temp 0 -s 1234
+build-verify-cuda/bin/llama completion -m /models/qwen38/Qwen3.8-27B-UD-Q4_K_S.gguf -dev cuda0 -ngl 99 -c 8192 -b 4096 -ub 4096 -n 8 -f reports/paged-4096-prompt.txt -no-cnv -ctk q8_0 -ctv q8_0 --perf --temp 0 -s 1234
 ```
 
 - pp: 2913.91 tok/s
@@ -25,7 +25,7 @@ build-verify-cuda/bin/llama completion -m /models/qwen38/Qwen3.8-27B-UD-Q4_K_S.g
 Paged Q8_0, same GPU, context, batch, prompt length, and decode length:
 
 ```sh
-build-verify-cuda/bin/llama-paged -m /models/qwen38/Qwen3.8-27B-UD-Q4_K_S.gguf -dev cuda0 -ngl 99 -c 8192 -b 4096 -ub 4096 -n 8 -f .agent/paged-4096-prompt.txt -kvp -ctk q8_0 -ctv q8_0 -ngpub 320 -ncpub 320 --kv-paged-watermark 0 -ns 1 -np 1 --timing --perf --temp 0 -s 1234
+build-verify-cuda/bin/llama-paged -m /models/qwen38/Qwen3.8-27B-UD-Q4_K_S.gguf -dev cuda0 -ngl 99 -c 8192 -b 4096 -ub 4096 -n 8 -f reports/paged-4096-prompt.txt -kvp -ctk q8_0 -ctv q8_0 -ngpub 320 -ncpub 320 --kv-paged-watermark 0 -ns 1 -np 1 --timing --perf --temp 0 -s 1234
 ```
 
 - pp: 54.34 tok/s
@@ -43,7 +43,7 @@ The 4096-token paged run was attempted with `-c 8192 -b 4096 -ub 4096 -ngpub 320
 Unified Q8_0 reference, using the same 1023-token fixed prompt and 8 generated tokens:
 
 ```sh
-build-verify-cuda/bin/llama completion -m /models/Tiel-Coder-35B-A3B-MTP-UD-Q4_K_S.gguf -dev cuda0 -ngl 99 -sm none -mg 0 -c 2048 -b 1024 -ub 1024 -n 8 -f .agent/paged-1023-prompt.txt -no-cnv -ctk q8_0 -ctv q8_0 --perf --temp 0 -s 1234
+build-verify-cuda/bin/llama completion -m /models/Tiel-Coder-35B-A3B-MTP-UD-Q4_K_S.gguf -dev cuda0 -ngl 99 -sm none -mg 0 -c 2048 -b 1024 -ub 1024 -n 8 -f reports/paged-1023-prompt.txt -no-cnv -ctk q8_0 -ctv q8_0 --perf --temp 0 -s 1234
 ```
 
 - pp: 7658.96 tok/s
@@ -52,7 +52,7 @@ build-verify-cuda/bin/llama completion -m /models/Tiel-Coder-35B-A3B-MTP-UD-Q4_K
 Paged Q8_0:
 
 ```sh
-build-verify-cuda/bin/llama-paged -m /models/Tiel-Coder-35B-A3B-MTP-UD-Q4_K_S.gguf -dev cuda0 -ngl 99 -sm none -mg 0 -c 2048 -b 1024 -ub 1024 -n 8 -f .agent/paged-1023-prompt.txt -kvp -ctk q8_0 -ctv q8_0 -ngpub 96 -ncpub 96 --kv-paged-watermark 0 -ns 1 -np 1 --timing --perf --temp 0 -s 1234
+build-verify-cuda/bin/llama-paged -m /models/Tiel-Coder-35B-A3B-MTP-UD-Q4_K_S.gguf -dev cuda0 -ngl 99 -sm none -mg 0 -c 2048 -b 1024 -ub 1024 -n 8 -f reports/paged-1023-prompt.txt -kvp -ctk q8_0 -ctv q8_0 -ngpub 96 -ncpub 96 --kv-paged-watermark 0 -ns 1 -np 1 --timing --perf --temp 0 -s 1234
 ```
 
 - pp: 341.76 tok/s
