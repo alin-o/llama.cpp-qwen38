@@ -769,19 +769,25 @@ TEST(test_paged_attention_head_mapping_and_dispatch_selection) {
 
     EXPECT_TRUE(ggml_paged_attn_tiled_prefill_supported(
         128, GGML_TYPE_F32, true, true, 32, 1, 2, true, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
+    EXPECT_TRUE(ggml_paged_attn_tiled_prefill_supported(
+        256, GGML_TYPE_F32, true, true, 32, 1, 2, true, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
     EXPECT_FALSE(ggml_paged_attn_tiled_prefill_supported(
         64, GGML_TYPE_F32, true, true, 32, 1, 2, true, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
     EXPECT_FALSE(ggml_paged_attn_tiled_prefill_supported(
-        128, GGML_TYPE_F32, true, true, 32, 1, 2, true, GGML_TYPE_F16, GGML_TYPE_Q8_0));
+        192, GGML_TYPE_F32, true, true, 32, 1, 2, true, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
     EXPECT_FALSE(ggml_paged_attn_tiled_prefill_supported(
-        128, GGML_TYPE_F32, true, true, 2, 2, 1, true, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
+        256, GGML_TYPE_F32, true, true, 32, 1, 2, true, GGML_TYPE_F16, GGML_TYPE_Q8_0));
+    EXPECT_FALSE(ggml_paged_attn_tiled_prefill_supported(
+        256, GGML_TYPE_F32, true, true, 2, 2, 1, true, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
 }
 
 TEST(test_decode_only_batch_skips_tiled_prefill) {
-    // The CUDA launch guard calls this production predicate.
     EXPECT_FALSE(ggml_paged_attn_tiled_prefill_supported(
         128, GGML_TYPE_F32, true, true, 2, 2, 1, true, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
+    EXPECT_FALSE(ggml_paged_attn_tiled_prefill_supported(
+        256, GGML_TYPE_F32, true, true, 2, 2, 1, true, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
 }
+
 
 TEST(test_scheduler_rejects_oversized_prompt) {
     auto fixture = make_fixture(/*n_ctx=*/64, /*block_size=*/16, /*n_batch=*/128,

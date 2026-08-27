@@ -25,6 +25,7 @@ static inline bool ggml_paged_attn_tiled_prefill_supported(
         enum ggml_type v_type) {
     const bool k_native = k_type == GGML_TYPE_Q8_0 || k_type == GGML_TYPE_TURBO3_0 || k_type == GGML_TYPE_TURBO4_0;
     const bool v_native = v_type == GGML_TYPE_Q8_0 || v_type == GGML_TYPE_TURBO3_0 || v_type == GGML_TYPE_TURBO4_0;
-    return n_q_tokens > n_sequences && tensor_cores_available && head_dim == 128 && q_type == GGML_TYPE_F32 &&
+    const bool supported_head_dim = head_dim == 128 || head_dim == 256;
+    return n_q_tokens > n_sequences && tensor_cores_available && supported_head_dim && q_type == GGML_TYPE_F32 &&
         q_contiguous && q_aligned && n_q_tiles > 0 && n_q_tiles <= 65535 && k_native && v_native;
 }

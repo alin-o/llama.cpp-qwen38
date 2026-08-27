@@ -34,9 +34,10 @@ static __device__ __forceinline__ float4 paged_cache_value4(const char * row, in
     switch (type) {
         case GGML_TYPE_Q8_0: {
             const block_q8_0 * block = (const block_q8_0 *) row + index / QK8_0;
-            const char4 qs = *(const char4 *) (block->qs + index % QK8_0);
+            const int offset = index % QK8_0;
             const float d = __half2float(block->d);
-            return make_float4(d * qs.x, d * qs.y, d * qs.z, d * qs.w);
+            return make_float4(d * block->qs[offset + 0], d * block->qs[offset + 1],
+                               d * block->qs[offset + 2], d * block->qs[offset + 3]);
         }
         case GGML_TYPE_TURBO3_0: {
             const block_turbo3_0 * block = (const block_turbo3_0 *) row + index / QK_TURBO3;
@@ -199,16 +200,24 @@ __global__ void paged_attention_prefill_mma_kernel(
     constexpr int Q_TILE = 16;
     constexpr int K_TILE = 16;
 
-    __shared__ half q_shared[Q_TILE][HEAD_DIM];
-    __shared__ half k_shared[K_TILE][HEAD_DIM];
-    __shared__ half v_shared[HEAD_DIM][K_TILE];
-    __shared__ float scores_shared[Q_TILE][K_TILE];
-    __shared__ half weights_shared[Q_TILE][K_TILE];
-    __shared__ float values_shared[Q_TILE][HEAD_DIM];
-    __shared__ float value_acc_shared[Q_TILE][HEAD_DIM];
-    __shared__ float max_shared[Q_TILE];
-    __shared__ float sum_shared[Q_TILE];
-    __shared__ float rescale_shared[Q_TILE];
+    extern __shared__ __align__(32) char shared_storage[];
+    char * shared = shared_storage;
+    constexpr size_t Q_BYTES = Q_TILE * HEAD_DIM * sizeof(half);
+    constexpr size_t K_BYTES = K_TILE * HEAD_DIM * sizeof(half);
+    constexpr size_t V_BYTES = HEAD_DIM * K_TILE * sizeof(half);
+    constexpr size_t SCORES_BYTES = Q_TILE * K_TILE * sizeof(float);
+    constexpr size_t WEIGHTS_BYTES = Q_TILE * K_TILE * sizeof(half);
+    constexpr size_t VALUES_BYTES = Q_TILE * HEAD_DIM * sizeof(float);
+    half (*q_shared)[HEAD_DIM] = (half (*)[HEAD_DIM]) shared;
+    half (*k_shared)[HEAD_DIM] = (half (*)[HEAD_DIM]) (shared + Q_BYTES);
+    half (*v_shared)[K_TILE] = (half (*)[K_TILE]) (shared + Q_BYTES + K_BYTES);
+    float (*scores_shared)[K_TILE] = (float (*)[K_TILE]) (shared + Q_BYTES + K_BYTES + V_BYTES);
+    half (*weights_shared)[K_TILE] = (half (*)[K_TILE]) (shared + Q_BYTES + K_BYTES + V_BYTES + SCORES_BYTES);
+    float (*values_shared)[HEAD_DIM] = (float (*)[HEAD_DIM]) (shared + Q_BYTES + K_BYTES + V_BYTES + SCORES_BYTES + WEIGHTS_BYTES);
+    float (*value_acc_shared)[HEAD_DIM] = (float (*)[HEAD_DIM]) (shared + Q_BYTES + K_BYTES + V_BYTES + SCORES_BYTES + WEIGHTS_BYTES + VALUES_BYTES);
+    float * max_shared = (float *) (shared + Q_BYTES + K_BYTES + V_BYTES + SCORES_BYTES + WEIGHTS_BYTES + 2 * VALUES_BYTES);
+    float * sum_shared = max_shared + Q_TILE;
+    float * rescale_shared = sum_shared + Q_TILE;
 
     const int tid = threadIdx.x;
     const int head_idx = blockIdx.x;
@@ -419,19 +428,36 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
     GGML_LOG_DEBUG("%s: tiled prefill dispatch=%d\n", __func__, use_tiled_prefill);
 
     if (use_tiled_prefill) {
-        paged_attention_prefill_mma_kernel<128><<<dim3(n_heads, batch_lens->ne[0], n_q_tiles), dim3(256), 0, ctx.stream()>>>(
-            (const float *) q->data,
-            (const char *) k_cache->data,
-            (const char *) v_cache->data,
-            (const int *) block_table->data,
-            (const int *) context_lens->data,
-            (const int *) batch_offsets->data,
-            (const int *) batch_lens->data,
-            k_cache->nb[1], k_cache->nb[2], k_cache->nb[3],
-            v_cache->nb[1], v_cache->nb[2], v_cache->nb[3],
-            n_heads_kv, block_size, max_blocks, k_cache->type, v_cache->type,
-            op_params_f[0], (float *) dst->data);
+        const size_t tiled_smem_bytes =
+            (size_t) (3 * 16 * head_dim) * sizeof(half) + (size_t) (16 * 16) * (sizeof(float) + sizeof(half)) +
+            (size_t) (2 * 16 * head_dim + 3 * 16) * sizeof(float);
+        switch (head_dim) {
+            case 128:
+                paged_attention_prefill_mma_kernel<128><<<dim3(n_heads, batch_lens->ne[0], n_q_tiles), dim3(256), tiled_smem_bytes, ctx.stream()>>>(
+                    (const float *) q->data, (const char *) k_cache->data, (const char *) v_cache->data,
+                    (const int *) block_table->data, (const int *) context_lens->data,
+                    (const int *) batch_offsets->data, (const int *) batch_lens->data,
+                    k_cache->nb[1], k_cache->nb[2], k_cache->nb[3],
+                    v_cache->nb[1], v_cache->nb[2], v_cache->nb[3],
+                    n_heads_kv, block_size, max_blocks, k_cache->type, v_cache->type,
+                    op_params_f[0], (float *) dst->data);
+                break;
+            case 256:
+                CUDA_CHECK(cudaFuncSetAttribute(paged_attention_prefill_mma_kernel<256>, cudaFuncAttributeMaxDynamicSharedMemorySize, tiled_smem_bytes));
+                paged_attention_prefill_mma_kernel<256><<<dim3(n_heads, batch_lens->ne[0], n_q_tiles), dim3(256), tiled_smem_bytes, ctx.stream()>>>(
+                    (const float *) q->data, (const char *) k_cache->data, (const char *) v_cache->data,
+                    (const int *) block_table->data, (const int *) context_lens->data,
+                    (const int *) batch_offsets->data, (const int *) batch_lens->data,
+                    k_cache->nb[1], k_cache->nb[2], k_cache->nb[3],
+                    v_cache->nb[1], v_cache->nb[2], v_cache->nb[3],
+                    n_heads_kv, block_size, max_blocks, k_cache->type, v_cache->type,
+                    op_params_f[0], (float *) dst->data);
+                break;
+            default:
+                GGML_ABORT("Invalid tiled paged attention head size");
+        }
         CUDA_CHECK(cudaGetLastError());
+        GGML_LOG_DEBUG("%s: launched paged_attention_prefill_mma_kernel head_dim=%d\n", __func__, head_dim);
     }
 #endif
 
