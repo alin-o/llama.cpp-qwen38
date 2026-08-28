@@ -188,6 +188,11 @@ static path_result run_paged(const std::string & model_path,
     bool write_slot_changed = false;
     bool block_table_changed = false;
     bool page_index_changed = false;
+    bool rebuilt_after_block_change = false;
+    int32_t previous_reused = 0;
+    bool reused_after_write_change = false;
+    bool reused_after_block_change = false;
+    bool reused_after_page_change = false;
     int32_t previous_block = -1;
     bool crossed_page_boundary = false;
 #if defined(GGML_USE_CUDA)
@@ -203,6 +208,9 @@ static path_result run_paged(const std::string & model_path,
 
         EXPECT_TRUE(llama_decode(ctx, batch) == 0);
         llama_synchronize(ctx);
+        const llama_perf_context_data perf_step = llama_perf_context(ctx);
+        const bool reused_step = perf_step.n_reused > previous_reused;
+        previous_reused = perf_step.n_reused;
 #if defined(GGML_USE_CUDA)
         if (result.tokens.empty()) {
             const int head_dim = llama_model_n_embd_head_v(model);
@@ -227,15 +235,19 @@ static path_result run_paged(const std::string & model_path,
         }
         if (previous_write_slot >= 0 && info->write_slots[0] != previous_write_slot) {
             write_slot_changed = true;
+            reused_after_write_change |= reused_step;
         }
         if (previous_block >= 0 && (info->n_blocks_per_seq != previous_block_count || info->block_table[0] != previous_block)) {
             block_table_changed = true;
+            rebuilt_after_block_change |= !reused_step;
+            reused_after_block_change |= reused_step;
         }
         previous_block_count = info->n_blocks_per_seq;
         previous_block = info->block_table[0];
         const int32_t page_index = info->context_lens[0] / params.block_size;
         if (previous_page_index >= 0 && page_index != previous_page_index) {
             page_index_changed = true;
+            reused_after_page_change |= reused_step;
         }
         previous_write_slot = info->write_slots[0];
         previous_page_index = page_index;
@@ -269,6 +281,11 @@ static path_result run_paged(const std::string & model_path,
     EXPECT_TRUE(result.tokens.size() < 2 || block_table_changed);
     EXPECT_TRUE(result.tokens.size() < 2 || page_index_changed);
     EXPECT_TRUE(result.tokens.size() < 2 || crossed_page_boundary);
+    if (!graph_reuse_disable && result.tokens.size() >= 2) {
+        EXPECT_TRUE(reused_after_write_change);
+        EXPECT_TRUE(reused_after_page_change);
+        EXPECT_TRUE(block_table_changed && (rebuilt_after_block_change || reused_after_block_change));
+    }
     const llama_perf_context_data perf = llama_perf_context(ctx);
     fprintf(stderr, "  paged graph reuse: n_reused=%d\n", perf.n_reused);
     if (graph_reuse_disable) {
