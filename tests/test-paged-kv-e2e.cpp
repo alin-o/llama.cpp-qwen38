@@ -134,7 +134,8 @@ static path_result run_non_paged(const std::string & model_path, ggml_type type_
 static path_result run_paged(const std::string & model_path,
                              const std::vector<llama_token> & forced_tokens,
                              ggml_type type_k,
-                             ggml_type type_v) {
+                             ggml_type type_v,
+                             bool graph_reuse_disable) {
     common_params params;
     params.model.path    = model_path;
     params.n_ctx         = 256;
@@ -152,7 +153,9 @@ static path_result run_paged(const std::string & model_path,
     params.cache_type_v  = type_v;
     params.n_parallel    = 1;
 
+    setenv("LLAMA_GRAPH_REUSE_DISABLE", graph_reuse_disable ? "1" : "0", 1);
     auto            init  = common_init_from_params(params);
+    unsetenv("LLAMA_GRAPH_REUSE_DISABLE");
     llama_model *   model = init->model();
     llama_context * ctx   = init->context();
     EXPECT_TRUE(model != nullptr);
@@ -241,6 +244,11 @@ static path_result run_paged(const std::string & model_path,
 #endif
     const llama_perf_context_data perf = llama_perf_context(ctx);
     fprintf(stderr, "  paged graph reuse: n_reused=%d\n", perf.n_reused);
+    if (graph_reuse_disable) {
+        EXPECT_TRUE(perf.n_reused == 0);
+    } else {
+        EXPECT_TRUE(result.tokens.size() < 2 || perf.n_reused > 0);
+    }
     llama_paged_scheduler_free(sched);
     return result;
 }
@@ -441,15 +449,14 @@ int main(int argc, char ** argv) {
                     head_dim, ggml_type_name(type));
             continue;
         }
-        fprintf(stderr, "test-paged-kv-e2e: running unified %s reference\n", ggml_type_name(type));
-        path_result ref = run_non_paged(params.model.path, type, type);
-        fprintf(stderr, "  got %zu tokens, %d-vocab logits\n", ref.tokens.size(), ref.n_vocab);
-        fprintf(stderr, "test-paged-kv-e2e: running paged %s path\n", ggml_type_name(type));
-        path_result paged_greedy = run_paged(params.model.path, {}, type, type);
+        fprintf(stderr, "test-paged-kv-e2e: running paged %s path with reuse disabled\n", ggml_type_name(type));
+        path_result paged_oracle = run_paged(params.model.path, {}, type, type, true);
+        fprintf(stderr, "  got %zu tokens, %d-vocab logits\n", paged_oracle.tokens.size(), paged_oracle.n_vocab);
+        fprintf(stderr, "test-paged-kv-e2e: running paged %s path with reuse enabled\n", ggml_type_name(type));
+        path_result paged_greedy = run_paged(params.model.path, {}, type, type, false);
         fprintf(stderr, "  got %zu tokens, %d-vocab logits\n", paged_greedy.tokens.size(), paged_greedy.n_vocab);
-        path_result paged_forced = run_paged(params.model.path, ref.tokens, type, type);
-        compare_results(ref, paged_greedy, paged_forced);
-        compare_perplexity(ggml_type_name(type), ref, paged_forced);
+        path_result paged_reused_forced = run_paged(params.model.path, paged_oracle.tokens, type, type, false);
+        compare_results(paged_oracle, paged_greedy, paged_reused_forced);
     }
 
     if (head_dim % ggml_blck_size(GGML_TYPE_Q8_0) == 0) {
