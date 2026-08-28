@@ -2,7 +2,7 @@
 
 Date: 2026-08-27
 
-Source commit: `d7b476213`
+Source commit: `7ed2cbf5d`
 
 GPU: NVIDIA GeForce RTX 4090, compute capability 8.9, 24082 MiB VRAM.
 
