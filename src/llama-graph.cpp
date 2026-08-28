@@ -1361,14 +1361,29 @@ bool llm_graph_input_mem_hybrid_paged::can_reuse(const llm_graph_params & params
     bool res = can_reuse_paged_attention(inp_attn.get(), old_mctx ? old_mctx->get_attn() : nullptr,
                                          new_mctx ? new_mctx->get_attn() : nullptr, params);
     if (old_mctx && new_mctx) {
+        const auto * old_rs = old_mctx->get_recr();
         const auto * rs = new_mctx->get_recr();
         const uint32_t n_rs = rs->get_n_rs();
-        res &= inp_rs->s_copy && inp_rs->s_copy->ne[0] == n_rs;
+        res &= inp_rs->s_copy && inp_rs->s_copy->type == GGML_TYPE_I32 && inp_rs->s_copy->ne[0] == n_rs;
         res &= params.ubatch.n_seqs <= n_rs;
-        res &= inp_rs->s_copy_main && inp_rs->s_copy_main->ne[0] == params.ubatch.n_seqs;
-        res &= inp_rs->s_copy_extra && inp_rs->s_copy_extra->ne[0] == n_rs - params.ubatch.n_seqs;
+        res &= inp_rs->s_copy_main && inp_rs->s_copy_main->type == GGML_TYPE_I32 && inp_rs->s_copy_main->ne[0] == params.ubatch.n_seqs;
+        res &= inp_rs->s_copy_extra && inp_rs->s_copy_extra->type == GGML_TYPE_I32 && inp_rs->s_copy_extra->ne[0] == n_rs - params.ubatch.n_seqs;
         res &= inp_rs->head == rs->get_head();
         res &= inp_rs->rs_z == rs->get_rs_z();
+        for (uint32_t il = 0; il < params.hparams.n_layer(); ++il) {
+            const auto * old_r = old_rs->get_r_l(il);
+            const auto * new_r = rs->get_r_l(il);
+            const auto * old_s = old_rs->get_s_l(il);
+            const auto * new_s = rs->get_s_l(il);
+            res &= (old_r == nullptr) == (new_r == nullptr) &&
+                   (old_s == nullptr) == (new_s == nullptr);
+            if (old_r && new_r) {
+                res &= can_reuse_paged_tensor(old_r, new_r);
+            }
+            if (old_s && new_s) {
+                res &= can_reuse_paged_tensor(old_s, new_s);
+            }
+        }
     } else {
         res = false;
     }

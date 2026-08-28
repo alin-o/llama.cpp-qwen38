@@ -867,9 +867,9 @@ struct llm_graph_params {
     bool allow_reuse(const llm_graph_params & other) const {
         // first check the ubatch
         bool can_reuse_ubatch =
-            ubatch.equal_seqs() == other.ubatch.equal_seqs() &&
+            ((cparams.kv_paged || other.cparams.kv_paged) || ubatch.equal_seqs() == other.ubatch.equal_seqs()) &&
             ubatch.n_tokens     == other.ubatch.n_tokens &&
-            ubatch.n_seq_tokens == other.ubatch.n_seq_tokens &&
+            ((cparams.kv_paged || other.cparams.kv_paged) || ubatch.n_seq_tokens == other.ubatch.n_seq_tokens) &&
             ubatch.n_seqs       == other.ubatch.n_seqs &&
             ubatch.n_seqs_unq   == other.ubatch.n_seqs_unq &&
             (
