@@ -1,8 +1,8 @@
 # Paged head-dim-256 prefill acceptance evidence
 
-Date: 2026-08-27
+Date: 2026-08-28
 
-Source commit: `7ed2cbf5d`
+Source commit: `7ed2cbf5d` (the temporary repetition harness was applied to its direct ancestor `d7b476213` and the resulting benchmark artifacts are attributed to `7ed2cbf5d`).
 
 GPU: NVIDIA GeForce RTX 4090, compute capability 8.9, 24082 MiB VRAM.
 
@@ -15,7 +15,6 @@ Raw artifacts are under `benchmark-results/paged-prefill-head256-20260827-v2/`:
 - `unified-raw.csv`: llama-bench raw samples after its built-in warmup.
 - `unified-medians.csv`: median unified q8_0 pp/tg rates.
 - `commands.txt`: exact command for every paged configuration.
-- `repetition-harness.patch`: exact temporary repeated-run harness applied to source commit `d7b476213`.
 - `SHA256SUMS`: checksums for every evidence artifact.
 - `raw/`: unabridged application, oracle, capacity-failure, unified JSON, and profiler output.
 
@@ -34,18 +33,23 @@ TMPDIR="$PWD/build-verify-cuda/tmp" build-verify-cuda/bin/test-paged-kv-e2e -m /
 TMPDIR="$PWD/build-verify-cuda/tmp" build-verify-cuda/bin/test-paged-kv-e2e -m /models/Tiel-Coder-35B-A3B-MTP-UD-Q4_K_S.gguf -ngl 99 -ctk q8_0 -ctv q8_0
 ```
 
-`run_non_paged()` disables paged KV and explicitly sets both unified K and V cache types to `GGML_TYPE_F16`. `run_paged()` enables paged KV and explicitly sets both cache types to `GGML_TYPE_Q8_0`. Both paths load the same GGUF, tokenize the same prompt, use the same context/batch sizes and greedy sampling, and run on the same device. The test first compares independently generated greedy tokens, then forces the unified-f16 token sequence through paged q8_0 so perplexity is evaluated on identical targets. It compares logits/top-k and greedy tokens and enforces `paged_q8_0_ppl / unified_f16_ppl <= 1.10`.
+
+`run_non_paged()` disables paged KV and explicitly sets both unified K and V cache types to `GGML_TYPE_F16`. `run_paged()` enables paged KV and explicitly sets both cache types to `GGML_TYPE_Q8_0`. Both paths load the same GGUF, tokenize the same prompt, use the same context/batch sizes and greedy sampling, and run on the same device. The driver now uses 64 generated tokens and a 16-token forced comparison window. The strict acceptance bound is `paged_q8_0_ppl / unified_f16_ppl <= 1.02`: 2% covers reduction-order noise, not quantization loss.
 
 | Model | Unified f16 PPL | Paged q8_0 PPL | Ratio | Result |
 | --- | ---: | ---: | ---: | --- |
-| Qwen3.8-27B | 2.648921 | 2.651827 | 1.001097 | pass |
-| Tiel-Coder-35B-A3B-MTP | 2.272060 | 2.408728 | 1.060152 | pass |
+| Qwen3.8-27B | 1.904516 | 1.908886 | 1.002294 | pass |
+| Tiel-Coder-35B-A3B-MTP | not reached | not reached | forced top-5 failure at step 7 | fail |
+
+The Qwen result passes the strict bound over the extended run. The Tiel run reaches 64 generated tokens but fails forced-reference logit comparison before a valid PPL result: greedy mismatches occur at tokens 9-15, and forced step 7 has matching argmax but only 3/5 top-k overlap. This is a reproducible paged q8_0 quality defect, not sampler-only variance.
 
 Raw logs: `raw/oracle-qwen.log` and `raw/oracle-tiel.log`.
 
-The oracle was re-run on 2026-08-28 after making the unified f16 cache selection explicit. Both ratios were unchanged, and the refreshed raw logs identify the reference as `unified_f16` on the result line.
+The same runs reset the CUDA tiled-prefill launch counter, assert a head-dim-256 tiled launch after prefill, reset it again, execute a scheduler-produced decode-only batch, and assert that the count remains zero.
 
-The same runs reset the CUDA tiled-prefill launch counter, assert a head-dim-256 tiled launch after prefill, reset it again, execute a scheduler-produced decode-only batch, and assert that the count remains zero. Both exact-model runs end with `test-paged-kv-e2e: PASSED`.
+Turbo3/turbo4 native quality was not measured in these artifacts: production policy maps both types to q8_0 before allocation and inference. Their result is explicitly a policy fallback result, not native TurboQuant evidence.
+
+
 
 ## Warmed benchmark matrix
 
