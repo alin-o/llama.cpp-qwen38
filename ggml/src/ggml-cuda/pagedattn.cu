@@ -659,7 +659,8 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
     GGML_ASSERT(n_heads % n_heads_kv == 0);
     GGML_ASSERT(paged_kv_type_supported(k_cache->type) && paged_kv_type_supported(v_cache->type));
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
-    const bool decode_gqa = head_dim == 256 && n_heads / n_heads_kv == 8 && q->ne[2] == batch_lens->ne[0];
+    const bool decode_gqa = k_cache->type == GGML_TYPE_Q8_0 && v_cache->type == GGML_TYPE_Q8_0 &&
+        head_dim == 256 && n_heads / n_heads_kv == 8 && q->ne[2] == batch_lens->ne[0];
     if (decode_gqa) {
         constexpr size_t smem_bytes_gqa = 2 * 32 * 256 * sizeof(float);
         CUDA_CHECK(cudaFuncSetAttribute(paged_attention_decode_gqa_kernel<256, 32>,
