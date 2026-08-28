@@ -9,7 +9,7 @@
 
 static ggml_type paged_storage_type(ggml_type type) {
     // Tiel TurboQuant types failed the paged quality gate; q8_0 is the production fallback.
-    return type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0 ? GGML_TYPE_Q8_0 : type;
+    return type == GGML_TYPE_F16 || type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0 ? GGML_TYPE_Q8_0 : type;
 }
 
 
@@ -22,8 +22,8 @@ llama_kv_cache_paged::llama_kv_cache_paged(uint32_t head_dim,
                                            uint32_t n_layers,
                                            uint32_t n_ubatch,
                                            uint32_t n_seq_max) :
-    kv_type_k(GGML_TYPE_F16),
-    kv_type_v(GGML_TYPE_F16),
+    kv_type_k(GGML_TYPE_Q8_0),
+    kv_type_v(GGML_TYPE_Q8_0),
     head_dim(head_dim),
     n_heads_kv(n_heads_kv),
     block_size(block_size),
@@ -43,7 +43,7 @@ void llama_kv_cache_paged::init(ggml_backend_t backend_gpu,
                                 uint32_t       n_cpu_blocks,
                                 float          watermark) {
     const auto supported_type = [](ggml_type type) {
-        return type == GGML_TYPE_Q8_0 || type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0;
+        return type == GGML_TYPE_F16 || type == GGML_TYPE_Q8_0 || type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0;
     };
     if (!supported_type(type_k) || !supported_type(type_v)) {
         throw std::runtime_error(format("paged KV supports q8_0, turbo3_0, and turbo4_0 storage, got K=%s V=%s",
@@ -52,7 +52,8 @@ void llama_kv_cache_paged::init(ggml_backend_t backend_gpu,
     const ggml_type storage_type_k = paged_storage_type(type_k);
     const ggml_type storage_type_v = paged_storage_type(type_v);
     if (storage_type_k != type_k || storage_type_v != type_v) {
-        LLAMA_LOG_WARN("%s: paged TurboQuant quality gate failed; selecting q8_0 storage\n", __func__);
+        LLAMA_LOG_WARN("%s: paged KV type %s/%s selects q8_0 production storage\n", __func__,
+                       ggml_type_name(type_k), ggml_type_name(type_v));
         type_k = storage_type_k;
         type_v = storage_type_v;
     }
@@ -73,8 +74,8 @@ void llama_kv_cache_paged::init(ggml_backend_t backend_gpu,
     GGML_ASSERT(n_cpu_blocks && "n_cpu_blocks need to be greater than 0.");
 
 
-    LLAMA_LOG_INFO("%s: initializing paged KV cache. n_gpu_blocks=%d, n_cpu_blocks=%d, block_size=%d, watermark=%0.2f\n", __func__,
-                   n_gpu_blocks, n_cpu_blocks, block_size, watermark);
+    LLAMA_LOG_INFO("%s: initializing paged KV cache. n_gpu_blocks=%d, n_cpu_blocks=%d, block_size=%d, K=%s, V=%s, watermark=%0.2f\n", __func__,
+                   n_gpu_blocks, n_cpu_blocks, block_size, ggml_type_name(type_k), ggml_type_name(type_v), watermark);
     num_gpu_blocks = n_gpu_blocks;
     num_cpu_blocks = n_cpu_blocks;
     kv_type_k      = type_k;

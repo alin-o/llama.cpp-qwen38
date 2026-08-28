@@ -1306,7 +1306,7 @@ static size_t common_get_available_ram() {
 
 
 static ggml_type common_paged_storage_type(ggml_type type) {
-    return type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0 ? GGML_TYPE_Q8_0 : type;
+    return type == GGML_TYPE_F16 || type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0 ? GGML_TYPE_Q8_0 : type;
 }
 
 static void common_fit_paged_kv_blocks(common_params & params, const llama_model * model) {
@@ -1850,8 +1850,8 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.n_cpu_blocks            = params.n_cpu_blocks;
     cparams.kv_paged_watermark      = params.kv_paged_watermark;
 
-    cparams.type_k = params.cache_type_k;
-    cparams.type_v = params.cache_type_v;
+    cparams.type_k = params.kv_paged ? common_paged_storage_type(params.cache_type_k) : params.cache_type_k;
+    cparams.type_v = params.kv_paged ? common_paged_storage_type(params.cache_type_v) : params.cache_type_v;
 
     return cparams;
 }

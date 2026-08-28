@@ -365,7 +365,7 @@ TEST(test_paged_storage_types_are_native) {
     ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
     EXPECT_TRUE(backend != nullptr);
 
-    for (const ggml_type type : { GGML_TYPE_Q8_0, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO4_0 }) {
+    for (const ggml_type type : { GGML_TYPE_F16, GGML_TYPE_Q8_0, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO4_0 }) {
         llama_kv_cache_paged kv(/*head_dim=*/128, /*n_heads_kv=*/4, /*block_size=*/16,
                                 /*n_layers=*/2, /*n_ubatch=*/32, /*n_seq_max=*/8);
         kv.init(backend, backend, type, type, /*n_gpu_blocks=*/2, /*n_cpu_blocks=*/1, /*watermark=*/0.0f);

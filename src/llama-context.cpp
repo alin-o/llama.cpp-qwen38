@@ -3632,6 +3632,17 @@ llama_context * llama_init_from_model(
         return nullptr;
     }
 
+    if (params.kv_paged) {
+        if (params.type_k == GGML_TYPE_F16) {
+            LLAMA_LOG_INFO("%s: paged KV does not use f16 storage; selecting q8_0 for K\n", __func__);
+            params.type_k = GGML_TYPE_Q8_0;
+        }
+        if (params.type_v == GGML_TYPE_F16) {
+            LLAMA_LOG_INFO("%s: paged KV does not use f16 storage; selecting q8_0 for V\n", __func__);
+            params.type_v = GGML_TYPE_Q8_0;
+        }
+    }
+
     if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED && model->arch == LLM_ARCH_GROK) {
         LLAMA_LOG_WARN("%s: flash_attn is not compatible with Grok - forcing off\n", __func__);
         params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
