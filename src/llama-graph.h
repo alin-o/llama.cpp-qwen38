@@ -568,8 +568,10 @@ public:
     const llama_kv_cache_iswa_context * mctx;
 };
 
-// Paged mapping values are mutable inputs and are refreshed on every reuse.
-// Reuse requires stable input shapes, KV pool storage/layout, and state topology.
+// Paged mapping values are mutable graph inputs and are refreshed by set_input() on reuse.
+// Reuse requires unchanged active token/sequence shapes, mapping tensor descriptors,
+// captured KV pool addresses and layouts, model/backend configuration, and recurrent
+// state copy topology. Page-chain values may change when these descriptors stay stable.
 class llm_graph_input_attn_kv_paged : public llm_graph_input_attn_kv {
 public:
     llm_graph_input_attn_kv_paged(

@@ -186,12 +186,13 @@ static path_result run_paged(const std::string & model_path,
     int32_t previous_page_index = -1;
     int32_t previous_block_count = -1;
     bool write_slot_changed = false;
-    bool block_table_changed = false;
+    bool block_table_shape_changed = false;
+    bool block_table_value_changed = false;
     bool page_index_changed = false;
-    bool rebuilt_after_block_change = false;
+    bool rebuilt_after_block_shape_change = false;
     int32_t previous_reused = 0;
     bool reused_after_write_change = false;
-    bool reused_after_block_change = false;
+    bool reused_after_block_value_change = false;
     bool reused_after_page_change = false;
     int32_t previous_block = -1;
     bool crossed_page_boundary = false;
@@ -237,10 +238,12 @@ static path_result run_paged(const std::string & model_path,
             write_slot_changed = true;
             reused_after_write_change |= reused_step;
         }
-        if (previous_block >= 0 && (info->n_blocks_per_seq != previous_block_count || info->block_table[0] != previous_block)) {
-            block_table_changed = true;
-            rebuilt_after_block_change |= !reused_step;
-            reused_after_block_change |= reused_step;
+        if (previous_block >= 0 && info->n_blocks_per_seq != previous_block_count) {
+            block_table_shape_changed = true;
+            rebuilt_after_block_shape_change |= !reused_step;
+        } else if (previous_block >= 0 && info->block_table[0] != previous_block) {
+            block_table_value_changed = true;
+            reused_after_block_value_change |= reused_step;
         }
         previous_block_count = info->n_blocks_per_seq;
         previous_block = info->block_table[0];
@@ -278,13 +281,14 @@ static path_result run_paged(const std::string & model_path,
     }
 #endif
     EXPECT_TRUE(result.tokens.size() < 2 || write_slot_changed);
-    EXPECT_TRUE(result.tokens.size() < 2 || block_table_changed);
+    EXPECT_TRUE(result.tokens.size() < 2 || block_table_shape_changed || block_table_value_changed);
     EXPECT_TRUE(result.tokens.size() < 2 || page_index_changed);
     EXPECT_TRUE(result.tokens.size() < 2 || crossed_page_boundary);
     if (!graph_reuse_disable && result.tokens.size() >= 2) {
         EXPECT_TRUE(reused_after_write_change);
         EXPECT_TRUE(reused_after_page_change);
-        EXPECT_TRUE(block_table_changed && (rebuilt_after_block_change || reused_after_block_change));
+        EXPECT_TRUE(!block_table_shape_changed || rebuilt_after_block_shape_change);
+        EXPECT_TRUE(!block_table_value_changed || reused_after_block_value_change);
     }
     const llama_perf_context_data perf = llama_perf_context(ctx);
     fprintf(stderr, "  paged graph reuse: n_reused=%d\n", perf.n_reused);
