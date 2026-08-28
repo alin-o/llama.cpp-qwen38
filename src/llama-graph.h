@@ -575,10 +575,7 @@ public:
     llm_graph_input_attn_kv_paged(
             const llama_hparams & hparams,
             const llama_cparams & cparams,
-            const llama_kv_cache_paged_context * mctx) :
-        llm_graph_input_attn_kv(hparams, cparams, nullptr),
-        mctx(mctx) {
-    }
+            const llama_kv_cache_paged_context * mctx);
     ~llm_graph_input_attn_kv_paged() = default;
 
     void set_input(const llama_ubatch * ubatch) override;
@@ -591,6 +588,8 @@ public:
     ggml_tensor * paged_context_lens  = nullptr;
     ggml_tensor * paged_batch_offsets = nullptr;
     ggml_tensor * paged_batch_lens    = nullptr;
+    std::vector<ggml_tensor *> paged_k;
+    std::vector<ggml_tensor *> paged_v;
 
     int32_t last_n_tokens = 0;
     const llama_kv_cache_paged_context * mctx;
@@ -791,8 +790,7 @@ public:
             const llama_cparams & cparams,
             std::unique_ptr<llm_graph_input_attn_kv_paged> inp_attn,
             std::unique_ptr<llm_graph_input_rs> inp_rs,
-            const llama_memory_hybrid_paged_context * mctx) :
-        inp_attn(std::move(inp_attn)), inp_rs(std::move(inp_rs)), cparams(cparams), mctx(mctx) {}
+            const llama_memory_hybrid_paged_context * mctx);
 
     void set_input(const llama_ubatch * ubatch) override;
     bool can_reuse(const llm_graph_params & params) override;
@@ -803,6 +801,8 @@ public:
     std::unique_ptr<llm_graph_input_attn_kv_paged> inp_attn;
     std::unique_ptr<llm_graph_input_rs> inp_rs;
     const llama_cparams cparams;
+    std::vector<ggml_tensor *> recurrent_r;
+    std::vector<ggml_tensor *> recurrent_s;
     const llama_memory_hybrid_paged_context * mctx;
 };
 

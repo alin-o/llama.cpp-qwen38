@@ -1070,6 +1070,17 @@ void llm_graph_input_attn_kv_paged::set_input(const llama_ubatch* ubatch) {
     }
 }
 
+llm_graph_input_attn_kv_paged::llm_graph_input_attn_kv_paged(
+        const llama_hparams & hparams,
+        const llama_cparams & cparams,
+        const llama_kv_cache_paged_context * mctx) :
+    llm_graph_input_attn_kv(hparams, cparams, nullptr), mctx(mctx) {
+    for (uint32_t il = 0; il < hparams.n_layer(); ++il) {
+        paged_k.push_back(mctx->get_k(il));
+        paged_v.push_back(mctx->get_v(il));
+    }
+}
+
 static bool can_reuse_paged_tensor(const ggml_tensor * old_tensor, const ggml_tensor * new_tensor) {
     if (!old_tensor || !new_tensor || old_tensor->type != new_tensor->type || old_tensor->buffer != new_tensor->buffer) {
         return false;
@@ -1084,14 +1095,14 @@ static bool can_reuse_paged_tensor(const ggml_tensor * old_tensor, const ggml_te
 
 static bool can_reuse_paged_attention(
         const llm_graph_input_attn_kv_paged * inp,
-        const llama_kv_cache_paged_context * old_mctx,
         const llama_kv_cache_paged_context * new_mctx,
         const llm_graph_params & params) {
-    if (!old_mctx || !new_mctx || inp->cparams.block_size != params.cparams.block_size ||
+    if (!new_mctx || inp->cparams.block_size != params.cparams.block_size ||
         inp->hparams.n_layer() != params.hparams.n_layer() ||
         inp->hparams.n_head_kv() != params.hparams.n_head_kv() ||
         inp->hparams.n_embd_head_k() != params.hparams.n_embd_head_k() ||
-        inp->hparams.n_embd_head_v() != params.hparams.n_embd_head_v()) {
+        inp->hparams.n_embd_head_v() != params.hparams.n_embd_head_v() ||
+        inp->paged_k.size() != inp->hparams.n_layer() || inp->paged_v.size() != inp->hparams.n_layer()) {
         return false;
     }
 
@@ -1112,8 +1123,8 @@ static bool can_reuse_paged_attention(
     }
 
     for (uint32_t il = 0; il < inp->hparams.n_layer(); ++il) {
-        if (!can_reuse_paged_tensor(old_mctx->get_k(il), new_mctx->get_k(il)) ||
-            !can_reuse_paged_tensor(old_mctx->get_v(il), new_mctx->get_v(il))) {
+        if (!can_reuse_paged_tensor(inp->paged_k[il], new_mctx->get_k(il)) ||
+            !can_reuse_paged_tensor(inp->paged_v[il], new_mctx->get_v(il))) {
             return false;
         }
     }
@@ -1122,10 +1133,11 @@ static bool can_reuse_paged_attention(
 
 bool llm_graph_input_attn_kv_paged::can_reuse(const llm_graph_params & params) {
     const auto * new_mctx = static_cast<const llama_kv_cache_paged_context *>(params.mctx);
-    const bool res = can_reuse_paged_attention(this, mctx, new_mctx, params);
+    const bool res = can_reuse_paged_attention(this, new_mctx, params);
     mctx = new_mctx;
     return res;
 }
+
 
 void llm_graph_input_attn_cross::set_input(const llama_ubatch * ubatch) {
     GGML_ASSERT(cross_kq_mask);
@@ -1332,7 +1344,6 @@ bool llm_graph_input_mem_hybrid_iswa::can_reuse(const llm_graph_params & params)
     }
 
     res &= can_reuse_kq_mask(inp_attn->self_kq_mask_swa, attn_ctx->get_swa(), params.ubatch, params.cparams);
-
     res &= inp_rs->s_copy->ne[0] == mctx->get_recr()->get_n_rs();
 
     res &= inp_rs->s_copy_main->ne[0]  == params.ubatch.n_seqs;
@@ -1343,6 +1354,19 @@ bool llm_graph_input_mem_hybrid_iswa::can_reuse(const llm_graph_params & params)
 
     return res;
 }
+
+llm_graph_input_mem_hybrid_paged::llm_graph_input_mem_hybrid_paged(
+        const llama_cparams & cparams,
+        std::unique_ptr<llm_graph_input_attn_kv_paged> inp_attn,
+        std::unique_ptr<llm_graph_input_rs> inp_rs,
+        const llama_memory_hybrid_paged_context * mctx) :
+    inp_attn(std::move(inp_attn)), inp_rs(std::move(inp_rs)), cparams(cparams), mctx(mctx) {
+    for (uint32_t il = 0; il < this->inp_attn->hparams.n_layer(); ++il) {
+        recurrent_r.push_back(mctx->get_recr()->get_r_l(il));
+        recurrent_s.push_back(mctx->get_recr()->get_s_l(il));
+    }
+}
+
 void llm_graph_input_mem_hybrid_paged::set_input(const llama_ubatch * ubatch) {
     inp_attn->set_input(ubatch);
     const int64_t n_rs = mctx->get_recr()->get_n_rs();
@@ -1357,11 +1381,8 @@ void llm_graph_input_mem_hybrid_paged::set_input(const llama_ubatch * ubatch) {
 
 bool llm_graph_input_mem_hybrid_paged::can_reuse(const llm_graph_params & params) {
     const auto * new_mctx = static_cast<const llama_memory_hybrid_paged_context *>(params.mctx);
-    const auto * old_mctx = mctx;
-    bool res = can_reuse_paged_attention(inp_attn.get(), old_mctx ? old_mctx->get_attn() : nullptr,
-                                         new_mctx ? new_mctx->get_attn() : nullptr, params);
-    if (old_mctx && new_mctx) {
-        const auto * old_rs = old_mctx->get_recr();
+    bool res = can_reuse_paged_attention(inp_attn.get(), new_mctx ? new_mctx->get_attn() : nullptr, params);
+    if (new_mctx && recurrent_r.size() == params.hparams.n_layer() && recurrent_s.size() == params.hparams.n_layer()) {
         const auto * rs = new_mctx->get_recr();
         const uint32_t n_rs = rs->get_n_rs();
         res &= inp_rs->s_copy && inp_rs->s_copy->type == GGML_TYPE_I32 && inp_rs->s_copy->ne[0] == n_rs;
@@ -1371,17 +1392,15 @@ bool llm_graph_input_mem_hybrid_paged::can_reuse(const llm_graph_params & params
         res &= inp_rs->head == rs->get_head();
         res &= inp_rs->rs_z == rs->get_rs_z();
         for (uint32_t il = 0; il < params.hparams.n_layer(); ++il) {
-            const auto * old_r = old_rs->get_r_l(il);
             const auto * new_r = rs->get_r_l(il);
-            const auto * old_s = old_rs->get_s_l(il);
             const auto * new_s = rs->get_s_l(il);
-            res &= (old_r == nullptr) == (new_r == nullptr) &&
-                   (old_s == nullptr) == (new_s == nullptr);
-            if (old_r && new_r) {
-                res &= can_reuse_paged_tensor(old_r, new_r);
+            res &= (recurrent_r[il] == nullptr) == (new_r == nullptr) &&
+                   (recurrent_s[il] == nullptr) == (new_s == nullptr);
+            if (recurrent_r[il] && new_r) {
+                res &= can_reuse_paged_tensor(recurrent_r[il], new_r);
             }
-            if (old_s && new_s) {
-                res &= can_reuse_paged_tensor(old_s, new_s);
+            if (recurrent_s[il] && new_s) {
+                res &= can_reuse_paged_tensor(recurrent_s[il], new_s);
             }
         }
     } else {
