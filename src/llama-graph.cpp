@@ -1082,7 +1082,8 @@ llm_graph_input_attn_kv_paged::llm_graph_input_attn_kv_paged(
 }
 
 static bool can_reuse_paged_tensor(const ggml_tensor * old_tensor, const ggml_tensor * new_tensor) {
-    if (!old_tensor || !new_tensor || old_tensor->type != new_tensor->type || old_tensor->buffer != new_tensor->buffer) {
+    if (!old_tensor || !new_tensor || old_tensor->type != new_tensor->type ||
+        old_tensor->buffer != new_tensor->buffer || old_tensor->data != new_tensor->data) {
         return false;
     }
     for (int i = 0; i < GGML_MAX_DIMS; ++i) {
@@ -1097,7 +1098,8 @@ static bool can_reuse_paged_attention(
         const llm_graph_input_attn_kv_paged * inp,
         const llama_kv_cache_paged_context * new_mctx,
         const llm_graph_params & params) {
-    if (!new_mctx || inp->cparams.block_size != params.cparams.block_size ||
+    if (!new_mctx || new_mctx->get_n_tokens() != static_cast<int32_t>(params.ubatch.n_tokens) ||
+        inp->cparams.block_size != params.cparams.block_size ||
         inp->hparams.n_layer() != params.hparams.n_layer() ||
         inp->hparams.n_head_kv() != params.hparams.n_head_kv() ||
         inp->hparams.n_embd_head_k() != params.hparams.n_embd_head_k() ||

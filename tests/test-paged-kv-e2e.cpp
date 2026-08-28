@@ -183,8 +183,12 @@ static path_result run_paged(const std::string & model_path,
     result.n_vocab    = n_vocab;
     llama_batch batch = {};
     int32_t previous_write_slot = -1;
+    int32_t previous_page_index = -1;
+    int32_t previous_block_count = -1;
+    bool write_slot_changed = false;
+    bool block_table_changed = false;
+    bool page_index_changed = false;
     int32_t previous_block = -1;
-    bool mapping_changed = false;
     bool crossed_page_boundary = false;
 #if defined(GGML_USE_CUDA)
     bool tiled_prefill_seen = false;
@@ -221,12 +225,21 @@ static path_result run_paged(const std::string & model_path,
         if (result.tokens.empty()) {
             EXPECT_TRUE(info->batch_lens[0] > params.block_size);
         }
-        if (previous_write_slot >= 0 && (info->write_slots[0] != previous_write_slot || info->block_table[0] != previous_block)) {
-            mapping_changed = true;
+        if (previous_write_slot >= 0 && info->write_slots[0] != previous_write_slot) {
+            write_slot_changed = true;
+        }
+        if (previous_block >= 0 && (info->n_blocks_per_seq != previous_block_count || info->block_table[0] != previous_block)) {
+            block_table_changed = true;
+        }
+        previous_block_count = info->n_blocks_per_seq;
+        previous_block = info->block_table[0];
+        const int32_t page_index = info->context_lens[0] / params.block_size;
+        if (previous_page_index >= 0 && page_index != previous_page_index) {
+            page_index_changed = true;
         }
         previous_write_slot = info->write_slots[0];
-        previous_block = info->block_table[0];
-        crossed_page_boundary |= info->context_lens[0] > params.block_size;
+        previous_page_index = page_index;
+        crossed_page_boundary |= page_index > 0;
 
         const int32_t last_idx = info->batch_offsets[0] + info->batch_lens[0] - 1;
         result.logits.push_back(get_logits(ctx, last_idx, n_vocab));
@@ -252,7 +265,9 @@ static path_result run_paged(const std::string & model_path,
         EXPECT_TRUE(!tiled_prefill_seen);
     }
 #endif
-    EXPECT_TRUE(result.tokens.size() < 2 || mapping_changed);
+    EXPECT_TRUE(result.tokens.size() < 2 || write_slot_changed);
+    EXPECT_TRUE(result.tokens.size() < 2 || block_table_changed);
+    EXPECT_TRUE(result.tokens.size() < 2 || page_index_changed);
     EXPECT_TRUE(result.tokens.size() < 2 || crossed_page_boundary);
     const llama_perf_context_data perf = llama_perf_context(ctx);
     fprintf(stderr, "  paged graph reuse: n_reused=%d\n", perf.n_reused);
