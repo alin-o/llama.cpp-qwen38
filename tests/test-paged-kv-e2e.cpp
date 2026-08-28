@@ -74,6 +74,8 @@ static path_result run_non_paged(const std::string & model_path) {
     params.sampling.temp = 0.0f;  // greedy
     params.warmup        = false;
     params.kv_paged      = false;
+    params.cache_type_k  = GGML_TYPE_F16;
+    params.cache_type_v  = GGML_TYPE_F16;
 
     auto            init  = common_init_from_params(params);
     llama_model *   model = init->model();
@@ -378,7 +380,7 @@ static void compare_perplexity(const char * name, const path_result & ref, const
     const std::vector<llama_token> targets(ref.tokens.begin(), ref.tokens.begin() + n);
     const double ref_ppl = perplexity(ref, targets);
     const double paged_ppl = perplexity(paged, targets);
-    fprintf(stderr, "  %s perplexity: reference=%.6f paged=%.6f ratio=%.6f\n", name, ref_ppl, paged_ppl, paged_ppl / ref_ppl);
+    fprintf(stderr, "  %s perplexity: unified_f16=%.6f paged=%.6f ratio=%.6f\n", name, ref_ppl, paged_ppl, paged_ppl / ref_ppl);
     EXPECT_TRUE(paged_ppl <= ref_ppl * MAX_PPL_RATIO);
 }
 
@@ -416,7 +418,7 @@ int main(int argc, char ** argv) {
     common_init();
     llama_backend_init();
 
-    fprintf(stderr, "test-paged-kv-e2e: running non-paged reference\n");
+    fprintf(stderr, "test-paged-kv-e2e: running unified f16 reference\n");
     path_result ref = run_non_paged(params.model.path);
     if (ref.head_dim % ggml_blck_size(type_k) != 0 || ref.head_dim % ggml_blck_size(type_v) != 0) {
         fprintf(stderr, "skip: model head dimension %d is incompatible with paged K=%s V=%s\n", ref.head_dim,

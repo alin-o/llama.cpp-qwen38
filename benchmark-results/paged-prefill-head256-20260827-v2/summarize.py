@@ -21,9 +21,10 @@ def summarize_paged():
     with (OUT / "paged-medians.csv").open("w", newline="") as target:
         fieldnames = [
             "model", "prompt_tokens", "block_size", "ubatch_size", "requests",
-            "measured_repetitions", "median_pp_tok_s", "median_tg_tok_s", "status", "raw_log",
+            "measured_repetitions", "median_pp_tok_s", "median_tg_tok_s", "status",
+            "include_in_throughput", "include_in_regression", "outcome_reason", "raw_log",
         ]
-        writer = csv.DictWriter(target, fieldnames=fieldnames)
+        writer = csv.DictWriter(target, fieldnames=fieldnames, lineterminator="\n")
         writer.writeheader()
         for key, rows in groups.items():
             measured = rows[1:]
@@ -32,18 +33,26 @@ def summarize_paged():
             tg = [float(row["tg_tok_s"]) for row in measured if row["tg_tok_s"]]
             if source_status.startswith("exit_"):
                 status = "capacity_failure"
+                outcome_reason = "CUDA allocation failed before execution"
             elif len(pp) == 3 and len(tg) == 3 and max(pp) == 0 and max(tg) == 0:
                 status = "scheduler_rejection"
+                outcome_reason = "ubatch is smaller than the per-request prompt"
             elif len(pp) == 3 and len(tg) == 3 and min(pp) > 0 and min(tg) > 0:
                 status = "executed"
+                outcome_reason = "three warmed measurements"
             else:
                 status = "incomplete"
+                outcome_reason = "missing or invalid measurement"
+            include = "yes" if status == "executed" else "no"
             writer.writerow({
                 **dict(zip(fieldnames[:5], key)),
                 "measured_repetitions": 3 if len(pp) == 3 and len(tg) == 3 else 0,
                 "median_pp_tok_s": f"{median(pp):.2f}" if pp and max(pp) > 0 else "",
                 "median_tg_tok_s": f"{median(tg):.2f}" if tg and max(tg) > 0 else "",
                 "status": status,
+                "include_in_throughput": include,
+                "include_in_regression": include,
+                "outcome_reason": outcome_reason,
                 "raw_log": rows[0]["raw_log"],
             })
 
@@ -101,4 +110,3 @@ def summarize_unified():
 
 summarize_paged()
 summarize_unified()
-

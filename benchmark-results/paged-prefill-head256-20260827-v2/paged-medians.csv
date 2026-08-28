@@ -1,121 +1,121 @@
-model,prompt_tokens,block_size,ubatch_size,requests,measured_repetitions,median_pp_tok_s,median_tg_tok_s,status,raw_log
-qwen,64,16,256,1,3,1669.14,45.94,executed,raw/matrix/qwen-p64-bs16-ub256-r1.log
-qwen,64,16,256,2,3,1642.42,87.56,executed,raw/matrix/qwen-p64-bs16-ub256-r2.log
-qwen,64,32,256,1,3,1653.06,45.83,executed,raw/matrix/qwen-p64-bs32-ub256-r1.log
-qwen,64,32,256,2,3,1641.36,87.88,executed,raw/matrix/qwen-p64-bs32-ub256-r2.log
-qwen,64,64,256,1,3,1661.35,46.32,executed,raw/matrix/qwen-p64-bs64-ub256-r1.log
-qwen,64,64,256,2,3,1638.97,87.70,executed,raw/matrix/qwen-p64-bs64-ub256-r2.log
-qwen,256,16,256,1,3,2772.99,41.13,executed,raw/matrix/qwen-p256-bs16-ub256-r1.log
-qwen,256,16,256,2,3,2852.05,82.32,executed,raw/matrix/qwen-p256-bs16-ub256-r2.log
-qwen,256,32,256,1,3,2793.84,41.62,executed,raw/matrix/qwen-p256-bs32-ub256-r1.log
-qwen,256,32,256,2,3,2860.43,82.97,executed,raw/matrix/qwen-p256-bs32-ub256-r2.log
-qwen,256,64,256,1,3,2779.07,41.58,executed,raw/matrix/qwen-p256-bs64-ub256-r1.log
-qwen,256,64,256,2,3,2844.86,83.08,executed,raw/matrix/qwen-p256-bs64-ub256-r2.log
-qwen,1024,16,256,1,3,,,scheduler_rejection,raw/matrix/qwen-p1024-bs16-ub256-r1.log
-qwen,1024,16,256,2,3,,,scheduler_rejection,raw/matrix/qwen-p1024-bs16-ub256-r2.log
-qwen,1024,16,512,1,3,,,scheduler_rejection,raw/matrix/qwen-p1024-bs16-ub512-r1.log
-qwen,1024,16,512,2,3,2933.06,36.27,executed,raw/matrix/qwen-p1024-bs16-ub512-r2.log
-qwen,1024,16,1024,1,3,2700.07,29.27,executed,raw/matrix/qwen-p1024-bs16-ub1024-r1.log
-qwen,1024,16,1024,2,3,2971.34,68.40,executed,raw/matrix/qwen-p1024-bs16-ub1024-r2.log
-qwen,1024,32,256,1,3,,,scheduler_rejection,raw/matrix/qwen-p1024-bs32-ub256-r1.log
-qwen,1024,32,256,2,3,,,scheduler_rejection,raw/matrix/qwen-p1024-bs32-ub256-r2.log
-qwen,1024,32,512,1,3,,,scheduler_rejection,raw/matrix/qwen-p1024-bs32-ub512-r1.log
-qwen,1024,32,512,2,3,2936.07,36.46,executed,raw/matrix/qwen-p1024-bs32-ub512-r2.log
-qwen,1024,32,1024,1,3,2705.42,29.39,executed,raw/matrix/qwen-p1024-bs32-ub1024-r1.log
-qwen,1024,32,1024,2,3,2972.69,67.88,executed,raw/matrix/qwen-p1024-bs32-ub1024-r2.log
-qwen,1024,64,256,1,3,,,scheduler_rejection,raw/matrix/qwen-p1024-bs64-ub256-r1.log
-qwen,1024,64,256,2,3,,,scheduler_rejection,raw/matrix/qwen-p1024-bs64-ub256-r2.log
-qwen,1024,64,512,1,3,,,scheduler_rejection,raw/matrix/qwen-p1024-bs64-ub512-r1.log
-qwen,1024,64,512,2,3,2936.03,36.39,executed,raw/matrix/qwen-p1024-bs64-ub512-r2.log
-qwen,1024,64,1024,1,3,2706.97,29.25,executed,raw/matrix/qwen-p1024-bs64-ub1024-r1.log
-qwen,1024,64,1024,2,3,2976.28,68.46,executed,raw/matrix/qwen-p1024-bs64-ub1024-r2.log
-qwen,4096,16,256,1,3,,,scheduler_rejection,raw/matrix/qwen-p4096-bs16-ub256-r1.log
-qwen,4096,16,256,2,3,,,scheduler_rejection,raw/matrix/qwen-p4096-bs16-ub256-r2.log
-qwen,4096,16,512,1,3,,,scheduler_rejection,raw/matrix/qwen-p4096-bs16-ub512-r1.log
-qwen,4096,16,512,2,3,,,scheduler_rejection,raw/matrix/qwen-p4096-bs16-ub512-r2.log
-qwen,4096,16,1024,1,3,,,scheduler_rejection,raw/matrix/qwen-p4096-bs16-ub1024-r1.log
-qwen,4096,16,1024,2,3,,,scheduler_rejection,raw/matrix/qwen-p4096-bs16-ub1024-r2.log
-qwen,4096,16,2048,1,3,,,scheduler_rejection,raw/matrix/qwen-p4096-bs16-ub2048-r1.log
-qwen,4096,16,2048,2,3,2341.00,21.08,executed,raw/matrix/qwen-p4096-bs16-ub2048-r2.log
-qwen,4096,16,4096,1,3,1820.45,13.51,executed,raw/matrix/qwen-p4096-bs16-ub4096-r1.log
-qwen,4096,16,4096,2,3,2261.28,40.50,executed,raw/matrix/qwen-p4096-bs16-ub4096-r2.log
-qwen,4096,32,256,1,3,,,scheduler_rejection,raw/matrix/qwen-p4096-bs32-ub256-r1.log
-qwen,4096,32,256,2,3,,,scheduler_rejection,raw/matrix/qwen-p4096-bs32-ub256-r2.log
-qwen,4096,32,512,1,3,,,scheduler_rejection,raw/matrix/qwen-p4096-bs32-ub512-r1.log
-qwen,4096,32,512,2,3,,,scheduler_rejection,raw/matrix/qwen-p4096-bs32-ub512-r2.log
-qwen,4096,32,1024,1,3,,,scheduler_rejection,raw/matrix/qwen-p4096-bs32-ub1024-r1.log
-qwen,4096,32,1024,2,3,,,scheduler_rejection,raw/matrix/qwen-p4096-bs32-ub1024-r2.log
-qwen,4096,32,2048,1,3,,,scheduler_rejection,raw/matrix/qwen-p4096-bs32-ub2048-r1.log
-qwen,4096,32,2048,2,3,2347.67,21.08,executed,raw/matrix/qwen-p4096-bs32-ub2048-r2.log
-qwen,4096,32,4096,1,3,1828.26,13.54,executed,raw/matrix/qwen-p4096-bs32-ub4096-r1.log
-qwen,4096,32,4096,2,3,2317.87,40.65,executed,raw/matrix/qwen-p4096-bs32-ub4096-r2.log
-qwen,4096,64,256,1,3,,,scheduler_rejection,raw/matrix/qwen-p4096-bs64-ub256-r1.log
-qwen,4096,64,256,2,3,,,scheduler_rejection,raw/matrix/qwen-p4096-bs64-ub256-r2.log
-qwen,4096,64,512,1,3,,,scheduler_rejection,raw/matrix/qwen-p4096-bs64-ub512-r1.log
-qwen,4096,64,512,2,3,,,scheduler_rejection,raw/matrix/qwen-p4096-bs64-ub512-r2.log
-qwen,4096,64,1024,1,3,,,scheduler_rejection,raw/matrix/qwen-p4096-bs64-ub1024-r1.log
-qwen,4096,64,1024,2,3,,,scheduler_rejection,raw/matrix/qwen-p4096-bs64-ub1024-r2.log
-qwen,4096,64,2048,1,3,,,scheduler_rejection,raw/matrix/qwen-p4096-bs64-ub2048-r1.log
-qwen,4096,64,2048,2,3,2343.28,21.09,executed,raw/matrix/qwen-p4096-bs64-ub2048-r2.log
-qwen,4096,64,4096,1,3,1825.09,13.52,executed,raw/matrix/qwen-p4096-bs64-ub4096-r1.log
-qwen,4096,64,4096,2,3,2278.16,40.40,executed,raw/matrix/qwen-p4096-bs64-ub4096-r2.log
-tiel,64,16,256,1,3,3242.15,133.91,executed,raw/matrix/tiel-p64-bs16-ub256-r1.log
-tiel,64,16,256,2,3,3344.66,236.65,executed,raw/matrix/tiel-p64-bs16-ub256-r2.log
-tiel,64,32,256,1,3,3219.96,134.88,executed,raw/matrix/tiel-p64-bs32-ub256-r1.log
-tiel,64,32,256,2,3,3324.33,220.76,executed,raw/matrix/tiel-p64-bs32-ub256-r2.log
-tiel,64,64,256,1,3,3167.22,124.47,executed,raw/matrix/tiel-p64-bs64-ub256-r1.log
-tiel,64,64,256,2,3,3247.58,231.73,executed,raw/matrix/tiel-p64-bs64-ub256-r2.log
-tiel,256,16,256,1,3,6939.55,111.25,executed,raw/matrix/tiel-p256-bs16-ub256-r1.log
-tiel,256,16,256,2,3,7344.29,218.89,executed,raw/matrix/tiel-p256-bs16-ub256-r2.log
-tiel,256,32,256,1,3,6910.33,110.10,executed,raw/matrix/tiel-p256-bs32-ub256-r1.log
-tiel,256,32,256,2,3,7295.53,217.17,executed,raw/matrix/tiel-p256-bs32-ub256-r2.log
-tiel,256,64,256,1,3,6857.57,111.50,executed,raw/matrix/tiel-p256-bs64-ub256-r1.log
-tiel,256,64,256,2,3,7244.94,209.86,executed,raw/matrix/tiel-p256-bs64-ub256-r2.log
-tiel,1024,16,256,1,3,,,scheduler_rejection,raw/matrix/tiel-p1024-bs16-ub256-r1.log
-tiel,1024,16,256,2,3,,,scheduler_rejection,raw/matrix/tiel-p1024-bs16-ub256-r2.log
-tiel,1024,16,512,1,3,,,scheduler_rejection,raw/matrix/tiel-p1024-bs16-ub512-r1.log
-tiel,1024,16,512,2,3,8877.18,90.57,executed,raw/matrix/tiel-p1024-bs16-ub512-r2.log
-tiel,1024,16,1024,1,3,9148.98,63.46,executed,raw/matrix/tiel-p1024-bs16-ub1024-r1.log
-tiel,1024,16,1024,2,3,10307.62,165.81,executed,raw/matrix/tiel-p1024-bs16-ub1024-r2.log
-tiel,1024,32,256,1,3,,,scheduler_rejection,raw/matrix/tiel-p1024-bs32-ub256-r1.log
-tiel,1024,32,256,2,3,,,scheduler_rejection,raw/matrix/tiel-p1024-bs32-ub256-r2.log
-tiel,1024,32,512,1,3,,,scheduler_rejection,raw/matrix/tiel-p1024-bs32-ub512-r1.log
-tiel,1024,32,512,2,3,8818.46,88.67,executed,raw/matrix/tiel-p1024-bs32-ub512-r2.log
-tiel,1024,32,1024,1,3,9145.39,65.52,executed,raw/matrix/tiel-p1024-bs32-ub1024-r1.log
-tiel,1024,32,1024,2,3,10282.78,163.90,executed,raw/matrix/tiel-p1024-bs32-ub1024-r2.log
-tiel,1024,64,256,1,3,,,scheduler_rejection,raw/matrix/tiel-p1024-bs64-ub256-r1.log
-tiel,1024,64,256,2,3,,,scheduler_rejection,raw/matrix/tiel-p1024-bs64-ub256-r2.log
-tiel,1024,64,512,1,3,,,scheduler_rejection,raw/matrix/tiel-p1024-bs64-ub512-r1.log
-tiel,1024,64,512,2,3,8779.45,89.54,executed,raw/matrix/tiel-p1024-bs64-ub512-r2.log
-tiel,1024,64,1024,1,3,9108.38,64.74,executed,raw/matrix/tiel-p1024-bs64-ub1024-r1.log
-tiel,1024,64,1024,2,3,10292.70,164.04,executed,raw/matrix/tiel-p1024-bs64-ub1024-r2.log
-tiel,4096,16,256,1,3,,,scheduler_rejection,raw/matrix/tiel-p4096-bs16-ub256-r1.log
-tiel,4096,16,256,2,3,,,scheduler_rejection,raw/matrix/tiel-p4096-bs16-ub256-r2.log
-tiel,4096,16,512,1,3,,,scheduler_rejection,raw/matrix/tiel-p4096-bs16-ub512-r1.log
-tiel,4096,16,512,2,3,,,scheduler_rejection,raw/matrix/tiel-p4096-bs16-ub512-r2.log
-tiel,4096,16,1024,1,3,,,scheduler_rejection,raw/matrix/tiel-p4096-bs16-ub1024-r1.log
-tiel,4096,16,1024,2,3,,,scheduler_rejection,raw/matrix/tiel-p4096-bs16-ub1024-r2.log
-tiel,4096,16,2048,1,3,,,scheduler_rejection,raw/matrix/tiel-p4096-bs16-ub2048-r1.log
-tiel,4096,16,2048,2,3,7621.87,41.85,executed,raw/matrix/tiel-p4096-bs16-ub2048-r2.log
-tiel,4096,16,4096,1,0,,,capacity_failure,raw/matrix/tiel-p4096-bs16-ub4096-r1.log
-tiel,4096,16,4096,2,0,,,capacity_failure,raw/matrix/tiel-p4096-bs16-ub4096-r2.log
-tiel,4096,32,256,1,3,,,scheduler_rejection,raw/matrix/tiel-p4096-bs32-ub256-r1.log
-tiel,4096,32,256,2,3,,,scheduler_rejection,raw/matrix/tiel-p4096-bs32-ub256-r2.log
-tiel,4096,32,512,1,3,,,scheduler_rejection,raw/matrix/tiel-p4096-bs32-ub512-r1.log
-tiel,4096,32,512,2,3,,,scheduler_rejection,raw/matrix/tiel-p4096-bs32-ub512-r2.log
-tiel,4096,32,1024,1,3,,,scheduler_rejection,raw/matrix/tiel-p4096-bs32-ub1024-r1.log
-tiel,4096,32,1024,2,3,,,scheduler_rejection,raw/matrix/tiel-p4096-bs32-ub1024-r2.log
-tiel,4096,32,2048,1,3,,,scheduler_rejection,raw/matrix/tiel-p4096-bs32-ub2048-r1.log
-tiel,4096,32,2048,2,3,7615.52,41.14,executed,raw/matrix/tiel-p4096-bs32-ub2048-r2.log
-tiel,4096,32,4096,1,0,,,capacity_failure,raw/matrix/tiel-p4096-bs32-ub4096-r1.log
-tiel,4096,32,4096,2,0,,,capacity_failure,raw/matrix/tiel-p4096-bs32-ub4096-r2.log
-tiel,4096,64,256,1,3,,,scheduler_rejection,raw/matrix/tiel-p4096-bs64-ub256-r1.log
-tiel,4096,64,256,2,3,,,scheduler_rejection,raw/matrix/tiel-p4096-bs64-ub256-r2.log
-tiel,4096,64,512,1,3,,,scheduler_rejection,raw/matrix/tiel-p4096-bs64-ub512-r1.log
-tiel,4096,64,512,2,3,,,scheduler_rejection,raw/matrix/tiel-p4096-bs64-ub512-r2.log
-tiel,4096,64,1024,1,3,,,scheduler_rejection,raw/matrix/tiel-p4096-bs64-ub1024-r1.log
-tiel,4096,64,1024,2,3,,,scheduler_rejection,raw/matrix/tiel-p4096-bs64-ub1024-r2.log
-tiel,4096,64,2048,1,3,,,scheduler_rejection,raw/matrix/tiel-p4096-bs64-ub2048-r1.log
-tiel,4096,64,2048,2,3,7645.26,42.18,executed,raw/matrix/tiel-p4096-bs64-ub2048-r2.log
-tiel,4096,64,4096,1,0,,,capacity_failure,raw/matrix/tiel-p4096-bs64-ub4096-r1.log
-tiel,4096,64,4096,2,0,,,capacity_failure,raw/matrix/tiel-p4096-bs64-ub4096-r2.log
+model,prompt_tokens,block_size,ubatch_size,requests,measured_repetitions,median_pp_tok_s,median_tg_tok_s,status,include_in_throughput,include_in_regression,outcome_reason,raw_log
+qwen,64,16,256,1,3,1669.14,45.94,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p64-bs16-ub256-r1.log
+qwen,64,16,256,2,3,1642.42,87.56,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p64-bs16-ub256-r2.log
+qwen,64,32,256,1,3,1653.06,45.83,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p64-bs32-ub256-r1.log
+qwen,64,32,256,2,3,1641.36,87.88,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p64-bs32-ub256-r2.log
+qwen,64,64,256,1,3,1661.35,46.32,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p64-bs64-ub256-r1.log
+qwen,64,64,256,2,3,1638.97,87.70,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p64-bs64-ub256-r2.log
+qwen,256,16,256,1,3,2772.99,41.13,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p256-bs16-ub256-r1.log
+qwen,256,16,256,2,3,2852.05,82.32,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p256-bs16-ub256-r2.log
+qwen,256,32,256,1,3,2793.84,41.62,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p256-bs32-ub256-r1.log
+qwen,256,32,256,2,3,2860.43,82.97,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p256-bs32-ub256-r2.log
+qwen,256,64,256,1,3,2779.07,41.58,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p256-bs64-ub256-r1.log
+qwen,256,64,256,2,3,2844.86,83.08,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p256-bs64-ub256-r2.log
+qwen,1024,16,256,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p1024-bs16-ub256-r1.log
+qwen,1024,16,256,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p1024-bs16-ub256-r2.log
+qwen,1024,16,512,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p1024-bs16-ub512-r1.log
+qwen,1024,16,512,2,3,2933.06,36.27,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p1024-bs16-ub512-r2.log
+qwen,1024,16,1024,1,3,2700.07,29.27,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p1024-bs16-ub1024-r1.log
+qwen,1024,16,1024,2,3,2971.34,68.40,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p1024-bs16-ub1024-r2.log
+qwen,1024,32,256,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p1024-bs32-ub256-r1.log
+qwen,1024,32,256,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p1024-bs32-ub256-r2.log
+qwen,1024,32,512,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p1024-bs32-ub512-r1.log
+qwen,1024,32,512,2,3,2936.07,36.46,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p1024-bs32-ub512-r2.log
+qwen,1024,32,1024,1,3,2705.42,29.39,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p1024-bs32-ub1024-r1.log
+qwen,1024,32,1024,2,3,2972.69,67.88,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p1024-bs32-ub1024-r2.log
+qwen,1024,64,256,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p1024-bs64-ub256-r1.log
+qwen,1024,64,256,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p1024-bs64-ub256-r2.log
+qwen,1024,64,512,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p1024-bs64-ub512-r1.log
+qwen,1024,64,512,2,3,2936.03,36.39,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p1024-bs64-ub512-r2.log
+qwen,1024,64,1024,1,3,2706.97,29.25,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p1024-bs64-ub1024-r1.log
+qwen,1024,64,1024,2,3,2976.28,68.46,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p1024-bs64-ub1024-r2.log
+qwen,4096,16,256,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p4096-bs16-ub256-r1.log
+qwen,4096,16,256,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p4096-bs16-ub256-r2.log
+qwen,4096,16,512,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p4096-bs16-ub512-r1.log
+qwen,4096,16,512,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p4096-bs16-ub512-r2.log
+qwen,4096,16,1024,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p4096-bs16-ub1024-r1.log
+qwen,4096,16,1024,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p4096-bs16-ub1024-r2.log
+qwen,4096,16,2048,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p4096-bs16-ub2048-r1.log
+qwen,4096,16,2048,2,3,2341.00,21.08,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p4096-bs16-ub2048-r2.log
+qwen,4096,16,4096,1,3,1820.45,13.51,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p4096-bs16-ub4096-r1.log
+qwen,4096,16,4096,2,3,2261.28,40.50,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p4096-bs16-ub4096-r2.log
+qwen,4096,32,256,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p4096-bs32-ub256-r1.log
+qwen,4096,32,256,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p4096-bs32-ub256-r2.log
+qwen,4096,32,512,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p4096-bs32-ub512-r1.log
+qwen,4096,32,512,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p4096-bs32-ub512-r2.log
+qwen,4096,32,1024,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p4096-bs32-ub1024-r1.log
+qwen,4096,32,1024,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p4096-bs32-ub1024-r2.log
+qwen,4096,32,2048,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p4096-bs32-ub2048-r1.log
+qwen,4096,32,2048,2,3,2347.67,21.08,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p4096-bs32-ub2048-r2.log
+qwen,4096,32,4096,1,3,1828.26,13.54,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p4096-bs32-ub4096-r1.log
+qwen,4096,32,4096,2,3,2317.87,40.65,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p4096-bs32-ub4096-r2.log
+qwen,4096,64,256,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p4096-bs64-ub256-r1.log
+qwen,4096,64,256,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p4096-bs64-ub256-r2.log
+qwen,4096,64,512,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p4096-bs64-ub512-r1.log
+qwen,4096,64,512,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p4096-bs64-ub512-r2.log
+qwen,4096,64,1024,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p4096-bs64-ub1024-r1.log
+qwen,4096,64,1024,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p4096-bs64-ub1024-r2.log
+qwen,4096,64,2048,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/qwen-p4096-bs64-ub2048-r1.log
+qwen,4096,64,2048,2,3,2343.28,21.09,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p4096-bs64-ub2048-r2.log
+qwen,4096,64,4096,1,3,1825.09,13.52,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p4096-bs64-ub4096-r1.log
+qwen,4096,64,4096,2,3,2278.16,40.40,executed,yes,yes,three warmed measurements,raw/matrix/qwen-p4096-bs64-ub4096-r2.log
+tiel,64,16,256,1,3,3242.15,133.91,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p64-bs16-ub256-r1.log
+tiel,64,16,256,2,3,3344.66,236.65,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p64-bs16-ub256-r2.log
+tiel,64,32,256,1,3,3219.96,134.88,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p64-bs32-ub256-r1.log
+tiel,64,32,256,2,3,3324.33,220.76,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p64-bs32-ub256-r2.log
+tiel,64,64,256,1,3,3167.22,124.47,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p64-bs64-ub256-r1.log
+tiel,64,64,256,2,3,3247.58,231.73,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p64-bs64-ub256-r2.log
+tiel,256,16,256,1,3,6939.55,111.25,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p256-bs16-ub256-r1.log
+tiel,256,16,256,2,3,7344.29,218.89,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p256-bs16-ub256-r2.log
+tiel,256,32,256,1,3,6910.33,110.10,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p256-bs32-ub256-r1.log
+tiel,256,32,256,2,3,7295.53,217.17,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p256-bs32-ub256-r2.log
+tiel,256,64,256,1,3,6857.57,111.50,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p256-bs64-ub256-r1.log
+tiel,256,64,256,2,3,7244.94,209.86,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p256-bs64-ub256-r2.log
+tiel,1024,16,256,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p1024-bs16-ub256-r1.log
+tiel,1024,16,256,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p1024-bs16-ub256-r2.log
+tiel,1024,16,512,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p1024-bs16-ub512-r1.log
+tiel,1024,16,512,2,3,8877.18,90.57,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p1024-bs16-ub512-r2.log
+tiel,1024,16,1024,1,3,9148.98,63.46,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p1024-bs16-ub1024-r1.log
+tiel,1024,16,1024,2,3,10307.62,165.81,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p1024-bs16-ub1024-r2.log
+tiel,1024,32,256,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p1024-bs32-ub256-r1.log
+tiel,1024,32,256,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p1024-bs32-ub256-r2.log
+tiel,1024,32,512,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p1024-bs32-ub512-r1.log
+tiel,1024,32,512,2,3,8818.46,88.67,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p1024-bs32-ub512-r2.log
+tiel,1024,32,1024,1,3,9145.39,65.52,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p1024-bs32-ub1024-r1.log
+tiel,1024,32,1024,2,3,10282.78,163.90,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p1024-bs32-ub1024-r2.log
+tiel,1024,64,256,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p1024-bs64-ub256-r1.log
+tiel,1024,64,256,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p1024-bs64-ub256-r2.log
+tiel,1024,64,512,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p1024-bs64-ub512-r1.log
+tiel,1024,64,512,2,3,8779.45,89.54,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p1024-bs64-ub512-r2.log
+tiel,1024,64,1024,1,3,9108.38,64.74,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p1024-bs64-ub1024-r1.log
+tiel,1024,64,1024,2,3,10292.70,164.04,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p1024-bs64-ub1024-r2.log
+tiel,4096,16,256,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p4096-bs16-ub256-r1.log
+tiel,4096,16,256,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p4096-bs16-ub256-r2.log
+tiel,4096,16,512,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p4096-bs16-ub512-r1.log
+tiel,4096,16,512,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p4096-bs16-ub512-r2.log
+tiel,4096,16,1024,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p4096-bs16-ub1024-r1.log
+tiel,4096,16,1024,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p4096-bs16-ub1024-r2.log
+tiel,4096,16,2048,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p4096-bs16-ub2048-r1.log
+tiel,4096,16,2048,2,3,7621.87,41.85,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p4096-bs16-ub2048-r2.log
+tiel,4096,16,4096,1,0,,,capacity_failure,no,no,CUDA allocation failed before execution,raw/matrix/tiel-p4096-bs16-ub4096-r1.log
+tiel,4096,16,4096,2,0,,,capacity_failure,no,no,CUDA allocation failed before execution,raw/matrix/tiel-p4096-bs16-ub4096-r2.log
+tiel,4096,32,256,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p4096-bs32-ub256-r1.log
+tiel,4096,32,256,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p4096-bs32-ub256-r2.log
+tiel,4096,32,512,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p4096-bs32-ub512-r1.log
+tiel,4096,32,512,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p4096-bs32-ub512-r2.log
+tiel,4096,32,1024,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p4096-bs32-ub1024-r1.log
+tiel,4096,32,1024,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p4096-bs32-ub1024-r2.log
+tiel,4096,32,2048,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p4096-bs32-ub2048-r1.log
+tiel,4096,32,2048,2,3,7615.52,41.14,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p4096-bs32-ub2048-r2.log
+tiel,4096,32,4096,1,0,,,capacity_failure,no,no,CUDA allocation failed before execution,raw/matrix/tiel-p4096-bs32-ub4096-r1.log
+tiel,4096,32,4096,2,0,,,capacity_failure,no,no,CUDA allocation failed before execution,raw/matrix/tiel-p4096-bs32-ub4096-r2.log
+tiel,4096,64,256,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p4096-bs64-ub256-r1.log
+tiel,4096,64,256,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p4096-bs64-ub256-r2.log
+tiel,4096,64,512,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p4096-bs64-ub512-r1.log
+tiel,4096,64,512,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p4096-bs64-ub512-r2.log
+tiel,4096,64,1024,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p4096-bs64-ub1024-r1.log
+tiel,4096,64,1024,2,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p4096-bs64-ub1024-r2.log
+tiel,4096,64,2048,1,3,,,scheduler_rejection,no,no,ubatch is smaller than the per-request prompt,raw/matrix/tiel-p4096-bs64-ub2048-r1.log
+tiel,4096,64,2048,2,3,7645.26,42.18,executed,yes,yes,three warmed measurements,raw/matrix/tiel-p4096-bs64-ub2048-r2.log
+tiel,4096,64,4096,1,0,,,capacity_failure,no,no,CUDA allocation failed before execution,raw/matrix/tiel-p4096-bs64-ub4096-r1.log
+tiel,4096,64,4096,2,0,,,capacity_failure,no,no,CUDA allocation failed before execution,raw/matrix/tiel-p4096-bs64-ub4096-r2.log

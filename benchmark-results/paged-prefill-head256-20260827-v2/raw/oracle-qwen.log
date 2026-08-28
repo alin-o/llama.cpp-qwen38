@@ -1,198 +1,198 @@
 ggml_cuda_init: found 1 CUDA devices (Total VRAM: 24082 MiB):
   Device 0: NVIDIA GeForce RTX 4090, compute capability 8.9, VMM: yes, VRAM: 24082 MiB
-test-paged-kv-e2e: running non-paged reference
-0.00.593.210 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
-0.00.593.216 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
-0.00.593.220 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
-0.00.593.222 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
-0.00.593.223 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
-0.00.593.228 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
-0.00.593.230 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
-0.00.593.231 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
-0.00.593.233 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
-0.00.593.235 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
-0.00.593.236 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
-0.00.593.239 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
-0.00.593.241 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
-0.00.593.243 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
-0.00.593.250 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
-0.10.990.465 I cmn          init: llama threadpool init, n_threads = -1
+test-paged-kv-e2e: running unified f16 reference
+0.00.558.802 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
+0.00.558.808 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
+0.00.558.812 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
+0.00.558.813 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
+0.00.558.815 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
+0.00.558.820 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
+0.00.558.822 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
+0.00.558.823 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
+0.00.558.825 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
+0.00.558.826 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
+0.00.558.828 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
+0.00.558.830 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
+0.00.558.832 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
+0.00.558.834 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
+0.00.558.838 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
+0.10.219.292 I cmn          init: llama threadpool init, n_threads = -1
   got 16 tokens, 248320-vocab logits
 test-paged-kv-e2e: running q8_0 paged path
-0.12.085.779 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
-0.12.085.785 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
-0.12.085.792 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
-0.12.085.794 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
-0.12.085.796 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
-0.12.085.802 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
-0.12.085.803 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
-0.12.085.806 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
-0.12.085.810 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
-0.12.085.812 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
-0.12.085.814 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
-0.12.085.817 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
-0.12.085.819 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
-0.12.085.821 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
-0.12.085.826 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
-0.13.214.341 I common_init_result: fitting KV paged params to device memory
-0.13.214.475 I common_fit_paged_kv_blocks: free_vram=9712.5 MiB, free_ram=28753.1 MiB, margin=4816.6 MiB, bytes_per_block=2228224, n_gpu_blocks=64, n_cpu_blocks=16 (set) (set)
-0.13.232.539 I cmn          init: llama threadpool init, n_threads = -1
+0.11.067.707 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
+0.11.067.712 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
+0.11.067.716 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
+0.11.067.717 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
+0.11.067.719 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
+0.11.067.724 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
+0.11.067.725 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
+0.11.067.727 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
+0.11.067.729 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
+0.11.067.730 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
+0.11.067.731 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
+0.11.067.734 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
+0.11.067.736 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
+0.11.067.738 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
+0.11.067.742 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
+0.12.186.940 I common_init_result: fitting KV paged params to device memory
+0.12.187.097 I common_fit_paged_kv_blocks: free_vram=9712.5 MiB, free_ram=28089.9 MiB, margin=4816.6 MiB, bytes_per_block=2228224, n_gpu_blocks=64, n_cpu_blocks=16 (set) (set)
+0.12.206.087 I cmn          init: llama threadpool init, n_threads = -1
   attention heads: Q=24 KV=4 (GQA ratio 6)
   got 16 tokens, 248320-vocab logits
 test-paged-kv-e2e: resuming q8_0 paged checkpoint
-0.14.220.845 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
-0.14.220.851 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
-0.14.220.858 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
-0.14.220.859 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
-0.14.220.861 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
-0.14.220.866 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
-0.14.220.868 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
-0.14.220.870 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
-0.14.220.880 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
-0.14.220.883 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
-0.14.220.885 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
-0.14.220.888 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
-0.14.220.890 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
-0.14.220.892 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
-0.14.220.898 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
-0.15.410.762 I common_init_result: fitting KV paged params to device memory
-0.15.410.925 I common_fit_paged_kv_blocks: free_vram=9434.5 MiB, free_ram=28976.2 MiB, margin=4816.6 MiB, bytes_per_block=2228224, n_gpu_blocks=64, n_cpu_blocks=16 (set) (set)
-0.15.431.908 I cmn          init: llama threadpool init, n_threads = -1
-0.16.020.230 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
-0.16.020.235 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
-0.16.020.240 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
-0.16.020.241 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
-0.16.020.243 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
-0.16.020.248 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
-0.16.020.250 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
-0.16.020.252 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
-0.16.020.254 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
-0.16.020.255 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
-0.16.020.257 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
-0.16.020.260 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
-0.16.020.263 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
-0.16.020.265 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
-0.16.020.270 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
-0.17.181.806 I common_init_result: fitting KV paged params to device memory
-0.17.181.933 I common_fit_paged_kv_blocks: free_vram=9158.5 MiB, free_ram=28915.1 MiB, margin=4816.6 MiB, bytes_per_block=2228224, n_gpu_blocks=64, n_cpu_blocks=16 (set) (set)
-0.17.201.744 I cmn          init: llama threadpool init, n_threads = -1
-0.17.790.038 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
-0.17.790.043 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
-0.17.790.048 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
-0.17.790.050 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
-0.17.790.051 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
-0.17.790.056 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
-0.17.790.058 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
-0.17.790.060 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
-0.17.790.061 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
-0.17.790.063 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
-0.17.790.064 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
-0.17.790.067 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
-0.17.790.069 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
-0.17.790.070 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
-0.17.790.075 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
-0.18.908.425 I common_init_result: fitting KV paged params to device memory
-0.18.908.568 I common_fit_paged_kv_blocks: free_vram=8882.5 MiB, free_ram=28966.6 MiB, margin=4816.6 MiB, bytes_per_block=2228224, n_gpu_blocks=64, n_cpu_blocks=16 (set) (set)
-0.18.929.275 I cmn          init: llama threadpool init, n_threads = -1
-0.19.694.646 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
-0.19.694.654 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
-0.19.694.664 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
-0.19.694.667 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
-0.19.694.669 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
-0.19.694.681 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
-0.19.694.687 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
-0.19.694.693 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
-0.19.694.699 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
-0.19.694.705 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
-0.19.694.711 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
-0.19.694.719 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
-0.19.694.723 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
-0.19.694.726 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
-0.19.694.734 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
-0.20.837.014 I common_init_result: fitting KV paged params to device memory
-0.20.837.131 I common_fit_paged_kv_blocks: free_vram=8606.5 MiB, free_ram=28420.3 MiB, margin=4816.6 MiB, bytes_per_block=2228224, n_gpu_blocks=64, n_cpu_blocks=16 (set) (set)
-0.20.855.028 I cmn          init: llama threadpool init, n_threads = -1
-0.20.857.043 E state_set_data: error loading state: paged KV checkpoint omits active sequence
-0.21.396.062 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
-0.21.396.068 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
-0.21.396.072 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
-0.21.396.074 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
-0.21.396.075 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
-0.21.396.081 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
-0.21.396.082 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
-0.21.396.084 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
-0.21.396.085 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
-0.21.396.087 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
-0.21.396.088 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
-0.21.396.091 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
-0.21.396.092 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
-0.21.396.094 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
-0.21.396.099 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
-0.22.544.060 I common_init_result: fitting KV paged params to device memory
-0.22.544.185 I common_fit_paged_kv_blocks: free_vram=8330.5 MiB, free_ram=28315.5 MiB, margin=4816.6 MiB, bytes_per_block=2228224, n_gpu_blocks=64, n_cpu_blocks=16 (set) (set)
-0.22.561.813 I cmn          init: llama threadpool init, n_threads = -1
-0.23.147.764 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
-0.23.147.768 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
-0.23.147.781 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
-0.23.147.783 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
-0.23.147.784 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
-0.23.147.790 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
-0.23.147.791 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
-0.23.147.793 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
-0.23.147.794 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
-0.23.147.796 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
-0.23.147.798 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
-0.23.147.800 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
-0.23.147.803 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
-0.23.147.805 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
-0.23.147.810 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
-0.24.273.743 I common_init_result: fitting KV paged params to device memory
-0.24.273.858 I common_fit_paged_kv_blocks: free_vram=8054.5 MiB, free_ram=28679.9 MiB, margin=4816.6 MiB, bytes_per_block=2228224, n_gpu_blocks=64, n_cpu_blocks=16 (set) (set)
+0.13.123.414 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
+0.13.123.420 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
+0.13.123.424 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
+0.13.123.426 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
+0.13.123.427 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
+0.13.123.432 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
+0.13.123.434 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
+0.13.123.440 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
+0.13.123.443 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
+0.13.123.445 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
+0.13.123.448 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
+0.13.123.450 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
+0.13.123.453 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
+0.13.123.455 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
+0.13.123.461 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
+0.14.270.074 I common_init_result: fitting KV paged params to device memory
+0.14.270.212 I common_fit_paged_kv_blocks: free_vram=9434.5 MiB, free_ram=27925.6 MiB, margin=4816.6 MiB, bytes_per_block=2228224, n_gpu_blocks=64, n_cpu_blocks=16 (set) (set)
+0.14.288.280 I cmn          init: llama threadpool init, n_threads = -1
+0.14.767.815 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
+0.14.767.820 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
+0.14.767.824 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
+0.14.767.825 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
+0.14.767.827 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
+0.14.767.833 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
+0.14.767.835 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
+0.14.767.837 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
+0.14.767.841 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
+0.14.767.843 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
+0.14.767.845 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
+0.14.767.848 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
+0.14.767.850 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
+0.14.767.852 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
+0.14.767.857 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
+0.15.874.942 I common_init_result: fitting KV paged params to device memory
+0.15.875.060 I common_fit_paged_kv_blocks: free_vram=9158.5 MiB, free_ram=28020.2 MiB, margin=4816.6 MiB, bytes_per_block=2228224, n_gpu_blocks=64, n_cpu_blocks=16 (set) (set)
+0.15.893.166 I cmn          init: llama threadpool init, n_threads = -1
+0.16.364.937 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
+0.16.364.942 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
+0.16.364.946 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
+0.16.364.948 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
+0.16.364.949 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
+0.16.364.954 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
+0.16.364.961 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
+0.16.364.964 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
+0.16.364.965 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
+0.16.364.968 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
+0.16.364.969 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
+0.16.364.973 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
+0.16.364.975 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
+0.16.364.978 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
+0.16.364.983 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
+0.17.462.798 I common_init_result: fitting KV paged params to device memory
+0.17.462.916 I common_fit_paged_kv_blocks: free_vram=8882.5 MiB, free_ram=27880.9 MiB, margin=4816.6 MiB, bytes_per_block=2228224, n_gpu_blocks=64, n_cpu_blocks=16 (set) (set)
+0.17.480.607 I cmn          init: llama threadpool init, n_threads = -1
+0.18.118.030 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
+0.18.118.035 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
+0.18.118.039 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
+0.18.118.040 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
+0.18.118.042 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
+0.18.118.047 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
+0.18.118.049 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
+0.18.118.050 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
+0.18.118.052 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
+0.18.118.053 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
+0.18.118.055 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
+0.18.118.057 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
+0.18.118.059 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
+0.18.118.061 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
+0.18.118.065 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
+0.19.229.337 I common_init_result: fitting KV paged params to device memory
+0.19.229.461 I common_fit_paged_kv_blocks: free_vram=8606.5 MiB, free_ram=27550.1 MiB, margin=4816.6 MiB, bytes_per_block=2228224, n_gpu_blocks=64, n_cpu_blocks=16 (set) (set)
+0.19.247.084 I cmn          init: llama threadpool init, n_threads = -1
+0.19.247.651 E state_set_data: error loading state: paged KV checkpoint omits active sequence
+0.19.733.168 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
+0.19.733.172 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
+0.19.733.176 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
+0.19.733.178 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
+0.19.733.179 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
+0.19.733.184 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
+0.19.733.186 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
+0.19.733.187 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
+0.19.733.189 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
+0.19.733.190 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
+0.19.733.192 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
+0.19.733.194 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
+0.19.733.196 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
+0.19.733.198 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
+0.19.733.203 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
+0.21.173.368 I common_init_result: fitting KV paged params to device memory
+0.21.173.487 I common_fit_paged_kv_blocks: free_vram=8330.5 MiB, free_ram=27597.8 MiB, margin=4816.6 MiB, bytes_per_block=2228224, n_gpu_blocks=64, n_cpu_blocks=16 (set) (set)
+0.21.191.667 I cmn          init: llama threadpool init, n_threads = -1
+0.21.717.800 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
+0.21.717.804 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
+0.21.717.808 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
+0.21.717.810 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
+0.21.717.811 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
+0.21.717.816 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
+0.21.717.818 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
+0.21.717.819 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
+0.21.717.821 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
+0.21.717.822 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
+0.21.717.824 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
+0.21.717.829 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
+0.21.717.831 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
+0.21.717.834 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
+0.21.717.838 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
+0.22.877.633 I common_init_result: fitting KV paged params to device memory
+0.22.877.795 I common_fit_paged_kv_blocks: free_vram=8054.5 MiB, free_ram=27247.4 MiB, margin=4816.6 MiB, bytes_per_block=2228224, n_gpu_blocks=64, n_cpu_blocks=16 (set) (set)
+0.22.895.965 I cmn          init: llama threadpool init, n_threads = -1
   attention heads: Q=24 KV=4 (GQA ratio 6)
-0.24.292.709 I cmn          init: llama threadpool init, n_threads = -1
-  q8_0 perplexity: reference=2.648921 paged=2.651827 ratio=1.001097
+  q8_0 perplexity: unified_f16=2.648921 paged=2.651827 ratio=1.001097
 test-paged-kv-e2e: running turbo3 paged path
-0.25.270.436 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
-0.25.270.442 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
-0.25.270.449 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
-0.25.270.451 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
-0.25.270.454 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
-0.25.270.462 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
-0.25.270.466 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
-0.25.270.469 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
-0.25.270.472 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
-0.25.270.475 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
-0.25.270.478 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
-0.25.270.482 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
-0.25.270.486 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
-0.25.270.490 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
-0.25.270.498 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
-0.26.444.709 I common_init_result: fitting KV paged params to device memory
-0.26.444.831 I common_fit_paged_kv_blocks: free_vram=7778.5 MiB, free_ram=28724.2 MiB, margin=4816.6 MiB, bytes_per_block=2228224, n_gpu_blocks=64, n_cpu_blocks=16 (set) (set)
-0.26.446.454 W init: paged TurboQuant quality gate failed; selecting q8_0 storage
-0.26.461.095 I cmn          init: llama threadpool init, n_threads = -1
+0.23.865.832 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
+0.23.865.837 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
+0.23.865.841 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
+0.23.865.843 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
+0.23.865.845 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
+0.23.865.850 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
+0.23.865.851 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
+0.23.865.853 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
+0.23.865.854 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
+0.23.865.856 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
+0.23.865.863 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
+0.23.865.866 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
+0.23.865.869 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
+0.23.865.871 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
+0.23.865.877 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
+0.24.982.415 I common_init_result: fitting KV paged params to device memory
+0.24.982.530 I common_fit_paged_kv_blocks: free_vram=7778.5 MiB, free_ram=27568.7 MiB, margin=4816.6 MiB, bytes_per_block=2228224, n_gpu_blocks=64, n_cpu_blocks=16 (set) (set)
+0.24.984.075 W init: paged TurboQuant quality gate failed; selecting q8_0 storage
+0.24.998.035 I cmn          init: llama threadpool init, n_threads = -1
   attention heads: Q=24 KV=4 (GQA ratio 6)
-  turbo3 perplexity: reference=2.648921 paged=2.651827 ratio=1.001097
+  turbo3 perplexity: unified_f16=2.648921 paged=2.651827 ratio=1.001097
 test-paged-kv-e2e: running turbo4 paged path
-0.27.428.129 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
-0.27.428.134 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
-0.27.428.139 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
-0.27.428.140 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
-0.27.428.142 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
-0.27.428.147 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
-0.27.428.150 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
-0.27.428.152 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
-0.27.428.157 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
-0.27.428.159 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
-0.27.428.161 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
-0.27.428.164 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
-0.27.428.167 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
-0.27.428.169 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
-0.27.428.174 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
-0.28.581.406 I common_init_result: fitting KV paged params to device memory
-0.28.581.530 I common_fit_paged_kv_blocks: free_vram=7502.5 MiB, free_ram=28599.7 MiB, margin=4816.6 MiB, bytes_per_block=2228224, n_gpu_blocks=64, n_cpu_blocks=16 (set) (set)
-0.28.583.151 W init: paged TurboQuant quality gate failed; selecting q8_0 storage
-  attention heads: Q=24 KV=4 (GQA ratio 6)
-0.28.597.750 I cmn          init: llama threadpool init, n_threads = -1
-  turbo4 perplexity: reference=2.648921 paged=2.651827 ratio=1.001097
+0.25.851.034 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
+0.25.851.039 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
+0.25.851.043 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
+0.25.851.045 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
+0.25.851.047 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
+0.25.851.052 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
+0.25.851.053 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
+0.25.851.055 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
+0.25.851.056 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
+0.25.851.063 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
+0.25.851.066 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
+0.25.851.070 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
+0.25.851.072 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
+0.25.851.075 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
+0.25.851.079 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
+0.26.965.895 I common_init_result: fitting KV paged params to device memory
+0.26.966.016 I common_fit_paged_kv_blocks: free_vram=7502.5 MiB, free_ram=27449.6 MiB, margin=4816.6 MiB, bytes_per_block=2228224, n_gpu_blocks=64, n_cpu_blocks=16 (set) (set)
+0.26.967.593 W init: paged TurboQuant quality gate failed; selecting q8_0 storage
+0.26.981.073 I   attention heads: Q=24 KV=4 (GQA ratio 6)
+cmn          init: llama threadpool init, n_threads = -1
+  turbo4 perplexity: unified_f16=2.648921 paged=2.651827 ratio=1.001097
 test-paged-kv-e2e: PASSED

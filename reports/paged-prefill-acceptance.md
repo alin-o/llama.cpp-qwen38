@@ -34,7 +34,7 @@ TMPDIR="$PWD/build-verify-cuda/tmp" build-verify-cuda/bin/test-paged-kv-e2e -m /
 TMPDIR="$PWD/build-verify-cuda/tmp" build-verify-cuda/bin/test-paged-kv-e2e -m /models/Tiel-Coder-35B-A3B-MTP-UD-Q4_K_S.gguf -ngl 99 -ctk q8_0 -ctv q8_0
 ```
 
-`run_non_paged()` constructs the unified reference without overriding the default f16 K/V cache. `run_paged()` explicitly uses the parsed q8_0 K/V types. The test forces the unified token sequence through paged q8_0, compares logits/top-k and greedy tokens, and computes perplexity with a maximum allowed ratio of 1.10.
+`run_non_paged()` disables paged KV and explicitly sets both unified K and V cache types to `GGML_TYPE_F16`. `run_paged()` enables paged KV and explicitly sets both cache types to `GGML_TYPE_Q8_0`. Both paths load the same GGUF, tokenize the same prompt, use the same context/batch sizes and greedy sampling, and run on the same device. The test first compares independently generated greedy tokens, then forces the unified-f16 token sequence through paged q8_0 so perplexity is evaluated on identical targets. It compares logits/top-k and greedy tokens and enforces `paged_q8_0_ppl / unified_f16_ppl <= 1.10`.
 
 | Model | Unified f16 PPL | Paged q8_0 PPL | Ratio | Result |
 | --- | ---: | ---: | ---: | --- |
@@ -42,6 +42,8 @@ TMPDIR="$PWD/build-verify-cuda/tmp" build-verify-cuda/bin/test-paged-kv-e2e -m /
 | Tiel-Coder-35B-A3B-MTP | 2.272060 | 2.408728 | 1.060152 | pass |
 
 Raw logs: `raw/oracle-qwen.log` and `raw/oracle-tiel.log`.
+
+The oracle was re-run on 2026-08-28 after making the unified f16 cache selection explicit. Both ratios were unchanged, and the refreshed raw logs identify the reference as `unified_f16` on the result line.
 
 The same runs reset the CUDA tiled-prefill launch counter, assert a head-dim-256 tiled launch after prefill, reset it again, execute a scheduler-produced decode-only batch, and assert that the count remains zero. Both exact-model runs end with `test-paged-kv-e2e: PASSED`.
 
@@ -58,15 +60,24 @@ Paged matrix dimensions:
 - Decode: 8 tokens per request.
 - Repetitions: one warmup plus three measured runs in a single source-matched process; reported value is the measured median.
 
-This is 120 paged configurations and 480 attempted repetition slots. The outcome is:
+This is a 120-row attempted coverage matrix and 480 attempted repetition slots. Rows admitted by the scheduler are performance configurations; rejected or allocation-failed rows are capacity-boundary probes, not missing throughput samples. The outcome is:
 
 | Status | Configurations | Meaning |
 | --- | ---: | --- |
 | executed | 54 | Four complete pp/tg observations; median is reported. |
-| scheduler rejection | 60 | Ubatch is smaller than the per-request prompt; no prompt/decode tokens ran and no throughput is reported. |
-| capacity failure | 6 | Tiel with ubatch 4096 cannot allocate the 3976.11 MiB CUDA compute buffer. |
+| scheduler rejection | 60 | Ubatch is smaller than the per-request prompt; no prompt/decode tokens ran, and the row is excluded from throughput and regression calculations. |
+| capacity failure | 6 | Tiel with ubatch 4096 cannot allocate the 3976.11 MiB CUDA compute buffer; the row is excluded from throughput and regression calculations. |
 
-The 4096-token Tiel surface is not omitted: all lower ubatches are recorded, and `2 x 2048` executes for every block size at ubatch 2048. The single-request ubatch-4096 and two-request ubatch-4096 rows preserve the exact CUDA OOM output rather than presenting zeros as performance.
+`paged-medians.csv` makes this machine-readable with `include_in_throughput` and `include_in_regression` columns. Only `status=executed` rows have `yes`; capacity outcomes have blank medians and `no`. No zero, rejection, or OOM value enters a throughput ratio, summary median, or regression calculation.
+
+Both models have measured 4096-token aggregate-prompt coverage. Qwen executes both request shapes at ubatch 4096 for every block size. Tiel executes `2 x 2048` at ubatch 2048 for every block size. Tiel's ubatch-4096 allocation boundary is also fully probed for both request shapes and every block size, and all six rows consistently fail before inference with the recorded 3976.11 MiB CUDA allocation error. This is a hardware-capacity result on the 24 GB test GPU, not a benchmark regression or an omitted measurement.
+
+| Model | Aggregate prompt | Request shape | Ubatch | Block sizes | Outcome |
+| --- | ---: | --- | ---: | --- | --- |
+| Qwen | 4096 | `1 x 4096` | 4096 | 16, 32, 64 | executed; warmed pp/tg medians reported |
+| Qwen | 4096 | `2 x 2048` | 4096 | 16, 32, 64 | executed; warmed pp/tg medians reported |
+| Tiel | 4096 | `2 x 2048` | 2048 | 16, 32, 64 | executed; warmed pp/tg medians reported |
+| Tiel | 4096 | both shapes | 4096 | 16, 32, 64 | capacity outcome; excluded from performance calculations |
 
 Unified q8_0 comparison uses `llama-bench` on the same source, GPU, model, prompt lengths, ubatches, and 8-token decode. llama-bench performs its built-in warmup and emits three raw `samples_ts` values. There are 40 unified prompt/ubatch medians. Unified has no paged block-size dimension or equivalent simultaneous multi-request mode, so paired ratios below use the single-request rows where the surfaces match.
 

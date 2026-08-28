@@ -1,5 +1,5 @@
 b1e81e12e3e71db05865e8b4d6ac74175e271ab55a720a0384592650a686e94e  benchmark-results/paged-prefill-head256-20260827-v2/commands.txt
-d0ce719d8e058a2ebf28910764f8d448ae86b583c19112b9c2bab599364b29e7  benchmark-results/paged-prefill-head256-20260827-v2/paged-medians.csv
+6ed58bfab5fd3a20dd35be8da79a5d06bc17d088a283081a706dd47c0f48b9ef  benchmark-results/paged-prefill-head256-20260827-v2/paged-medians.csv
 9f4964be4b3fb49f8c81368f97538c689f93a59030ef1c9fac04312c3eb08e6f  benchmark-results/paged-prefill-head256-20260827-v2/paged-raw.csv
 4d78b226b48b6e4dc8ec753d0651355d557cdc86e302596b2dcea3ce0d1bc96b  benchmark-results/paged-prefill-head256-20260827-v2/raw/matrix/qwen-p1024-bs16-ub1024-r1.log
 64e3c455008956fbadefacf41d461976b545993908b8bc0c9bc11f00cec9d758  benchmark-results/paged-prefill-head256-20260827-v2/raw/matrix/qwen-p1024-bs16-ub1024-r2.log
@@ -121,8 +121,8 @@ cc3b355bfa9c1d1057cd4659a752c0e2daa9585db04dba20c679b7d42ee35ad6  benchmark-resu
 3e92d5d51d6ba4919ef4c4eaf340af7d3ad39eea30cd8098785580b1953f37b1  benchmark-results/paged-prefill-head256-20260827-v2/raw/matrix/tiel-p64-bs32-ub256-r2.log
 c5a591cd15da8c46fa71934b670136f73b8dbbb7d06d3db1f4f485c4d4ecb44d  benchmark-results/paged-prefill-head256-20260827-v2/raw/matrix/tiel-p64-bs64-ub256-r1.log
 dc5d0bee23f1ca6266777d4f88de41bc22e10a6617dd1279992891892a0726b3  benchmark-results/paged-prefill-head256-20260827-v2/raw/matrix/tiel-p64-bs64-ub256-r2.log
-5c539a87a058eb7800b631ca27f05213d147f59e3499cf53fe85d612f3d47bdb  benchmark-results/paged-prefill-head256-20260827-v2/raw/oracle-qwen.log
-cf25d64f124fd7fe724ccbed2ea7ad2190fadca44da69f3c6a6be6ffe5676e8d  benchmark-results/paged-prefill-head256-20260827-v2/raw/oracle-tiel.log
+87222c66c70de0458f7d8f861b4293ae85269f7d29f514f6b86d57b6cb69a432  benchmark-results/paged-prefill-head256-20260827-v2/raw/oracle-qwen.log
+4810abbc343aa4fb0d46b006cf3761682af6cf779baea5a1c7e28d876de08954  benchmark-results/paged-prefill-head256-20260827-v2/raw/oracle-tiel.log
 05f6988bf177188e08de047b1c7f2e3db65f10dba7583f4a9dfed7d1ff056fff  benchmark-results/paged-prefill-head256-20260827-v2/raw/profiler/qwen-app.log
 5af9720213e590e593b7bbb50018e3a9b6801b96e760eeb180007fdd7caefa88  benchmark-results/paged-prefill-head256-20260827-v2/raw/profiler/qwen-cuda-gpu-kern-sum.csv
 cdfdd483ba573b9f59205ca6de391823436acf86aeb91f2b1369d8ab49a919b5  benchmark-results/paged-prefill-head256-20260827-v2/raw/profiler/qwen-p1024-bs32-ub1024.nsys-rep
@@ -156,7 +156,7 @@ c1a519b3c55fff12c66bbea40a276068619bdeb5c9562d1ba37fa41350c4f883  benchmark-resu
 0fb39af9c3353c72bfe8853abb97201797fcc474cae270b69cdd5c3cee0ff938  benchmark-results/paged-prefill-head256-20260827-v2/repetition-harness.patch
 6b3c98958b2f429f3a7498d6bb49860d0ff8efe958343e14c45b7f005c736ac9  benchmark-results/paged-prefill-head256-20260827-v2/run-matrix.sh
 cfd534af15b451de14c4266bf1e2e2a0573826409562468860fcfbb103ceceac  benchmark-results/paged-prefill-head256-20260827-v2/run-unified.sh
-7b6cbf2b35cfdc298ae3f5055580e578f71ec7abaea88be856215c48b11baf98  benchmark-results/paged-prefill-head256-20260827-v2/summarize.py
+81e4b3d2621a709abeafa6f0f2b37a79a8dce5e0a1c1ef352cc859f634e98fc2  benchmark-results/paged-prefill-head256-20260827-v2/summarize.py
 2bd605dedd4510f01c8db7751a94b4be53720f00eed8cba80c8ad1aca82ec02f  benchmark-results/paged-prefill-head256-20260827-v2/unified-medians.csv
 1afd7d52158cfbb80f540704b80e8e7059472a417bc477eb8aa4cdc549a4b0e8  benchmark-results/paged-prefill-head256-20260827-v2/unified-raw.csv
 8263f1d5eeb219e1810a531d22c6858a323ee30f2450cacec81a53c3b5afd830  benchmark-results/paged-prefill-head256-20260827-v2/raw/profiler/tiel-multi.nsys-rep
