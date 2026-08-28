@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <clocale>
+#include <cstdlib>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -112,6 +113,17 @@ int main(int argc, char ** argv) {
     const llama_vocab * vocab = llama_model_get_vocab(model);
 
     LOG_INF("%s: Loaded model and created context\n", __func__);
+
+    const char * repetitions_env = std::getenv("LLAMA_PAGED_REPETITIONS");
+    const int repetitions = repetitions_env ? std::atoi(repetitions_env) : 1;
+    if (repetitions < 1 || repetitions > 100) {
+        LOG_ERR("%s: LLAMA_PAGED_REPETITIONS must be between 1 and 100\n", __func__);
+        return 1;
+    }
+
+    int repetition = 0;
+    do {
+    LOG_INF("%s: benchmark repetition %d/%d\n", __func__, repetition + 1, repetitions);
 
     struct llama_paged_scheduler * scheduler = llama_paged_scheduler_init(ctx);
     if (!scheduler) {
@@ -328,6 +340,9 @@ int main(int argc, char ** argv) {
         common_sampler_free(s);
     }
     llama_paged_scheduler_free(scheduler);
+    llama_memory_clear(llama_get_memory(ctx), true);
+    } while (++repetition < repetitions);
+
     llama_backend_free();
 
     return 0;

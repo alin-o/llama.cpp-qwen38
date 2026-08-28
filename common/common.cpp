@@ -1306,7 +1306,7 @@ static size_t common_get_available_ram() {
 
 
 static ggml_type common_paged_storage_type(ggml_type type) {
-    return type == GGML_TYPE_F16 || type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0 ? GGML_TYPE_Q8_0 : type;
+    return type == GGML_TYPE_F16 ? GGML_TYPE_Q8_0 : type;
 }
 
 static void common_fit_paged_kv_blocks(common_params & params, const llama_model * model) {

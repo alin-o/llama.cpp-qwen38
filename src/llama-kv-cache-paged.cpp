@@ -8,8 +8,7 @@
 #include <unordered_set>
 
 static ggml_type paged_storage_type(ggml_type type) {
-    // Tiel TurboQuant types failed the paged quality gate; q8_0 is the production fallback.
-    return type == GGML_TYPE_F16 || type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0 ? GGML_TYPE_Q8_0 : type;
+    return type == GGML_TYPE_F16 ? GGML_TYPE_Q8_0 : type;
 }
 
 

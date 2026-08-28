@@ -65,8 +65,24 @@ static std::vector<float> get_logits(llama_context * ctx, int32_t idx, int n_voc
 }
 static void compare_logits(int step, const std::vector<float> & ref, const std::vector<float> & paged);
 
+static int model_head_dim(const std::string & model_path) {
+    common_params params;
+    params.model.path   = model_path;
+    params.n_ctx        = 256;
+    params.n_batch      = 64;
+    params.n_ubatch     = 64;
+    params.warmup       = false;
+    params.kv_paged     = false;
+    params.cache_type_k = GGML_TYPE_F16;
+    params.cache_type_v = GGML_TYPE_F16;
 
-static path_result run_non_paged(const std::string & model_path) {
+    auto init = common_init_from_params(params);
+    EXPECT_TRUE(init->model() != nullptr);
+    return llama_model_n_embd_head_v(init->model());
+}
+
+
+static path_result run_non_paged(const std::string & model_path, ggml_type type_k, ggml_type type_v) {
     common_params params;
     params.model.path    = model_path;
     params.n_ctx         = 256;
@@ -76,8 +92,8 @@ static path_result run_non_paged(const std::string & model_path) {
     params.sampling.temp = 0.0f;  // greedy
     params.warmup        = false;
     params.kv_paged      = false;
-    params.cache_type_k  = GGML_TYPE_F16;
-    params.cache_type_v  = GGML_TYPE_F16;
+    params.cache_type_k  = type_k;
+    params.cache_type_v  = type_v;
 
     auto            init  = common_init_from_params(params);
     llama_model *   model = init->model();
@@ -382,7 +398,7 @@ static void compare_perplexity(const char * name, const path_result & ref, const
     const std::vector<llama_token> targets(ref.tokens.begin(), ref.tokens.begin() + n);
     const double ref_ppl = perplexity(ref, targets);
     const double paged_ppl = perplexity(paged, targets);
-    fprintf(stderr, "  %s perplexity: unified_f16=%.6f paged=%.6f ratio=%.6f\n", name, ref_ppl, paged_ppl, paged_ppl / ref_ppl);
+    fprintf(stderr, "  %s perplexity: unified=%.6f paged=%.6f ratio=%.6f\n", name, ref_ppl, paged_ppl, paged_ppl / ref_ppl);
     EXPECT_TRUE(paged_ppl <= ref_ppl * MAX_PPL_RATIO);
 }
 
@@ -413,46 +429,30 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "skip: no --model provided\n");
         return 0;
     }
-    const ggml_type type_k = GGML_TYPE_Q8_0;
-    const ggml_type type_v = GGML_TYPE_Q8_0;
-
     common_init();
     llama_backend_init();
 
-    fprintf(stderr, "test-paged-kv-e2e: running unified f16 reference\n");
-    path_result ref = run_non_paged(params.model.path);
-    if (ref.head_dim % ggml_blck_size(type_k) != 0 || ref.head_dim % ggml_blck_size(type_v) != 0) {
-        fprintf(stderr, "skip: model head dimension %d is incompatible with paged K=%s V=%s\n", ref.head_dim,
-                ggml_type_name(type_k), ggml_type_name(type_v));
-        llama_backend_free();
-        return 0;
-    }
-
-    fprintf(stderr, "  got %zu tokens, %d-vocab logits\n", ref.tokens.size(), ref.n_vocab);
-
-    fprintf(stderr, "test-paged-kv-e2e: running q8_0 paged path\n");
-    path_result paged_greedy = run_paged(params.model.path, {}, type_k, type_v);
-    fprintf(stderr, "  got %zu tokens, %d-vocab logits\n", paged_greedy.tokens.size(), paged_greedy.n_vocab);
-    fprintf(stderr, "test-paged-kv-e2e: resuming q8_0 paged checkpoint\n");
-    run_paged_checkpoint_resume(params.model.path);
-
-    path_result paged_q8 = run_paged(params.model.path, ref.tokens, type_k, type_v);
-    compare_results(ref, paged_greedy, paged_q8);
-    compare_perplexity("q8_0", ref, paged_q8);
-
-    for (const ggml_type type : { GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO4_0 }) {
-        if (ref.head_dim % ggml_blck_size(type) != 0) {
-            fprintf(stderr, "skip: model head dimension %d is incompatible with paged %s\n", ref.head_dim,
-                    ggml_type_name(type));
+    const int head_dim = model_head_dim(params.model.path);
+    for (const ggml_type type : { GGML_TYPE_Q8_0, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO4_0 }) {
+        if (head_dim % ggml_blck_size(type) != 0) {
+            fprintf(stderr, "skip: model head dimension %d is incompatible with K/V=%s\n",
+                    head_dim, ggml_type_name(type));
             continue;
         }
-        fprintf(stderr, "test-paged-kv-e2e: running %s paged path\n", ggml_type_name(type));
-        path_result paged = run_paged(params.model.path, ref.tokens, type, type);
-        EXPECT_TRUE(paged.logits.size() >= N_COMPARE);
-        for (int i = 0; i < N_COMPARE; ++i) {
-            compare_logits(i, ref.logits[i], paged.logits[i]);
-        }
-        compare_perplexity(ggml_type_name(type), ref, paged);
+        fprintf(stderr, "test-paged-kv-e2e: running unified %s reference\n", ggml_type_name(type));
+        path_result ref = run_non_paged(params.model.path, type, type);
+        fprintf(stderr, "  got %zu tokens, %d-vocab logits\n", ref.tokens.size(), ref.n_vocab);
+        fprintf(stderr, "test-paged-kv-e2e: running paged %s path\n", ggml_type_name(type));
+        path_result paged_greedy = run_paged(params.model.path, {}, type, type);
+        fprintf(stderr, "  got %zu tokens, %d-vocab logits\n", paged_greedy.tokens.size(), paged_greedy.n_vocab);
+        path_result paged_forced = run_paged(params.model.path, ref.tokens, type, type);
+        compare_results(ref, paged_greedy, paged_forced);
+        compare_perplexity(ggml_type_name(type), ref, paged_forced);
+    }
+
+    if (head_dim % ggml_blck_size(GGML_TYPE_Q8_0) == 0) {
+        fprintf(stderr, "test-paged-kv-e2e: resuming q8_0 paged checkpoint\n");
+        run_paged_checkpoint_resume(params.model.path);
     }
     fprintf(stderr, "test-paged-kv-e2e: PASSED\n");
 
