@@ -68,6 +68,8 @@ This is a 120-row attempted coverage matrix and 480 attempted repetition slots. 
 | scheduler rejection | 60 | Ubatch is smaller than the per-request prompt; no prompt/decode tokens ran, and the row is excluded from throughput and regression calculations. |
 | capacity failure | 6 | Tiel with ubatch 4096 cannot allocate the 3976.11 MiB CUDA compute buffer; the row is excluded from throughput and regression calculations. |
 
+The rejected rows cannot be converted into smaller-microbatch measurements by raising only the logical batch size: `llama-paged-scheduler.cpp` requires `n_batch == n_ubatch`. A source-matched trial with `n_batch` set to the full prompt and a smaller `n_ubatch` aborts at that invariant before inference. Consequently, an ubatch smaller than one request's prompt is not a useful/executable configuration for this paged scheduler.
+
 `paged-medians.csv` makes this machine-readable with `include_in_throughput` and `include_in_regression` columns. Only `status=executed` rows have `yes`; capacity outcomes have blank medians and `no`. No zero, rejection, or OOM value enters a throughput ratio, summary median, or regression calculation.
 
 Both models have measured 4096-token aggregate-prompt coverage. Qwen executes both request shapes at ubatch 4096 for every block size. Tiel executes `2 x 2048` at ubatch 2048 for every block size. Tiel's ubatch-4096 allocation boundary is also fully probed for both request shapes and every block size, and all six rows consistently fail before inference with the recorded 3976.11 MiB CUDA allocation error. This is a hardware-capacity result on the 24 GB test GPU, not a benchmark regression or an omitted measurement.
@@ -78,6 +80,8 @@ Both models have measured 4096-token aggregate-prompt coverage. Qwen executes bo
 | Qwen | 4096 | `2 x 2048` | 4096 | 16, 32, 64 | executed; warmed pp/tg medians reported |
 | Tiel | 4096 | `2 x 2048` | 2048 | 16, 32, 64 | executed; warmed pp/tg medians reported |
 | Tiel | 4096 | both shapes | 4096 | 16, 32, 64 | capacity outcome; excluded from performance calculations |
+
+A focused minimum-pool trial also confirms the Tiel ubatch-4096 boundary. The 4096-token request needs at least 4096/block-size GPU blocks to avoid scheduler deadlock. At that minimum, its required GPU page storage plus the 3976.11 MiB compute buffer still exceeds available VRAM. Reducing the pool further is therefore not a valid way to obtain a measurement, and CPU blocks cannot substitute for the minimum active GPU residency.
 
 Unified q8_0 comparison uses `llama-bench` on the same source, GPU, model, prompt lengths, ubatches, and 8-token decode. llama-bench performs its built-in warmup and emits three raw `samples_ts` values. There are 40 unified prompt/ubatch medians. Unified has no paged block-size dimension or equivalent simultaneous multi-request mode, so paired ratios below use the single-request rows where the surfaces match.
 
