@@ -242,6 +242,7 @@ __global__ void paged_attention_prefill_mma_kernel(
         return;
     }
 
+    const int seq_start = batch_offsets[seq_idx];
     const int context_len = context_lens[seq_idx];
     const int kv_head_idx = ggml_paged_attn_kv_head(head_idx, n_heads, n_heads_kv);
 
@@ -250,7 +251,7 @@ __global__ void paged_attention_prefill_mma_kernel(
         const int q_dim = (vec % (HEAD_DIM / 4)) * 4;
         const int q_token = q_tile_start + q_row;
         if (q_tile_start + q_row < num_new_tokens) {
-            const size_t q_offset = (size_t) q_token * n_heads * HEAD_DIM + (size_t) head_idx * HEAD_DIM + q_dim;
+            const size_t q_offset = (size_t) (seq_start + q_token) * n_heads * HEAD_DIM + (size_t) head_idx * HEAD_DIM + q_dim;
             paged_store_half4(&q_shared[q_row][q_dim], *(const float4 *) (q + q_offset));
         } else {
             paged_store_half4(&q_shared[q_row][q_dim], make_float4(0.0f, 0.0f, 0.0f, 0.0f));
@@ -304,7 +305,7 @@ __global__ void paged_attention_prefill_mma_kernel(
 
         if (tid < Q_TILE) {
             const int q_row = tid;
-        const int q_token = q_tile_start + q_row;
+            const int q_token = q_tile_start + q_row;
             if (q_token < num_new_tokens) {
                 const int q_pos = context_len - num_new_tokens + q_token;
                 float tile_max = -FLT_MAX;
@@ -367,7 +368,7 @@ __global__ void paged_attention_prefill_mma_kernel(
         const int dim = (vec % (HEAD_DIM / 4)) * 4;
         const int q_token = q_tile_start + q_row;
         if (q_tile_start + q_row < num_new_tokens) {
-            const size_t out_offset = (size_t) q_token * n_heads * HEAD_DIM + (size_t) head_idx * HEAD_DIM + dim;
+            const size_t out_offset = (size_t) (seq_start + q_token) * n_heads * HEAD_DIM + (size_t) head_idx * HEAD_DIM + dim;
             const float4 acc = paged_load_float4(&value_acc_shared[q_row][dim]);
             const float inv_sum = 1.0f / (sum_shared[q_row] + 1e-6f);
             paged_store_float4(out + out_offset, make_float4(
