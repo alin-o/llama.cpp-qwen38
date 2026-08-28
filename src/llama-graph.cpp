@@ -1070,11 +1070,61 @@ void llm_graph_input_attn_kv_paged::set_input(const llama_ubatch* ubatch) {
     }
 }
 
-bool llm_graph_input_attn_kv_paged::can_reuse(const llm_graph_params & /*params*/) {
-    // In paged KV cache, we can 'never' re-use the graph. Because we have write_slots
-    // which encode the complete physical memory mapping for a specific batch at a specific
-    // step.
-    return false;
+static bool can_reuse_paged_tensor(const ggml_tensor * old_tensor, const ggml_tensor * new_tensor) {
+    if (!old_tensor || !new_tensor || old_tensor->type != new_tensor->type || old_tensor->buffer != new_tensor->buffer) {
+        return false;
+    }
+    for (int i = 0; i < GGML_MAX_DIMS; ++i) {
+        if (old_tensor->ne[i] != new_tensor->ne[i] || old_tensor->nb[i] != new_tensor->nb[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool can_reuse_paged_attention(
+        const llm_graph_input_attn_kv_paged * inp,
+        const llama_kv_cache_paged_context * old_mctx,
+        const llama_kv_cache_paged_context * new_mctx,
+        const llm_graph_params & params) {
+    if (!old_mctx || !new_mctx || inp->cparams.block_size != params.cparams.block_size ||
+        inp->hparams.n_layer() != params.hparams.n_layer() ||
+        inp->hparams.n_head_kv() != params.hparams.n_head_kv() ||
+        inp->hparams.n_embd_head_k() != params.hparams.n_embd_head_k() ||
+        inp->hparams.n_embd_head_v() != params.hparams.n_embd_head_v()) {
+        return false;
+    }
+
+    const int64_t n_tokens = params.ubatch.n_tokens;
+    const int64_t max_blocks = new_mctx->get_max_blocks();
+    const int64_t batch_size = new_mctx->get_batch_size();
+    const auto check_1d = [](const ggml_tensor * tensor, int64_t n) {
+        return tensor && tensor->type == GGML_TYPE_I32 && tensor->ne[0] == n;
+    };
+
+    if (!check_1d(inp->paged_write_rows, n_tokens * params.hparams.n_head_kv()) ||
+        !inp->paged_block_table || inp->paged_block_table->type != GGML_TYPE_I32 ||
+        inp->paged_block_table->ne[0] != max_blocks || inp->paged_block_table->ne[1] != batch_size ||
+        !check_1d(inp->paged_context_lens, batch_size) ||
+        !check_1d(inp->paged_batch_offsets, batch_size) ||
+        !check_1d(inp->paged_batch_lens, batch_size)) {
+        return false;
+    }
+
+    for (uint32_t il = 0; il < inp->hparams.n_layer(); ++il) {
+        if (!can_reuse_paged_tensor(old_mctx->get_k(il), new_mctx->get_k(il)) ||
+            !can_reuse_paged_tensor(old_mctx->get_v(il), new_mctx->get_v(il))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool llm_graph_input_attn_kv_paged::can_reuse(const llm_graph_params & params) {
+    const auto * new_mctx = static_cast<const llama_kv_cache_paged_context *>(params.mctx);
+    const bool res = can_reuse_paged_attention(this, mctx, new_mctx, params);
+    mctx = new_mctx;
+    return res;
 }
 
 void llm_graph_input_attn_cross::set_input(const llama_ubatch * ubatch) {
@@ -1306,8 +1356,26 @@ void llm_graph_input_mem_hybrid_paged::set_input(const llama_ubatch * ubatch) {
 }
 
 bool llm_graph_input_mem_hybrid_paged::can_reuse(const llm_graph_params & params) {
-    this->mctx = static_cast<const llama_memory_hybrid_paged_context *>(params.mctx);
-    return false;
+    const auto * new_mctx = static_cast<const llama_memory_hybrid_paged_context *>(params.mctx);
+    const auto * old_mctx = mctx;
+    bool res = can_reuse_paged_attention(inp_attn.get(), old_mctx ? old_mctx->get_attn() : nullptr,
+                                         new_mctx ? new_mctx->get_attn() : nullptr, params);
+    if (old_mctx && new_mctx) {
+        const auto * rs = new_mctx->get_recr();
+        const uint32_t n_rs = rs->get_n_rs();
+        res &= inp_rs->s_copy && inp_rs->s_copy->ne[0] == n_rs;
+        res &= params.ubatch.n_seqs <= n_rs;
+        res &= inp_rs->s_copy_main && inp_rs->s_copy_main->ne[0] == params.ubatch.n_seqs;
+        res &= inp_rs->s_copy_extra && inp_rs->s_copy_extra->ne[0] == n_rs - params.ubatch.n_seqs;
+        res &= inp_rs->head == rs->get_head();
+        res &= inp_rs->rs_z == rs->get_rs_z();
+    } else {
+        res = false;
+    }
+    mctx = new_mctx;
+    inp_attn->mctx = new_mctx ? new_mctx->get_attn() : nullptr;
+    inp_rs->mctx = new_mctx ? new_mctx->get_recr() : nullptr;
+    return res;
 }
 
 
@@ -1338,13 +1406,11 @@ bool llm_graph_input_sampling::can_reuse(const llm_graph_params & params) {
     if (samplers.size() != params.samplers.size()) {
         return false;
     }
-
     for (const auto & [seq_id, sampler] : params.samplers) {
         if (samplers[seq_id] != sampler) {
             return false;
         }
     }
-
     return true;
 }
 
