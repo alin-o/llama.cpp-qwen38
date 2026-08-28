@@ -239,6 +239,8 @@ static path_result run_paged(const std::string & model_path,
         EXPECT_TRUE(!tiled_prefill_seen);
     }
 #endif
+    const llama_perf_context_data perf = llama_perf_context(ctx);
+    fprintf(stderr, "  paged graph reuse: n_reused=%d\n", perf.n_reused);
     llama_paged_scheduler_free(sched);
     return result;
 }

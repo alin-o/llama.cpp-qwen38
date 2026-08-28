@@ -864,13 +864,19 @@ bool llama_context::memory_update(bool optimize) {
                 }
         }
 
-        // reset the previous graph result to make sure that it won't be reused
-        // TODO: change the mctx->apply() to return information if a graph reserve is needed
-        //       reset the graph result only if the memory module did reset the scheduler
-        gf_res_prev->reset();
+
+        if (mctx->get_status() != LLAMA_MEMORY_STATUS_NO_UPDATE) {
+            // reset the previous graph result to make sure that it won't be reused
+            // TODO: change the mctx->apply() to return information if a graph reserve is needed
+            //       reset the graph result only if the memory module did reset the scheduler
+            gf_res_prev->reset();
+        }
 
         if (!mctx->apply()) {
             LLAMA_LOG_ERROR("%s: failed to apply memory update\n", __func__);
+        }
+        if (mctx->get_status() == LLAMA_MEMORY_STATUS_NO_UPDATE) {
+            return false;
         }
     }
 
