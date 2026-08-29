@@ -26,7 +26,7 @@ class llama_paged_scheduler_impl {
     void insert_sorted_by_arrival_time(llama_sequence_group_ptr new_group, llama_sequence_group_list & list);
 
     bool check_deadlock(uint32_t n_candidates, uint32_t n_swapped, uint32_t n_waiting) const;
-    bool check_livelock(uint32_t n_swapped, uint32_t prev_n_swapped);
+    bool check_livelock(uint32_t n_candidates, uint32_t n_swapped, uint32_t prev_n_swapped);
 
     void set_running(llama_sequence_group_ptr group);
     void set_swapped(llama_sequence_group_ptr group);

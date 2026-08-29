@@ -39,7 +39,13 @@ bool llama_paged_scheduler_impl::check_deadlock(uint32_t n_candidates, uint32_t 
     return false;
 }
 
-bool llama_paged_scheduler_impl::check_livelock(uint32_t n_swapped, uint32_t prev_n_swapped) {
+bool llama_paged_scheduler_impl::check_livelock(
+        uint32_t n_candidates, uint32_t n_swapped, uint32_t prev_n_swapped) {
+    if (n_candidates > 0) {
+        n_livelock_steps = 0;
+        return false;
+    }
+
     // swapped count is non-zero and not decreasing
     if (n_swapped > 0 && n_swapped >= prev_n_swapped) {
         n_livelock_steps++;
@@ -83,7 +89,7 @@ llama_scheduler_status llama_paged_scheduler_impl::step(llama_batch & batch) {
                    n_swapped, n_waiting, n_candidates);
 
     const bool deadlock = check_deadlock(n_candidates, n_swapped, n_waiting);
-    const bool livelock = check_livelock(n_swapped, prev_n_swapped);  // updates n_livelock_steps
+    const bool livelock = check_livelock(n_candidates, n_swapped, prev_n_swapped);  // updates n_livelock_steps
     if (deadlock || livelock) {
         return llama_scheduler_status::DEADLOCK;
     }

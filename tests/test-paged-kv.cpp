@@ -1101,10 +1101,10 @@ TEST(test_scheduler_rejects_oversized_prompt) {
 }
 
 TEST(test_scheduler_swaps_and_resumes_request) {
-    auto fixture = make_fixture(/*n_ctx=*/128, /*block_size=*/16, /*n_batch=*/64,
-                                /*n_gpu_blocks=*/2, /*n_cpu_blocks=*/2);
-    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/0, /*n_prompt=*/14)));
-    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/1, /*n_prompt=*/14)));
+    auto fixture = make_fixture(/*n_ctx=*/128, /*block_size=*/32, /*n_batch=*/64,
+                                /*n_gpu_blocks=*/3, /*n_cpu_blocks=*/2);
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/0, /*n_prompt=*/30)));
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/1, /*n_prompt=*/30)));
 
     llama_batch batch = {};
     const int8_t continue_flags[] = { 0, 0 };
@@ -1123,15 +1123,20 @@ TEST(test_scheduler_swaps_and_resumes_request) {
     EXPECT_TRUE(first->status == llama_sequence_group_status::SWAPPED ||
                 second->status == llama_sequence_group_status::SWAPPED);
 
+    for (int i = 0; i < 21; ++i) {
+        fixture.sched->update(batch, { 4 + i }, continue_flags);
+        EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    }
+
     const int8_t finish_flags[] = { 1 };
-    fixture.sched->update(batch, { 4 }, finish_flags);
+    fixture.sched->update(batch, { 25 }, finish_flags);
     EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
     first  = fixture.sched->get_group_from_id(0);
     second = fixture.sched->get_group_from_id(1);
     EXPECT_TRUE(first == nullptr);
     EXPECT_TRUE(second != nullptr);
     EXPECT_TRUE(second->status == llama_sequence_group_status::RUNNING);
-    EXPECT_TRUE(second->n_past >= 16);
+    EXPECT_TRUE(second->n_past >= 32);
     llama_batch_free(batch);
 }
 
