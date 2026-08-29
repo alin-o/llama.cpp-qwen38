@@ -212,7 +212,7 @@ static path_result run_paged(const std::string & model_path,
         bool remapped_this_step = false;
         EXPECT_TRUE(info_before_decode != nullptr && info_before_decode->n_seq == 1);
         if (!forced_page_remap && result.tokens.size() >= 2 && info_before_decode->n_blocks_per_seq >= 2) {
-            auto * block_table = const_cast<int32_t *>(info_before_decode->block_table);
+            auto * block_table = info_before_decode->block_table;
             EXPECT_TRUE(block_table[1] != block_table[0]);
             const int32_t remapped_from = block_table[1];
             block_table[1] = block_table[0];
