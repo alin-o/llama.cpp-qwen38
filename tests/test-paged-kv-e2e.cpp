@@ -301,6 +301,49 @@ static path_result run_paged(const std::string & model_path,
     return result;
 }
 
+static void run_paged_incompatible_shape_probe(const std::string & model_path) {
+    common_params params;
+    params.model.path = model_path;
+    params.n_ctx = 256;
+    params.block_size = 16;
+    params.n_batch = 64;
+    params.n_ubatch = 64;
+    params.warmup = false;
+    params.kv_paged = true;
+    params.n_gpu_blocks = 64;
+    params.n_cpu_blocks = 16;
+    params.n_gpu_blocks_set = true;
+    params.n_cpu_blocks_set = true;
+    params.n_sequences = 2;
+    params.n_parallel = 2;
+    params.cache_type_k = GGML_TYPE_Q8_0;
+    params.cache_type_v = GGML_TYPE_Q8_0;
+
+    auto init = common_init_from_params(params);
+    llama_context * ctx = init->context();
+    EXPECT_TRUE(ctx != nullptr);
+    const std::vector<llama_token> prompt = common_tokenize(ctx, "shape probe", true, false);
+    EXPECT_TRUE(!prompt.empty());
+    llama_paged_scheduler * sched = llama_paged_scheduler_init(ctx);
+    EXPECT_TRUE(sched != nullptr);
+    EXPECT_TRUE(llama_paged_scheduler_add_request(sched, prompt.data(), prompt.size(), 0));
+
+    llama_batch batch = {};
+    EXPECT_TRUE(llama_paged_scheduler_prepare_batch(sched, &batch));
+    EXPECT_TRUE(llama_decode(ctx, batch) == 0);
+    llama_synchronize(ctx);
+    const int32_t reused_before = llama_perf_context(ctx).n_reused;
+    EXPECT_TRUE(llama_paged_scheduler_add_request(sched, prompt.data(), prompt.size(), 1));
+    EXPECT_TRUE(llama_paged_scheduler_prepare_batch(sched, &batch));
+    EXPECT_TRUE(llama_paged_scheduler_get_batch_info(sched)->n_seq == 2);
+    EXPECT_TRUE(llama_decode(ctx, batch) == 0);
+    llama_synchronize(ctx);
+    EXPECT_TRUE(llama_perf_context(ctx).n_reused == reused_before);
+    fprintf(stderr, "  multi-sequence rebuild: n_reused=%d -> %d\n", reused_before, llama_perf_context(ctx).n_reused);
+    llama_paged_scheduler_free(sched);
+    llama_batch_free(batch);
+}
+
 static void run_paged_checkpoint_resume(const std::string & model_path) {
     common_params params;
     params.model.path = model_path;
@@ -507,6 +550,10 @@ int main(int argc, char ** argv) {
         compare_results(paged_oracle, paged_greedy, paged_reused_forced);
     }
 
+    if (head_dim % ggml_blck_size(GGML_TYPE_Q8_0) == 0) {
+        fprintf(stderr, "test-paged-kv-e2e: checking multi-sequence rebuild\n");
+        run_paged_incompatible_shape_probe(params.model.path);
+    }
     if (head_dim % ggml_blck_size(GGML_TYPE_Q8_0) == 0) {
         fprintf(stderr, "test-paged-kv-e2e: resuming q8_0 paged checkpoint\n");
         run_paged_checkpoint_resume(params.model.path);
