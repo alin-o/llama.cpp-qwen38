@@ -878,11 +878,11 @@ TEST(test_scheduler_prioritizes_oldest_request_under_pressure) {
                                 /*n_gpu_blocks=*/13, /*n_cpu_blocks=*/10);
     EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/0, /*n_prompt=*/79)));
     EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/1, /*n_prompt=*/63)));
-    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/2, /*n_prompt=*/47)));
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/2, /*n_prompt=*/46)));
 
     llama_batch batch = {};
     EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
-    EXPECT_EQ(batch.n_tokens, 189);
+    EXPECT_EQ(batch.n_tokens, 188);
     const int8_t continue_flags[] = { 0, 0, 0 };
     fixture.sched->update(batch, { 10, 11, 12 }, continue_flags);
 
