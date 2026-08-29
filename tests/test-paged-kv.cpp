@@ -4,6 +4,8 @@
 #include "llama-kv-cache-paged.h"
 #include "llama-io.h"
 #include "llama-paged-scheduler-impl.h"
+#include "llama-hparams.h"
+
 #include <stdexcept>
 
 #include <cassert>
@@ -106,6 +108,70 @@ TEST(test_paged_graph_tensor_compatibility) {
     EXPECT_FALSE(llm_graph_can_reuse_paged_tensor(captured, current));
     ggml_free(ctx);
 }
+
+TEST(test_paged_graph_reuse_rejects_pool_change) {
+    ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    EXPECT_TRUE(backend != nullptr);
+
+    constexpr uint32_t n_layers = 1;
+    constexpr uint32_t n_heads_kv = 2;
+    constexpr uint32_t head_dim = 32;
+    constexpr uint32_t block_size = 16;
+    constexpr uint32_t n_ubatch = 4;
+    constexpr uint32_t n_seq_max = 1;
+
+    llama_kv_cache_paged captured_cache(head_dim, n_heads_kv, block_size, n_layers, n_ubatch, n_seq_max);
+    llama_kv_cache_paged current_cache(head_dim, n_heads_kv, block_size, n_layers, n_ubatch, n_seq_max);
+    captured_cache.init(backend, backend, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, 4, 2, 0.0f);
+    current_cache.init(backend, backend, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, 4, 2, 0.0f);
+
+    llama_ubatch ubatch = {};
+    ubatch.n_tokens = 1;
+    std::vector<llama_ubatch> ubatches = { ubatch };
+    llama_kv_cache_paged_context captured_ctx(&captured_cache, ubatches);
+    llama_kv_cache_paged_context current_ctx(&current_cache, ubatches);
+    captured_ctx.set_n_tokens(1);
+    current_ctx.set_n_tokens(1);
+    captured_ctx.set_batch_size(1);
+    current_ctx.set_batch_size(1);
+    captured_ctx.set_max_blocks(4);
+    current_ctx.set_max_blocks(4);
+
+    llama_hparams hparams = {};
+    hparams.n_layer_all = n_layers;
+    hparams.n_head_kv_arr[0] = n_heads_kv;
+    hparams.n_embd_head_k_full = head_dim;
+    hparams.n_embd_head_v_full = head_dim;
+
+    llama_cparams cparams = {};
+    cparams.block_size = block_size;
+
+    llm_graph_input_attn_kv_paged input(hparams, cparams, &captured_ctx);
+    ggml_init_params ggml_params = {
+        /*.mem_size   =*/ 16 * ggml_tensor_overhead() + 4096,
+        /*.mem_buffer =*/ nullptr,
+        /*.no_alloc   =*/ false,
+    };
+    ggml_context * ggml_ctx = ggml_init(ggml_params);
+    EXPECT_TRUE(ggml_ctx != nullptr);
+    input.paged_write_rows = ggml_new_tensor_1d(ggml_ctx, GGML_TYPE_I32, n_heads_kv);
+    input.paged_block_table = ggml_new_tensor_2d(ggml_ctx, GGML_TYPE_I32, 4, 1);
+    input.paged_context_lens = ggml_new_tensor_1d(ggml_ctx, GGML_TYPE_I32, 1);
+    input.paged_batch_offsets = ggml_new_tensor_1d(ggml_ctx, GGML_TYPE_I32, 1);
+    input.paged_batch_lens = ggml_new_tensor_1d(ggml_ctx, GGML_TYPE_I32, 1);
+
+    llm_graph_params graph_params = {};
+    graph_params.hparams = hparams;
+    graph_params.cparams = cparams;
+    graph_params.ubatch = ubatch;
+    graph_params.mctx = &current_ctx;
+    EXPECT_FALSE(input.can_reuse(graph_params));
+    EXPECT_FALSE(input.paged_k[0] == current_cache.get_k_tensor(0));
+
+    ggml_free(ggml_ctx);
+    ggml_backend_free(backend);
+}
+
 
 // Testing block_manager main functionality
 
@@ -1009,6 +1075,7 @@ TEST(test_scheduler_swaps_and_resumes_request) {
 int main(int /*argc*/, char ** /*argv*/) {
     fprintf(stderr, "test-paged-kv: block_manager\n");
     RUN(test_paged_graph_tensor_compatibility);
+    RUN(test_paged_graph_reuse_rejects_pool_change);
     RUN(test_block_manager_leak_simple);
     RUN(test_block_manager_leak_repeated);
     RUN(test_block_manager_checkout_too_many);
