@@ -1682,6 +1682,7 @@ extern "C" {
                                                 struct llama_batch *           batch,
                                                 const llama_token *            tokens,
                                                 const int8_t *                 stop_flags);
+    LLAMA_API void llama_paged_scheduler_remove_request(struct llama_paged_scheduler * sched, int32_t request_id);
 
     // Introspection.
     LLAMA_API bool llama_paged_scheduler_get_seq_state(struct llama_paged_scheduler * sched,

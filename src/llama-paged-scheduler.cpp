@@ -111,6 +111,12 @@ LLAMA_API void llama_paged_scheduler_update(struct llama_paged_scheduler * sched
     std::vector<llama_token> tokens_vec(tokens, tokens + info->n_seq);
     sched->impl.update(*batch, tokens_vec, stop_flags);
 }
+LLAMA_API void llama_paged_scheduler_remove_request(struct llama_paged_scheduler * sched, int32_t request_id) {
+    if (sched) {
+        sched->impl.remove_request(request_id);
+    }
+}
+
 
 LLAMA_API void llama_paged_scheduler_set_on_finish(struct llama_paged_scheduler * sched,
                                                    llama_paged_on_finish_cb       cb,

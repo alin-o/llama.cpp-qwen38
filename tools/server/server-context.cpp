@@ -843,7 +843,7 @@ private:
         if (!llama_paged_scheduler_prepare_batch(paged_scheduler.get(), &paged_batch)) {
             throw std::runtime_error("paged scheduler failed to prepare batch");
         }
-        if (paged_batch.n_tokens == 0) {
+        if (paged_batch.n_tokens <= 0) {
             return false;
         }
         const auto * info = llama_paged_scheduler_get_batch_info(paged_scheduler.get());
@@ -856,6 +856,7 @@ private:
         llama_synchronize(ctx_tgt);
         std::vector<llama_token> sampled_tokens(info->n_seq);
         std::vector<int8_t> stop_flags(info->n_seq, 0);
+        std::vector<int32_t> finished_slots;
         for (int i = 0; i < info->n_seq; ++i) {
             const int slot_id = paged_batch.seq_id[info->batch_offsets[i]][0];
             server_slot & slot = slots[slot_id];
@@ -868,7 +869,11 @@ private:
                 slot.init_sampler();
                 slot.state = SLOT_STATE_DONE_PROMPT;
             }
-            const int token_idx = info->batch_offsets[i] + info->batch_lens[i] - 1;
+            int token_idx{};
+            for (int j = 0; j <= i; ++j) {
+                token_idx += info->batch_lens[j];
+            }
+            token_idx--;
             const llama_token id = common_sampler_sample(slot.smpl.get(), ctx_tgt, token_idx);
             common_sampler_accept(slot.smpl.get(), id, true);
             completion_token_output result;
@@ -881,13 +886,17 @@ private:
                 stop_flags[i] = 1;
                 slot.print_timings();
                 send_final_response(slot);
-                slot.release();
+                finished_slots.push_back(slot.id);
             } else {
                 slot.prompt.tokens.push_back(id);
                 slot.state = SLOT_STATE_GENERATING;
             }
         }
         llama_paged_scheduler_update(paged_scheduler.get(), &paged_batch, sampled_tokens.data(), stop_flags.data());
+        for (int id_slot : finished_slots) {
+            llama_paged_scheduler_remove_request(paged_scheduler.get(), id_slot);
+            slots[id_slot].release();
+        }
         return true;
     }
 
@@ -1277,6 +1286,9 @@ private:
             SLT_TRC(slot, "new slot, n_ctx = %d\n", slot.n_ctx);
 
             slot.callback_on_release = [this](int id_slot) {
+                if (params_base.kv_paged) {
+                    llama_paged_scheduler_remove_request(paged_scheduler.get(), id_slot);
+                }
                 queue_tasks.pop_deferred_task(id_slot);
             };
 

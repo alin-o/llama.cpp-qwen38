@@ -113,6 +113,7 @@ bool llama_paged_scheduler_impl::queue_request(llama_sequence_group group) {
         return false;
     }
 
+
     auto group_ptr = std::make_unique<llama_sequence_group>(std::move(group));
 
     const bool restored = kv_cache_manager->register_group(*group_ptr);
@@ -189,6 +190,33 @@ void llama_paged_scheduler_impl::finish(llama_sequence_group & group) {
     group.status = llama_sequence_group_status::FINISHED;
     id_to_group.erase(group.request_id);
 }
+void llama_paged_scheduler_impl::remove_request(int32_t request_id) {
+    auto it = id_to_group.find(request_id);
+    if (it == id_to_group.end()) {
+        return;
+    }
+
+    llama_sequence_group * group = it->second;
+    group->status = llama_sequence_group_status::FINISHED;
+    finish(*group);
+
+    auto erase_group = [&](llama_sequence_group_list & list) {
+        for (auto list_it = list.begin(); list_it != list.end(); ++list_it) {
+            if (list_it->get() == group) {
+                list.erase(list_it);
+                return true;
+            }
+        }
+        return false;
+    };
+
+    if (erase_group(running) || erase_group(swapped) || erase_group(waiting)) {
+        if (priority_request_id == request_id) {
+            priority_request_id = -1;
+        }
+    }
+}
+
 
 // Try to swap a running sequence out to CPU.
 // if the CPU pool is full, fall back to recomputation by resetting the sequence's decode state

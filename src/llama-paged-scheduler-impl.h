@@ -17,8 +17,9 @@ class llama_paged_scheduler_impl {
 
     llama_scheduler_status step(llama_batch & batch);
     bool                   queue_request(llama_sequence_group group);
-    void update(const llama_batch & batch, const std::vector<llama_token> & new_tokens, const int8_t * stop_flags);
-    void set_on_finish(llama_paged_on_finish_cb cb, void * user_data);
+    void                   update(const llama_batch & batch, const std::vector<llama_token> & new_tokens, const int8_t * stop_flags);
+    void                   remove_request(int32_t request_id);
+    void                   set_on_finish(llama_paged_on_finish_cb cb, void * user_data);
     llama_sequence_group *         get_group_from_id(int32_t request_id) const;
     const llama_paged_batch_info * get_curr_batch_info() const;
 
