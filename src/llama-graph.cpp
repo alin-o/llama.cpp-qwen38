@@ -1371,14 +1371,7 @@ llm_graph_input_mem_hybrid_paged::llm_graph_input_mem_hybrid_paged(
 
 void llm_graph_input_mem_hybrid_paged::set_input(const llama_ubatch * ubatch) {
     inp_attn->set_input(ubatch);
-    const int64_t n_rs = mctx->get_recr()->get_n_rs();
-    if (inp_rs->s_copy) {
-        GGML_ASSERT(ggml_backend_buffer_is_host(inp_rs->s_copy->buffer));
-        int32_t * data = (int32_t *) inp_rs->s_copy->data;
-        for (uint32_t i = 0; i < n_rs; ++i) {
-            data[i] = mctx->get_recr()->s_copy(i);
-        }
-    }
+    inp_rs->set_input(ubatch);
 }
 
 bool llm_graph_input_mem_hybrid_paged::can_reuse(const llm_graph_params & params) {
