@@ -243,31 +243,6 @@ void llama_paged_scheduler_impl::activate_priority_request(llama_sequence_group_
                      candidates.end());
 }
 
-void llama_paged_scheduler_impl::evict() {
-    GGML_ASSERT(kv_cache_manager && "kv_cache_manager is nullptr.");
-    LLAMA_LOG_DEBUG("%s: Eviction requested...\n", __func__);
-    if (running.empty()) {
-        return;
-    }
-
-    auto evict_it = running.end();
-    if (priority_request_id != -1) {
-        evict_it = std::find_if(running.begin(), running.end(), [&](const llama_sequence_group_ptr & group) {
-            return group->request_id != priority_request_id;
-        });
-        if (evict_it == running.end()) {
-            return;
-        }
-    } else {
-        evict_it = std::prev(running.end());
-    }
-
-    llama_sequence_group_ptr most_recent_request = std::move(*evict_it);
-    running.erase(evict_it);
-    GGML_ASSERT(most_recent_request && "request selected for eviction is nullptr.");
-
-    swap_out_or_recompute(std::move(most_recent_request));
-}
 
 void llama_paged_scheduler_impl::process_running_list(llama_sequence_group_raw_list & candidates) {
     GGML_ASSERT(kv_cache_manager && "kv_cache_manager is nullptr.");
