@@ -36,6 +36,7 @@ class llama_paged_scheduler_impl {
 
     int32_t get_curr_decode_tokens() const;
 
+    void activate_priority_request();
     void evict();
     void process_running_list(llama_sequence_group_raw_list & candidates);
     void process_swapped_list(llama_sequence_group_raw_list & candidates);
@@ -60,6 +61,8 @@ class llama_paged_scheduler_impl {
     const int32_t          n_batch;
     llama_kv_cache_paged * kv_cache_manager = nullptr;
     llama_paged_batch_info curr_info;
+
+    int32_t priority_request_id = -1;
 
     uint32_t n_livelock_steps   = 0;
     uint32_t prev_n_swapped     = 0;

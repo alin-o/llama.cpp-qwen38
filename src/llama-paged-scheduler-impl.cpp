@@ -221,6 +221,22 @@ void llama_paged_scheduler_impl::swap_out_or_recompute(llama_sequence_group_ptr 
     set_waiting(std::move(group_ptr));
 }
 
+void llama_paged_scheduler_impl::activate_priority_request() {
+    if (priority_request_id != -1 || running.size() <= 1) {
+        return;
+    }
+
+    priority_request_id = running.front()->request_id;
+    LLAMA_LOG_DEBUG("%s: prioritizing oldest request_id=%d under GPU pressure.\n", __func__, priority_request_id);
+
+    auto it = std::next(running.begin());
+    while (it != running.end()) {
+        llama_sequence_group_ptr group_ptr = std::move(*it);
+        it = running.erase(it);
+        swap_out_or_recompute(std::move(group_ptr));
+    }
+}
+
 void llama_paged_scheduler_impl::evict() {
     GGML_ASSERT(kv_cache_manager && "kv_cache_manager is nullptr.");
     LLAMA_LOG_DEBUG("%s: Eviction requested...\n", __func__);
@@ -228,8 +244,20 @@ void llama_paged_scheduler_impl::evict() {
         return;
     }
 
-    llama_sequence_group_ptr most_recent_request = std::move(running.back());
-    running.pop_back();
+    auto evict_it = running.end();
+    if (priority_request_id != -1) {
+        evict_it = std::find_if(running.begin(), running.end(), [&](const llama_sequence_group_ptr & group) {
+            return group->request_id != priority_request_id;
+        });
+        if (evict_it == running.end()) {
+            return;
+        }
+    } else {
+        evict_it = std::prev(running.end());
+    }
+
+    llama_sequence_group_ptr most_recent_request = std::move(*evict_it);
+    running.erase(evict_it);
     GGML_ASSERT(most_recent_request && "request selected for eviction is nullptr.");
 
     swap_out_or_recompute(std::move(most_recent_request));
@@ -244,8 +272,13 @@ void llama_paged_scheduler_impl::process_running_list(llama_sequence_group_raw_l
         GGML_ASSERT(group && "group is nullptr.");
 
         if (group->status == llama_sequence_group_status::FINISHED) {
+            const bool was_priority = group->request_id == priority_request_id;
             finish(*group);
             it = running.erase(it);
+            if (was_priority) {
+                priority_request_id = -1;
+                LLAMA_LOG_DEBUG("%s: priority request completed; resuming queued requests.\n", __func__);
+            }
             continue;
         }
 
@@ -261,18 +294,14 @@ void llama_paged_scheduler_impl::process_running_list(llama_sequence_group_raw_l
             bool success = kv_cache_manager->allocate(1, *group);  // decode phase
             if (!success) {
                 if (running.size() > 1) {
-                    const bool curr_is_back = (std::next(it) == running.end());
-                    // Evict pops the back of the list (most recent request)
-                    evict();
+                    activate_priority_request();
 
-                    // Evict might have removed the current group from running
-                    if (curr_is_back) {
-                        // Current group was evicted
+                    if (group->request_id != priority_request_id) {
                         it = running.end();
                         continue;
                     }
 
-                    // Try allocating again after eviction
+                    // Try allocating again after swapping younger requests.
                     success = kv_cache_manager->allocate(1, *group);
                 }
 
@@ -298,9 +327,13 @@ void llama_paged_scheduler_impl::process_running_list(llama_sequence_group_raw_l
 
 void llama_paged_scheduler_impl::process_swapped_list(llama_sequence_group_raw_list & candidates) {
     GGML_ASSERT(kv_cache_manager && "kv_cache_manager is nullptr.");
+    if (priority_request_id != -1) {
+        return;
+    }
     llama_sequence_group_list::iterator it = swapped.begin();
     while (it != swapped.end()) {
         llama_sequence_group * group = it->get();
+
         GGML_ASSERT(group && "the group to swap is nullptr.");
         const bool success = kv_cache_manager->swap_in(*group);
         if (!success) {
@@ -318,6 +351,9 @@ void llama_paged_scheduler_impl::process_swapped_list(llama_sequence_group_raw_l
 void llama_paged_scheduler_impl::process_waiting_list(llama_sequence_group_raw_list & candidates,
                                                       int32_t                         remaining_token_budget) {
     GGML_ASSERT(kv_cache_manager && "kv_cache_manager is nullptr.");
+    if (priority_request_id != -1) {
+        return;
+    }
     llama_sequence_group_list::iterator it    = waiting.begin();
     size_t                              count = 0;
     while (it != waiting.end()) {
