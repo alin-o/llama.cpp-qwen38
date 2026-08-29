@@ -59,7 +59,7 @@ bool llama_paged_scheduler_impl::check_livelock(
             return true;
         }
     } else {
-        // Swapped count decreased — swap-ins are happening, reset counter
+        // Swapped count decreased - swap-ins are happening, reset counter
         n_livelock_steps = 0;
     }
     return false;
@@ -414,7 +414,7 @@ void llama_paged_scheduler_impl::populate_batch_from(const llama_sequence_group_
         max_blocks = std::max(max_blocks, (int32_t) group->block_table.size());
     }
 
-    GGML_ASSERT(total_tokens <= (int32_t) n_batch && "total_tokens exceeds n_batch — token budget logic is broken");
+    GGML_ASSERT(total_tokens <= (int32_t) n_batch && "total_tokens exceeds n_batch - token budget logic is broken");
 
     // Initialize the batch (assumed it was cleared before)
     batch = llama_batch_init(total_tokens, 0, 1);
