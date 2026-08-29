@@ -565,6 +565,7 @@ void llama_paged_scheduler_impl::update(const llama_batch &              batch,
         // Default stop flags are n_seq_max
         if (stop_flags[i] || group->n_past >= n_seq_max_ctx) {
             group->status = llama_sequence_group_status::FINISHED;
+            remove_request(request_id);
         }
     }
 }

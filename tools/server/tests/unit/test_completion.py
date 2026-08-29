@@ -2,6 +2,7 @@ import pytest
 import requests
 import time
 import random
+import os
 
 from openai import OpenAI
 from utils import *
@@ -317,6 +318,35 @@ def test_completion_with_tokens_input():
     })
     assert res.status_code == 200
     assert type(res.body["content"]) == str
+
+
+
+def test_paged_slot_reuse_pressure():
+    model = os.environ.get("LLAMA_SERVER_PAGED_MODEL")
+    if not model:
+        pytest.skip("set LLAMA_SERVER_PAGED_MODEL to run paged slot reuse pressure")
+
+    global server
+    server.model_file = model
+    server.kv_paged = True
+    server.n_slots = 2
+    server.n_predict = 8
+    server.debug = True
+    server.log_path = os.path.join(TMP_DIR, "paged-slot-reuse.log")
+    server.start()
+
+    tasks = [(server.make_request, ("POST", "/completion", {
+        "prompt": "Explain why request ordering matters.",
+        "n_predict": 8,
+        "temperature": 0.0,
+    })) for _ in range(4)]
+    results = parallel_function_calls(tasks)
+
+    assert all(res.status_code == 200 for res in results)
+    log = open(server.log_path, encoding="utf-8").read()
+    assert "already queued" not in log
+    assert "non-consecutive token position" not in log
+    assert "HTTP 500" not in log
 
 
 @pytest.mark.parametrize("n_slots,n_requests", [
