@@ -875,10 +875,10 @@ TEST(test_scheduler_deadlock_oversize_waiting_request) {
 
 TEST(test_scheduler_prioritizes_oldest_request_under_pressure) {
     auto fixture = make_fixture(/*n_ctx=*/128, /*block_size=*/16, /*n_batch=*/200,
-                                /*n_gpu_blocks=*/13, /*n_cpu_blocks=*/10);
+                                /*n_gpu_blocks=*/14, /*n_cpu_blocks=*/10);
     EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/0, /*n_prompt=*/79)));
-    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/1, /*n_prompt=*/63)));
-    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/2, /*n_prompt=*/46)));
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/1, /*n_prompt=*/62)));
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/2, /*n_prompt=*/47)));
 
     llama_batch batch = {};
     EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
@@ -895,8 +895,8 @@ TEST(test_scheduler_prioritizes_oldest_request_under_pressure) {
     const auto * info = fixture.sched->get_curr_batch_info();
     EXPECT_EQ(info->n_seq, 1);
     EXPECT_EQ(batch.seq_id[0][0], 0);
-    EXPECT_TRUE(fixture.sched->get_group_from_id(1)->block_table.front() >= 13);
-    EXPECT_TRUE(fixture.sched->get_group_from_id(2)->block_table.front() >= 13);
+    EXPECT_TRUE(fixture.sched->get_group_from_id(1)->block_table.front() >= 14);
+    EXPECT_TRUE(fixture.sched->get_group_from_id(2)->block_table.front() >= 14);
 
     const int8_t continue_flag[] = { 0 };
     fixture.sched->update(batch, { 30 }, continue_flag);
