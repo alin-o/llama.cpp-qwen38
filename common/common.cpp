@@ -1363,9 +1363,17 @@ static void common_fit_paged_kv_blocks(common_params & params, const llama_model
     const size_t free_ram = common_get_available_ram();
     const size_t available_ram = free_ram == 0 ? bytes_per_block : (size_t) (free_ram * 0.75f);
     const size_t paused_blocks = blocks_per_seq * std::max(1, params.n_parallel - 1);
+    const size_t usable_cpu_blocks = (size_t) std::ceil(paused_blocks / (1.0f - params.kv_paged_watermark));
+    const size_t available_cpu_blocks = bytes_per_block == 0 ? 0 : available_ram / bytes_per_block;
+    if (!params.n_cpu_blocks_set && free_ram != 0 && available_cpu_blocks < usable_cpu_blocks) {
+        LOG_WRN("%s: available RAM (%.1f MiB) fits %zu CPU blocks, but %zu are needed after the %.2f watermark reserve; "
+                "paused requests may recompute.\n",
+                __func__, available_ram / 1024.0f / 1024.0f, available_cpu_blocks, usable_cpu_blocks,
+                params.kv_paged_watermark);
+    }
     const uint32_t n_cpu_blocks = params.n_cpu_blocks_set
         ? params.n_cpu_blocks
-        : (uint32_t) std::max((size_t) 1, std::min({ available_ram / bytes_per_block, paused_blocks,
+        : (uint32_t) std::max((size_t) 1, std::min({ available_cpu_blocks, usable_cpu_blocks,
                                                      (size_t) std::numeric_limits<uint32_t>::max() }));
 
     LOG_INF("%s: free_vram=%0.1f MiB, free_ram=%0.1f MiB, margin=%0.1f MiB, bytes_per_block=%zu, n_gpu_blocks=%d, n_cpu_blocks=%d%s%s\n",
