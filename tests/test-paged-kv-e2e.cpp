@@ -213,7 +213,10 @@ static path_result run_paged(const std::string & model_path,
         EXPECT_TRUE(info_before_decode != nullptr && info_before_decode->n_seq == 1);
         if (!forced_page_remap && result.tokens.size() >= 2 && info_before_decode->n_blocks_per_seq >= 2) {
             auto * block_table = const_cast<int32_t *>(info_before_decode->block_table);
+            EXPECT_TRUE(block_table[1] != block_table[0]);
+            const int32_t remapped_from = block_table[1];
             block_table[1] = block_table[0];
+            EXPECT_TRUE(block_table[1] != remapped_from);
             forced_page_remap = true;
             remapped_this_step = true;
         }
@@ -522,6 +525,7 @@ static void compare_perplexity(const char * name, const path_result & ref, const
 
 static void compare_results(const path_result & ref, const path_result & paged_greedy, const path_result & paged_forced) {
     EXPECT_TRUE((int) ref.tokens.size() >= N_COMPARE);
+    EXPECT_TRUE((int) paged_greedy.tokens.size() >= N_COMPARE);
     int greedy_mismatches = 0;
     for (int i = 0; i < N_COMPARE; ++i) {
         if (ref.tokens[i] != paged_greedy.tokens[i]) {
@@ -530,6 +534,7 @@ static void compare_results(const path_result & ref, const path_result & paged_g
         }
     }
     fprintf(stderr, "  greedy mismatches in first %d tokens: %d\n", N_COMPARE, greedy_mismatches);
+    EXPECT_TRUE(greedy_mismatches == 0);
     EXPECT_TRUE(ref.logits.size() >= N_COMPARE);
     EXPECT_TRUE(paged_forced.logits.size() >= N_COMPARE);
     for (int i = 0; i < N_COMPARE; ++i) {

@@ -268,8 +268,9 @@ extern "C" {
 
     // CPU-side metadata produced by the paged scheduler and consumed by
     // llama_kv_cache_paged_context during graph build. These arrays are owned
-    // by the scheduler and must remain valid until the next scheduler step
-    // clears them.
+    // by the scheduler and remain valid until the next scheduler step clears
+    // them. Mapping arrays may be updated in place during that interval to
+    // change routing without changing graph input shapes; do not resize/free.
     typedef struct llama_paged_batch_info {
         int32_t   n_blocks_per_seq;
         int32_t   n_seq;
