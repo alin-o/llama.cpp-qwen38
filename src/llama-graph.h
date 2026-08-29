@@ -568,6 +568,8 @@ public:
     const llama_kv_cache_iswa_context * mctx;
 };
 
+bool llm_graph_can_reuse_paged_tensor(const ggml_tensor * captured, const ggml_tensor * current);
+
 // Paged mapping values are mutable graph inputs and are refreshed by set_input() on reuse.
 // Reuse requires unchanged active token/sequence shapes, mapping tensor descriptors,
 // captured KV pool addresses and layouts, model/backend configuration, and recurrent

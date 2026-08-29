@@ -78,6 +78,35 @@ public:
     size_t offset = 0;
 };
 
+TEST(test_paged_graph_tensor_compatibility) {
+    ggml_init_params params = {
+        /*.mem_size   =*/ 2*ggml_tensor_overhead() + 1024,
+        /*.mem_buffer =*/ nullptr,
+        /*.no_alloc   =*/ false,
+    };
+    ggml_context * ctx = ggml_init(params);
+    EXPECT_TRUE(ctx != nullptr);
+    ggml_tensor * captured = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 4);
+    ggml_tensor * current = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 4);
+    EXPECT_TRUE(captured != nullptr && current != nullptr);
+    int buffer_tag = 0;
+    int storage[8] = {};
+    captured->buffer = reinterpret_cast<ggml_backend_buffer_t>(&buffer_tag);
+    current->buffer = captured->buffer;
+    captured->data = storage;
+    current->data = storage;
+    EXPECT_TRUE(llm_graph_can_reuse_paged_tensor(captured, current));
+    current->data = storage + 1;
+    EXPECT_FALSE(llm_graph_can_reuse_paged_tensor(captured, current));
+    current->data = storage;
+    current->ne[0] = 2;
+    EXPECT_FALSE(llm_graph_can_reuse_paged_tensor(captured, current));
+    current->ne[0] = captured->ne[0];
+    current->nb[1] += 4;
+    EXPECT_FALSE(llm_graph_can_reuse_paged_tensor(captured, current));
+    ggml_free(ctx);
+}
+
 // Testing block_manager main functionality
 
 TEST(test_block_manager_leak_simple) {
@@ -979,6 +1008,7 @@ TEST(test_scheduler_swaps_and_resumes_request) {
 
 int main(int /*argc*/, char ** /*argv*/) {
     fprintf(stderr, "test-paged-kv: block_manager\n");
+    RUN(test_paged_graph_tensor_compatibility);
     RUN(test_block_manager_leak_simple);
     RUN(test_block_manager_leak_repeated);
     RUN(test_block_manager_checkout_too_many);

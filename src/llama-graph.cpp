@@ -1081,7 +1081,7 @@ llm_graph_input_attn_kv_paged::llm_graph_input_attn_kv_paged(
     }
 }
 
-static bool can_reuse_paged_tensor(const ggml_tensor * old_tensor, const ggml_tensor * new_tensor) {
+bool llm_graph_can_reuse_paged_tensor(const ggml_tensor * old_tensor, const ggml_tensor * new_tensor) {
     if (!old_tensor || !new_tensor || old_tensor->type != new_tensor->type ||
         old_tensor->buffer != new_tensor->buffer || old_tensor->data != new_tensor->data) {
         return false;
@@ -1125,8 +1125,8 @@ static bool can_reuse_paged_attention(
     }
 
     for (uint32_t il = 0; il < inp->hparams.n_layer(); ++il) {
-        if (!can_reuse_paged_tensor(inp->paged_k[il], new_mctx->get_k(il)) ||
-            !can_reuse_paged_tensor(inp->paged_v[il], new_mctx->get_v(il))) {
+        if (!llm_graph_can_reuse_paged_tensor(inp->paged_k[il], new_mctx->get_k(il)) ||
+            !llm_graph_can_reuse_paged_tensor(inp->paged_v[il], new_mctx->get_v(il))) {
             return false;
         }
     }
@@ -1392,10 +1392,10 @@ bool llm_graph_input_mem_hybrid_paged::can_reuse(const llm_graph_params & params
             res &= (recurrent_r[il] == nullptr) == (new_r == nullptr) &&
                    (recurrent_s[il] == nullptr) == (new_s == nullptr);
             if (recurrent_r[il] && new_r) {
-                res &= can_reuse_paged_tensor(recurrent_r[il], new_r);
+                res &= llm_graph_can_reuse_paged_tensor(recurrent_r[il], new_r);
             }
             if (recurrent_s[il] && new_s) {
-                res &= can_reuse_paged_tensor(recurrent_s[il], new_s);
+                res &= llm_graph_can_reuse_paged_tensor(recurrent_s[il], new_s);
             }
         }
     } else {
