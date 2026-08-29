@@ -221,7 +221,7 @@ void llama_paged_scheduler_impl::swap_out_or_recompute(llama_sequence_group_ptr 
     set_waiting(std::move(group_ptr));
 }
 
-void llama_paged_scheduler_impl::activate_priority_request() {
+void llama_paged_scheduler_impl::activate_priority_request(llama_sequence_group_raw_list & candidates) {
     if (priority_request_id != -1 || running.size() <= 1) {
         return;
     }
@@ -235,6 +235,12 @@ void llama_paged_scheduler_impl::activate_priority_request() {
         it = running.erase(it);
         swap_out_or_recompute(std::move(group_ptr));
     }
+
+    llama_sequence_group * priority_group = running.front().get();
+    candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [&](llama_sequence_group * group) {
+                         return group != priority_group;
+                     }),
+                     candidates.end());
 }
 
 void llama_paged_scheduler_impl::evict() {
@@ -294,7 +300,7 @@ void llama_paged_scheduler_impl::process_running_list(llama_sequence_group_raw_l
             bool success = kv_cache_manager->allocate(1, *group);  // decode phase
             if (!success) {
                 if (running.size() > 1) {
-                    activate_priority_request();
+                    activate_priority_request(candidates);
 
                     if (group->request_id != priority_request_id) {
                         it = running.end();
