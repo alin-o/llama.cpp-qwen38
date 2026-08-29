@@ -196,6 +196,8 @@ static path_result run_paged(const std::string & model_path,
     bool reused_after_page_change = false;
     int32_t previous_block = -1;
     bool crossed_page_boundary = false;
+    bool forced_page_remap = false;
+    bool reused_after_forced_remap = false;
 #if defined(GGML_USE_CUDA)
     bool tiled_prefill_seen = false;
     bool decode_no_launch_checked = false;
@@ -206,12 +208,22 @@ static path_result run_paged(const std::string & model_path,
         if (batch.n_tokens == 0) {
             break;
         }
+        const llama_paged_batch_info * info_before_decode = llama_paged_scheduler_get_batch_info(sched);
+        bool remapped_this_step = false;
+        EXPECT_TRUE(info_before_decode != nullptr && info_before_decode->n_seq == 1);
+        if (!forced_page_remap && result.tokens.size() >= 2 && info_before_decode->n_blocks_per_seq >= 2) {
+            auto * block_table = const_cast<int32_t *>(info_before_decode->block_table);
+            block_table[1] = block_table[0];
+            forced_page_remap = true;
+            remapped_this_step = true;
+        }
 
         EXPECT_TRUE(llama_decode(ctx, batch) == 0);
         llama_synchronize(ctx);
         const llama_perf_context_data perf_step = llama_perf_context(ctx);
         const bool reused_step = perf_step.n_reused > previous_reused;
         previous_reused = perf_step.n_reused;
+        reused_after_forced_remap |= remapped_this_step && reused_step;
 #if defined(GGML_USE_CUDA)
         if (result.tokens.empty()) {
             const int head_dim = llama_model_n_embd_head_v(model);
@@ -284,11 +296,13 @@ static path_result run_paged(const std::string & model_path,
     EXPECT_TRUE(result.tokens.size() < 2 || block_table_shape_changed || block_table_value_changed);
     EXPECT_TRUE(result.tokens.size() < 2 || page_index_changed);
     EXPECT_TRUE(result.tokens.size() < 2 || crossed_page_boundary);
+    EXPECT_TRUE(result.tokens.size() < 2 || forced_page_remap);
     if (!graph_reuse_disable && result.tokens.size() >= 2) {
         EXPECT_TRUE(reused_after_write_change);
         EXPECT_TRUE(reused_after_page_change);
         EXPECT_TRUE(!block_table_shape_changed || rebuilt_after_block_shape_change);
         EXPECT_TRUE(!block_table_value_changed || reused_after_block_value_change);
+        EXPECT_TRUE(reused_after_forced_remap);
     }
     const llama_perf_context_data perf = llama_perf_context(ctx);
     fprintf(stderr, "  paged graph reuse: n_reused=%d\n", perf.n_reused);
