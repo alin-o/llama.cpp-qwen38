@@ -224,6 +224,9 @@ static path_result run_paged(const std::string & model_path,
         const bool reused_step = perf_step.n_reused > previous_reused;
         previous_reused = perf_step.n_reused;
         reused_after_forced_remap |= remapped_this_step && reused_step;
+        if (remapped_this_step) {
+            fprintf(stderr, "  forced page remap replay: reused=%d\n", reused_step);
+        }
 #if defined(GGML_USE_CUDA)
         if (result.tokens.empty()) {
             const int head_dim = llama_model_n_embd_head_v(model);
