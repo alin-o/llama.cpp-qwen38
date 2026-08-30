@@ -1,21 +1,27 @@
 # KVU versus KVP: Qwen3.8 27B and Tiel MoE
 
-Date: 2026-08-28 UTC
+Date: 2026-08-28 UTC; updated 2026-08-30 UTC
 
 ## Performance results
 
-The table compares native, type-matched caches: KVU q8_0 versus KVP q8_0, KVU Turbo3 versus KVP Turbo3, and KVU Turbo4 versus KVP Turbo4. Turbo3 and Turbo4 are not mapped to q8_0.
+The table compares native, type-matched caches: KVU q8_0 versus KVP q8_0, KVU Turbo3 versus KVP Turbo3, and KVU Turbo4 versus KVP Turbo4. Turbo3 and Turbo4 are not mapped to q8_0. The GSQ-RCO IQ3_XXS weight quantization was added on 2026-08-30 using the same benchmark binary and method.
 
 Workload: RTX 4090, full CUDA offload, one sequence, 1,024 prompt tokens, 8 decode tokens at cache depth 1,024, batch and ubatch 1,024. Results are steady-state medians of three measured samples after warmup.
 
 | Model | KV type | FA | KVU prefill tok/s | KVP prefill tok/s | KVP/KVU | KVU decode tok/s | KVP decode tok/s | KVP/KVU | Status |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---|
-| Qwen3.8 27B | q8_0 | on | 3070.76 | 2713.54 | 88.4% | 53.12 | 29.81 | 56.1% | measured |
-| Qwen3.8 27B | Turbo3 | on | 2970.02 | 2645.76 | 89.1% | 51.46 | 27.95 | 54.3% | measured |
-| Qwen3.8 27B | Turbo4 | on | 3001.50 | 2576.96 | 85.9% | 50.95 | 27.23 | 53.4% | measured |
-| Qwen3.8 27B | q8_0 | off | - | - | - | - | - | - | unsupported |
-| Qwen3.8 27B | Turbo3 | off | - | - | - | - | - | - | unsupported |
-| Qwen3.8 27B | Turbo4 | off | - | - | - | - | - | - | unsupported |
+| Qwen3.8 27B Q4_K_S | q8_0 | on | 3070.76 | 2713.54 | 88.4% | 53.12 | 29.81 | 56.1% | measured |
+| Qwen3.8 27B Q4_K_S | Turbo3 | on | 2970.02 | 2645.76 | 89.1% | 51.46 | 27.95 | 54.3% | measured |
+| Qwen3.8 27B Q4_K_S | Turbo4 | on | 3001.50 | 2576.96 | 85.9% | 50.95 | 27.23 | 53.4% | measured |
+| Qwen3.8 27B Q4_K_S | q8_0 | off | - | - | - | - | - | - | unsupported |
+| Qwen3.8 27B Q4_K_S | Turbo3 | off | - | - | - | - | - | - | unsupported |
+| Qwen3.8 27B Q4_K_S | Turbo4 | off | - | - | - | - | - | - | unsupported |
+| Qwen3.8 27B GSQ-RCO IQ3_XXS | q8_0 | on | 2814.10 | 2559.82 | 91.0% | 70.08 | 36.62 | 52.3% | measured |
+| Qwen3.8 27B GSQ-RCO IQ3_XXS | Turbo3 | on | 2800.37 | 2483.80 | 88.7% | 67.89 | 33.29 | 49.0% | measured |
+| Qwen3.8 27B GSQ-RCO IQ3_XXS | Turbo4 | on | 2792.05 | 2435.39 | 87.2% | 67.30 | 32.90 | 48.9% | measured |
+| Qwen3.8 27B GSQ-RCO IQ3_XXS | q8_0 | off | - | - | - | - | - | - | unsupported |
+| Qwen3.8 27B GSQ-RCO IQ3_XXS | Turbo3 | off | - | - | - | - | - | - | unsupported |
+| Qwen3.8 27B GSQ-RCO IQ3_XXS | Turbo4 | off | - | - | - | - | - | - | unsupported |
 | Tiel 35B-A3B MoE | q8_0 | on | 8989.47 | 9177.27 | 102.1% | 188.95 | 67.45 | 35.7% | measured |
 | Tiel 35B-A3B MoE | Turbo3 | on | 9812.10 | 8776.74 | 89.4% | 177.43 | 59.63 | 33.6% | measured |
 | Tiel 35B-A3B MoE | Turbo4 | on | 9789.25 | 8554.93 | 87.4% | 174.35 | 59.22 | 34.0% | measured |
@@ -25,7 +31,13 @@ Workload: RTX 4090, full CUDA offload, one sequence, 1,024 prompt tokens, 8 deco
 
 FA-off is unsupported for all rows because K and V use the same quantized format. This tree rejects every quantized V cache unless Flash Attention is enabled. No substitute V format was used.
 
+### IQ3_XXS weight-quantization comparison
+
+Against the prior Q4_K_S Qwen weights, GSQ-RCO IQ3_XXS reached 91.6-94.3% of KVU prefill speed and 93.9-94.5% of KVP prefill speed. Decode improved to 131.9-132.1% of Q4_K_S for KVU and 119.1-122.8% for KVP. This comparison changes the model weight quantization only; cache types and benchmark settings remain type-matched and identical.
+
 ## Quality results and interpretation
+
+The quality results in this section apply to the original Q4_K_S Qwen run. The 2026-08-30 IQ3_XXS addition is a performance benchmark only; no IQ3_XXS quality-equivalence result is claimed.
 
 The E2E check compares each KVP format with KVU using the same format. For the first 16 forced-token steps, its strict per-step rule requires both:
 
@@ -68,6 +80,9 @@ To decide quality acceptance, the next useful check is a non-fail-fast evaluatio
 - Rerun script: `native-kv-comparison-20260828/run.sh`
 - Raw benchmark, FA-off, and E2E logs: `native-kv-comparison-20260828/raw/`
 - Detailed implementation and verification notes: `native-kv-comparison-20260828/REPORT.md`
+- IQ3_XXS machine-readable results: `gsq-rco-iq3-xxs-benchmark-20260830/results.csv`
+- IQ3_XXS rerun script and raw logs: `gsq-rco-iq3-xxs-benchmark-20260830/run.sh`, `gsq-rco-iq3-xxs-benchmark-20260830/raw/`
+- IQ3_XXS detailed benchmark report: `gsq-rco-iq3-xxs-benchmark-20260830/REPORT.md`
 
 The paged allocation logs show different bytes per block for q8_0, Turbo3, and Turbo4, independently confirming native storage:
 

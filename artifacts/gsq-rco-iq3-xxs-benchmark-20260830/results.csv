@@ -1,0 +1,13 @@
+model,kv_type,path,fa,prompt_tokens,decode_tokens,pp_tok_s,tg_tok_s,status,raw_log
+qwen38-27b-gsq-rco-iq3_xxs,q8_0,kvu,on,1024,8,2814.1,70.0755,ok,raw/qwen38-27b-gsq-rco-iq3_xxs-q8_0-kvu-fa-on-pp.json
+qwen38-27b-gsq-rco-iq3_xxs,q8_0,kvp,on,1024,8,2559.82,36.62,ok,raw/qwen38-27b-gsq-rco-iq3_xxs-q8_0-kvp-fa-on.log
+qwen38-27b-gsq-rco-iq3_xxs,q8_0,kvu,off,1024,8,,,unsupported_quantized_v_requires_fa,
+qwen38-27b-gsq-rco-iq3_xxs,q8_0,kvp,off,1024,8,,,unsupported_quantized_v_requires_fa,
+qwen38-27b-gsq-rco-iq3_xxs,turbo3,kvu,on,1024,8,2800.37,67.8857,ok,raw/qwen38-27b-gsq-rco-iq3_xxs-turbo3-kvu-fa-on-pp.json
+qwen38-27b-gsq-rco-iq3_xxs,turbo3,kvp,on,1024,8,2483.80,33.29,ok,raw/qwen38-27b-gsq-rco-iq3_xxs-turbo3-kvp-fa-on.log
+qwen38-27b-gsq-rco-iq3_xxs,turbo3,kvu,off,1024,8,,,unsupported_quantized_v_requires_fa,
+qwen38-27b-gsq-rco-iq3_xxs,turbo3,kvp,off,1024,8,,,unsupported_quantized_v_requires_fa,
+qwen38-27b-gsq-rco-iq3_xxs,turbo4,kvu,on,1024,8,2792.05,67.3012,ok,raw/qwen38-27b-gsq-rco-iq3_xxs-turbo4-kvu-fa-on-pp.json
+qwen38-27b-gsq-rco-iq3_xxs,turbo4,kvp,on,1024,8,2435.39,32.90,ok,raw/qwen38-27b-gsq-rco-iq3_xxs-turbo4-kvp-fa-on.log
+qwen38-27b-gsq-rco-iq3_xxs,turbo4,kvu,off,1024,8,,,unsupported_quantized_v_requires_fa,
+qwen38-27b-gsq-rco-iq3_xxs,turbo4,kvp,off,1024,8,,,unsupported_quantized_v_requires_fa,
