@@ -41,7 +41,7 @@
 constexpr int HTTP_POLLING_SECONDS = 1;
 
 static bool server_mtp_diag_enabled() {
-    return std::getenv("LLAMA_SPEC_DIAG_LEGACY_BATCH") != nullptr;
+    return std::getenv("LLAMA_SPEC_DIAG") != nullptr;
 }
 
 static std::string server_mtp_diag_tokens(const llama_tokens & tokens) {
@@ -1555,12 +1555,9 @@ private:
             }
         }
 
-        spec_verify_one = spec && spec_mtp && !server_mtp_diag_enabled() &&
+        spec_verify_one = spec && spec_mtp &&
                 (llama_model_is_recurrent(llama_get_model(ctx_tgt)) ||
                  llama_model_is_hybrid(llama_get_model(ctx_tgt)));
-        if (spec && spec_mtp && server_mtp_diag_enabled()) {
-            SRV_WRN("%s", "legacy recurrent batch verification enabled for diagnostics\n");
-        }
 
         if (ctx_dft) {
             ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft);

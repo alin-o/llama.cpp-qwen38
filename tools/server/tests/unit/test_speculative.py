@@ -54,12 +54,15 @@ def test_with_and_without_draft_split_batch():
     assert tokens_no_draft == tokens_draft
 
 
-def test_paged_mtp_matches_target_greedy():
+def test_paged_mtp_matches_target_greedy(monkeypatch):
     global server
     model = os.environ.get("LLAMA_SERVER_PAGED_MODEL")
     model_draft = os.environ.get("LLAMA_SERVER_MTP_MODEL")
     if not model or not model_draft:
         pytest.skip("set LLAMA_SERVER_PAGED_MODEL and LLAMA_SERVER_MTP_MODEL to run paged MTP equivalence")
+
+    # This obsolete diagnostic setting must not change verification semantics.
+    monkeypatch.setenv("LLAMA_SPEC_DIAG_LEGACY_BATCH", "1")
 
     prompts = [
         "Explain to a curious high-school student why the sky is blue during the day but often red or orange near sunset. Include the roles of wavelength, scattering, and the longer path through the atmosphere.",
