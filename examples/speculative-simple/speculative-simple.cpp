@@ -6,18 +6,66 @@
 #include "llama.h"
 
 #include <algorithm>
+#include <array>
 #include <clocale>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cinttypes>
+#include <limits>
 #include <string>
 #include <vector>
 #include <utility>
+
+static std::string diag_tokens(const llama_tokens & tokens) {
+    std::string out = "[";
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        out += string_format("%s%d", i ? "," : "", tokens[i]);
+    }
+    return out + "]";
+}
+
+static std::string diag_batch_values(const llama_batch & batch, const llama_token * values) {
+    std::string out = "[";
+    for (int32_t i = 0; i < batch.n_tokens; ++i) {
+        out += string_format("%s%d", i ? "," : "", values[i]);
+    }
+    return out + "]";
+}
+
+static std::string diag_top_logits(llama_context * ctx, int32_t idx) {
+    constexpr size_t n_top = 5;
+    std::array<std::pair<float, llama_token>, n_top> top;
+    top.fill({ -std::numeric_limits<float>::infinity(), LLAMA_TOKEN_NULL });
+
+    const float * logits = llama_get_logits_ith(ctx, idx);
+    const int32_t n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(llama_get_model(ctx)));
+    for (llama_token token{}; token < n_vocab; ++token) {
+        const float logit = logits[token];
+        for (size_t pos{}; pos < n_top; ++pos) {
+            if (logit <= top[pos].first) {
+                continue;
+            }
+            for (size_t move = n_top - 1; move > pos; --move) {
+                top[move] = top[move - 1];
+            }
+            top[pos] = { logit, token };
+            break;
+        }
+    }
+
+    std::string out = "[";
+    for (size_t i{}; i < n_top; ++i) {
+        out += string_format("%s%d:%.9g", i ? "," : "", top[i].second, top[i].first);
+    }
+    return out + "]";
+}
 
 int main(int argc, char ** argv) {
     std::setlocale(LC_NUMERIC, "C");
 
     common_params params;
+    const bool diag_target_only = std::getenv("LLAMA_SPEC_DIAG_TARGET_ONLY") != nullptr;
 
     common_init();
 
@@ -98,6 +146,7 @@ int main(int argc, char ** argv) {
     int n_predict = 0;
     int n_drafted = 0;
     int n_accept  = 0;
+    int verify_step{};
 
     // used to determine end of generation
     bool has_eos = false;
@@ -194,6 +243,9 @@ int main(int argc, char ** argv) {
                 /* .result     = */ &draft, // output
             };
             common_speculative_draft(spec);
+            if (diag_target_only) {
+                draft.clear();
+            }
 
             // save a checkpoint of the target context before evaluating the draft
             // this allows us to restore the state if partial draft acceptance occurs
@@ -222,15 +274,32 @@ int main(int argc, char ** argv) {
         common_batch_clear(batch_tgt);
         common_batch_add  (batch_tgt, id_last, n_past++, { seq_id }, true);
 
+        const int step = verify_step++;
+        const llama_token sampler_before = n_predict > 0 ? common_sampler_last(smpl.get()) : LLAMA_TOKEN_NULL;
         // evaluate the target model on [id_last, draft0, draft1, ..., draftN-1]
         {
             for (size_t i = 0; i < draft.size(); ++i) {
                 common_batch_add(batch_tgt, draft[i], n_past + i, { seq_id }, true);
             }
 
+            const llama_pos target_pos_before = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), seq_id);
+            const llama_pos draft_pos_before = ctx_dft ? llama_memory_seq_pos_max(llama_get_memory(ctx_dft), seq_id) : -1;
+            LOG_DBG("SPEC_DIAG phase=before step=%d seq=%d sampler_last=%d target_pos=%d draft_pos=%d inputs=%s batch_pos=%s draft=%s\n",
+                    step, seq_id, sampler_before, target_pos_before, draft_pos_before,
+                    diag_batch_values(batch_tgt, batch_tgt.token).c_str(),
+                    diag_batch_values(batch_tgt, batch_tgt.pos).c_str(), diag_tokens(draft).c_str());
+
             //LOG_DBG("target batch: %s\n", string_from(ctx_tgt, batch_tgt).c_str());
 
             llama_decode(ctx_tgt, batch_tgt);
+
+            for (int32_t row{}; row < batch_tgt.n_tokens; ++row) {
+                LOG_DBG("SPEC_DIAG phase=logits step=%d seq=%d row=%d pos=%d input=%d top=%s\n",
+                        step, seq_id, row, batch_tgt.pos[row], batch_tgt.token[row],
+                        diag_top_logits(ctx_tgt, row).c_str());
+            }
+            LOG_DBG("SPEC_DIAG phase=target_decode step=%d seq=%d target_pos=%d\n",
+                    step, seq_id, llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), seq_id));
         }
 
         // feed the batch to the speculative implementation(s) - this drives the draft model, MTP, Eagle3, etc.
@@ -238,6 +307,8 @@ int main(int argc, char ** argv) {
             LOG_ERR("%s", "failed to process speculative batch\n");
             break;
         }
+        LOG_DBG("SPEC_DIAG phase=draft_process step=%d seq=%d draft_pos=%d\n",
+                step, seq_id, ctx_dft ? llama_memory_seq_pos_max(llama_get_memory(ctx_dft), seq_id) : -1);
 
         // only save the sampler sampler state if we use checkpoints
         common_sampler_ptr smpl_save;
@@ -256,6 +327,13 @@ int main(int argc, char ** argv) {
         // disagrees with the draft
         //
         auto ids = common_sampler_sample_and_accept_n(smpl.get(), ctx_tgt, draft);
+
+        const size_t accepted_count = ids.size() - 1;
+        const llama_token rejected = accepted_count < draft.size() ? draft[accepted_count] : LLAMA_TOKEN_NULL;
+        LOG_DBG("SPEC_DIAG phase=sample step=%d seq=%d sampler_before=%d sampler_after=%d accepted=%zu rejected=%d ids=%s target_pos=%d draft_pos=%d\n",
+                step, seq_id, sampler_before, common_sampler_last(smpl.get()), accepted_count, rejected,
+                diag_tokens(ids).c_str(), llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), seq_id),
+                ctx_dft ? llama_memory_seq_pos_max(llama_get_memory(ctx_dft), seq_id) : -1);
 
         //LOG_DBG("ids: %s\n", string_from(ctx_tgt, ids).c_str());
 
@@ -285,6 +363,11 @@ int main(int argc, char ** argv) {
             smpl = std::move(smpl_save);
 
             n_past = (int) prompt_tgt.size();
+
+            LOG_DBG("SPEC_DIAG phase=rollback step=%d seq=%d sampler_last=%d target_pos=%d draft_pos=%d\n",
+                    step, seq_id, sampler_before,
+                    llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), seq_id),
+                    ctx_dft ? llama_memory_seq_pos_max(llama_get_memory(ctx_dft), seq_id) : -1);
 
             continue;
         }
@@ -335,6 +418,11 @@ int main(int argc, char ** argv) {
                 llama_memory_seq_rm(llama_get_memory(ctx_dft), seq_id, n_past, -1);
             }
         }
+
+        LOG_DBG("SPEC_DIAG phase=commit step=%d seq=%d sampler_last=%d target_pos=%d draft_pos=%d\n",
+                step, seq_id, common_sampler_last(smpl.get()),
+                llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), seq_id),
+                ctx_dft ? llama_memory_seq_pos_max(llama_get_memory(ctx_dft), seq_id) : -1);
 
         if ((params.n_predict >= 0 && n_predict > params.n_predict) || has_eos) {
             break;

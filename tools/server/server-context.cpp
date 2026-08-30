@@ -18,9 +18,12 @@
 #include "mtmd-helper.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cinttypes>
+#include <cstdlib>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <filesystem>
 #include <utility>
@@ -36,6 +39,54 @@
 #endif
 
 constexpr int HTTP_POLLING_SECONDS = 1;
+
+static bool server_mtp_diag_enabled() {
+    return std::getenv("LLAMA_SPEC_DIAG_LEGACY_BATCH") != nullptr;
+}
+
+static std::string server_mtp_diag_tokens(const llama_tokens & tokens) {
+    std::string out = "[";
+    for (size_t i{}; i < tokens.size(); ++i) {
+        out += string_format("%s%d", i ? "," : "", tokens[i]);
+    }
+    return out + "]";
+}
+
+static std::string server_mtp_diag_batch(const llama_batch & batch, const int32_t * values) {
+    std::string out = "[";
+    for (int32_t i{}; i < batch.n_tokens; ++i) {
+        out += string_format("%s%d", i ? "," : "", values[i]);
+    }
+    return out + "]";
+}
+
+static std::string server_mtp_diag_top_logits(llama_context * ctx, int32_t idx) {
+    constexpr size_t n_top = 5;
+    std::array<std::pair<float, llama_token>, n_top> top;
+    top.fill({ -std::numeric_limits<float>::infinity(), LLAMA_TOKEN_NULL });
+
+    const float * logits = llama_get_logits_ith(ctx, idx);
+    const int32_t n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(llama_get_model(ctx)));
+    for (llama_token token{}; token < n_vocab; ++token) {
+        const float logit = logits[token];
+        for (size_t pos{}; pos < n_top; ++pos) {
+            if (logit <= top[pos].first) {
+                continue;
+            }
+            for (size_t move = n_top - 1; move > pos; --move) {
+                top[move] = top[move - 1];
+            }
+            top[pos] = { logit, token };
+            break;
+        }
+    }
+
+    std::string out = "[";
+    for (size_t i{}; i < n_top; ++i) {
+        out += string_format("%s%d:%.9g", i ? "," : "", top[i].second, top[i].first);
+    }
+    return out + "]";
+}
 
 static common_speculative_output_limits server_output_limits(const common_params & params) {
     if (params.embedding ||
@@ -950,12 +1001,46 @@ private:
             }
         }
 
+        if (server_mtp_diag_enabled()) {
+            for (int i{}; i < info->n_seq; ++i) {
+                const int offset = info->batch_offsets[i];
+                server_slot & slot = slots[paged_batch.seq_id[offset][0]];
+                if (slot.state != SLOT_STATE_GENERATING || slot.spec_draft.empty()) {
+                    continue;
+                }
+                SRV_DBG("SPEC_DIAG phase=before seq=%d sampler_last=%d target_pos=%d draft_pos=%d inputs=%s batch_pos=%s draft=%s\n",
+                        slot.id, common_sampler_last(slot.smpl.get()),
+                        llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id),
+                        ctx_dft ? llama_memory_seq_pos_max(llama_get_memory(ctx_dft), slot.id) : -1,
+                        server_mtp_diag_batch(paged_batch, paged_batch.token).c_str(),
+                        server_mtp_diag_batch(paged_batch, paged_batch.pos).c_str(),
+                        server_mtp_diag_tokens(slot.spec_draft).c_str());
+            }
+        }
+
         if (llama_decode(ctx_tgt, paged_batch) != 0) {
             throw std::runtime_error("paged scheduler decode failed");
         }
         llama_synchronize(ctx_tgt);
         if (spec && !common_speculative_process(spec.get(), paged_batch)) {
             throw std::runtime_error("failed to process paged speculative batch");
+        }
+
+        if (server_mtp_diag_enabled()) {
+            for (int i{}; i < info->n_seq; ++i) {
+                const int offset = info->batch_offsets[i];
+                server_slot & slot = slots[paged_batch.seq_id[offset][0]];
+                for (int idx : slot.spec_i_batch) {
+                    SRV_DBG("SPEC_DIAG phase=logits seq=%d row=%d pos=%d input=%d top=%s\n",
+                            slot.id, idx, paged_batch.pos[idx], paged_batch.token[idx],
+                            server_mtp_diag_top_logits(ctx_tgt, idx).c_str());
+                }
+                if (!slot.spec_i_batch.empty()) {
+                    SRV_DBG("SPEC_DIAG phase=decode seq=%d target_pos=%d draft_pos=%d\n",
+                            slot.id, llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id),
+                            ctx_dft ? llama_memory_seq_pos_max(llama_get_memory(ctx_dft), slot.id) : -1);
+                }
+            }
         }
 
         std::vector<llama_token> sampled_tokens(info->n_seq);
@@ -980,7 +1065,7 @@ private:
                 }
             }
 
-            if (!is_prefill && !slot.spec_draft.empty()) {
+            if (!is_prefill && !slot.spec_draft.empty() && spec_verify_one) {
                 GGML_ASSERT(slot.spec_i_batch.size() == 1);
                 const llama_token id = common_sampler_sample(slot.smpl.get(), ctx_tgt, slot.spec_i_batch.front());
                 common_sampler_accept(slot.smpl.get(), id, true);
@@ -1008,13 +1093,68 @@ private:
                 if (!process_token(result, slot)) {
                     stop_flags[i] = 1;
                 }
+            } else if (!is_prefill && !slot.spec_draft.empty()) {
+                const llama_tokens draft_before = slot.spec_draft;
+                const llama_token sampler_before = common_sampler_last(slot.smpl.get());
+                auto accepted = common_sampler_sample_and_accept_n(
+                        slot.smpl.get(), ctx_tgt, slot.spec_i_batch, slot.spec_draft);
+                slot.spec_i_batch.clear();
+                if (accepted.empty()) {
+                    throw std::runtime_error("paged speculative sampler accepted no tokens");
+                }
+
+                const size_t n_accepted = accepted.size() - 1;
+                const llama_token rejected = n_accepted < draft_before.size() ? draft_before[n_accepted] : LLAMA_TOKEN_NULL;
+                if (server_mtp_diag_enabled()) {
+                    SRV_DBG("SPEC_DIAG phase=sample seq=%d sampler_before=%d sampler_after=%d accepted=%zu rejected=%d ids=%s target_pos=%d draft_pos=%d\n",
+                            slot.id, sampler_before, common_sampler_last(slot.smpl.get()), n_accepted, rejected,
+                            server_mtp_diag_tokens(accepted).c_str(),
+                            llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id),
+                            ctx_dft ? llama_memory_seq_pos_max(llama_get_memory(ctx_dft), slot.id) : -1);
+                }
+
+                accepted_counts[i] = accepted.size();
+                sampled_tokens[i] = accepted.back();
+                common_speculative_accept(spec.get(), slot.id, n_accepted);
+                slot.stats.n_draft_accepted += n_accepted;
+                slot.stats.n_draft_verif_steps++;
+                slot.prompt.tokens.push_back(paged_batch.token[offset]);
+                slot.prompt.tokens.insert({accepted.begin(), accepted.end() - 1});
+                if (ctx_dft && !llama_memory_seq_rm(
+                            llama_get_memory(ctx_dft), slot.id, slot.prompt.tokens.pos_next(), -1)) {
+                    throw std::runtime_error("failed to roll back rejected paged draft tokens");
+                }
+                slot.spec_draft.clear();
+
+                for (llama_token id : accepted) {
+                    completion_token_output result;
+                    result.tok = id;
+                    result.text_to_send = common_token_to_piece(ctx_tgt, id, params_base.special);
+                    result.prob = 1.0f;
+                    slot.stats.n_gen++;
+                    if (!process_token(result, slot)) {
+                        stop_flags[i] = 1;
+                        break;
+                    }
+                }
             } else {
                 if (!is_prefill) {
                     slot.prompt.tokens.push_back(paged_batch.token[offset]);
                 }
                 const int token_idx = offset + info->batch_lens[i] - 1;
+                if (server_mtp_diag_enabled()) {
+                    const llama_token sampler_before = slot.stats.n_gen > 0 ? common_sampler_last(slot.smpl.get()) : LLAMA_TOKEN_NULL;
+                    SRV_DBG("SPEC_DIAG phase=control_logits seq=%d row=%d pos=%d input=%d sampler_before=%d target_pos=%d top=%s\n",
+                            slot.id, token_idx, paged_batch.pos[token_idx], paged_batch.token[token_idx], sampler_before,
+                            llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id),
+                            server_mtp_diag_top_logits(ctx_tgt, token_idx).c_str());
+                }
                 const llama_token id = common_sampler_sample(slot.smpl.get(), ctx_tgt, token_idx);
                 common_sampler_accept(slot.smpl.get(), id, true);
+                if (server_mtp_diag_enabled()) {
+                    SRV_DBG("SPEC_DIAG phase=control_sample seq=%d selected=%d sampler_after=%d\n",
+                            slot.id, id, common_sampler_last(slot.smpl.get()));
+                }
                 completion_token_output result;
                 result.tok = id;
                 result.text_to_send = common_token_to_piece(ctx_tgt, id, params_base.special);
@@ -1037,6 +1177,16 @@ private:
         }
         llama_paged_scheduler_update_ex(
                 paged_scheduler.get(), &paged_batch, sampled_tokens.data(), accepted_counts.data(), stop_flags.data());
+        if (server_mtp_diag_enabled()) {
+            for (int i{}; i < info->n_seq; ++i) {
+                const int offset = info->batch_offsets[i];
+                server_slot & slot = slots[paged_batch.seq_id[offset][0]];
+                SRV_DBG("SPEC_DIAG phase=commit seq=%d sampler_last=%d target_pos=%d draft_pos=%d\n",
+                        slot.id, common_sampler_last(slot.smpl.get()),
+                        llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id),
+                        ctx_dft ? llama_memory_seq_pos_max(llama_get_memory(ctx_dft), slot.id) : -1);
+            }
+        }
         for (int id_slot : finished_slots) {
             llama_paged_scheduler_remove_request(paged_scheduler.get(), id_slot);
             slots[id_slot].release();
@@ -1405,9 +1555,12 @@ private:
             }
         }
 
-        spec_verify_one = spec && spec_mtp &&
+        spec_verify_one = spec && spec_mtp && !server_mtp_diag_enabled() &&
                 (llama_model_is_recurrent(llama_get_model(ctx_tgt)) ||
                  llama_model_is_hybrid(llama_get_model(ctx_tgt)));
+        if (spec && spec_mtp && server_mtp_diag_enabled()) {
+            SRV_WRN("%s", "legacy recurrent batch verification enabled for diagnostics\n");
+        }
 
         if (ctx_dft) {
             ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft);
