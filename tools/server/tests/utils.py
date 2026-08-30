@@ -708,6 +708,7 @@ def download_file(url: str, output_file_path: str | None = None) -> str:
     """
     file_name = url.split('/').pop()
     output_file = f'./tmp/{file_name}' if output_file_path is None else output_file_path
+    os.makedirs(os.path.dirname(output_file) or ".", exist_ok=True)
     if not os.path.exists(output_file):
         print(f"Downloading {url} to {output_file}")
         wget.download(url, out=output_file)

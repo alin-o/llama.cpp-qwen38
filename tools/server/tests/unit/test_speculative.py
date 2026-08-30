@@ -54,6 +54,70 @@ def test_with_and_without_draft_split_batch():
     assert tokens_no_draft == tokens_draft
 
 
+def test_paged_mtp_matches_target_greedy():
+    global server
+    model = os.environ.get("LLAMA_SERVER_PAGED_MODEL")
+    model_draft = os.environ.get("LLAMA_SERVER_MTP_MODEL")
+    if not model or not model_draft:
+        pytest.skip("set LLAMA_SERVER_PAGED_MODEL and LLAMA_SERVER_MTP_MODEL to run paged MTP equivalence")
+
+    prompts = [
+        "Continue the following passage in a factual, concise style:\n\nIn the late eighteenth century, improvements in steam engines began to change manufacturing and transport. Early engines had mainly pumped water from mines, but engineers gradually made them smaller, more efficient, and suitable for rotary motion. This allowed factories to",
+        "A water tank is initially 30 percent full. A pump adds 18 liters per minute while a leak removes 3 liters per minute. After 14 minutes the tank is 65 percent full. Find the tank's total capacity and show the calculation step by step.",
+    ]
+    request = {
+        "temperature": 0.0,
+        "top_k": 1,
+        "seed": 1234,
+        "n_predict": 128,
+        "ignore_eos": True,
+        "cache_prompt": False,
+        "return_tokens": True,
+    }
+
+    def configure(model_draft_path):
+        global server
+        server = ServerPreset.stories15m_moe()
+        server.model_file = model
+        server.model_hf_repo = None
+        server.model_hf_file = None
+        server.model_draft = model_draft_path
+        server.spec_type = "draft-mtp" if model_draft_path else None
+        server.spec_draft_n_min = 1
+        server.spec_draft_n_max = int(os.environ.get("LLAMA_SERVER_MTP_N_MAX", "3"))
+        server.n_gpu_layer = 99
+        server.n_batch = 1024
+        server.n_ubatch = 1024
+        server.n_slots = 1
+        server.server_port = 18089
+        server.ctk = os.environ.get("LLAMA_SERVER_MTP_KV_TYPE", "turbo4")
+        server.ctv = server.ctk
+        server.fa = "on"
+        server.kv_paged = True
+
+    def generate_all():
+        responses = [
+            server.make_request("POST", "/completion", data={**request, "prompt": prompt})
+            for prompt in prompts
+        ]
+        for res in responses:
+            assert res.status_code == 200
+            assert len(res.body["tokens"]) == request["n_predict"]
+        return responses
+
+    configure(None)
+    server.start(timeout_seconds=180)
+    expected = [res.body["tokens"] for res in generate_all()]
+    server.stop()
+
+    configure(model_draft)
+    server.start(timeout_seconds=180)
+    responses = generate_all()
+    for res, tokens_target in zip(responses, expected):
+        assert res.body["timings"]["draft_n"] > 0
+        assert res.body["tokens"] == tokens_target
+
+
 def test_different_draft_min_draft_max():
     global server
     test_values = [
