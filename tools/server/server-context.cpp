@@ -4011,12 +4011,16 @@ private:
 
             GGML_ASSERT(n_draft > 0);
 
-            // verify and try to accept the draft
             {
+                std::vector<int> spec_i_batch = slot.spec_i_batch;
+                for (int & idx : spec_i_batch) {
+                    idx -= off;
+                }
+
                 common_sampler_ptr smpl_save(common_sampler_clone(slot.smpl.get()));
 
-                GGML_ASSERT(slot.spec_i_batch.size() == n_draft + 1);
-                auto accepted = common_sampler_sample_and_accept_n(slot.smpl.get(), slot.ctx_tgt, slot.spec_i_batch, slot.spec_draft);
+                GGML_ASSERT(spec_i_batch.size() == n_draft + 1);
+                auto accepted = common_sampler_sample_and_accept_n(slot.smpl.get(), slot.ctx_tgt, spec_i_batch, slot.spec_draft);
                 slot.spec_i_batch.clear();
 
                 GGML_ASSERT(accepted.size() >= 1);

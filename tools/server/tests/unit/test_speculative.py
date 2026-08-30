@@ -23,27 +23,28 @@ def fixture_create_server():
     return create_server()
 
 
-def test_with_and_without_draft():
+def test_with_and_without_draft_split_batch():
     global server
     request = {
         "prompt": "I believe the meaning of life is",
-        "temperature": 0.2,
-        "top_k": 5,
+        "temperature": 0.0,
+        "top_k": 1,
         "seed": 4242,
         "n_predict": 16,
         "return_tokens": True,
     }
 
-    server.model_draft = None  # disable draft model
+    server.model_draft = None
     server.spec_type = None
+    server.n_batch = 2
     server.start()
     res = server.make_request("POST", "/completion", data=request)
     assert res.status_code == 200
     tokens_no_draft = res.body["tokens"]
     server.stop()
 
-    # create new server with draft model
     create_server()
+    server.n_batch = 2
     server.start()
     res = server.make_request("POST", "/completion", data=request)
     assert res.status_code == 200

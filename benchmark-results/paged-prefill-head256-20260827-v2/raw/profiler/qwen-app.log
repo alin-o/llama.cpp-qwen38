@@ -1,55 +1,0 @@
-ggml_cuda_init: found 1 CUDA devices (Total VRAM: 24082 MiB):
-  Device 0: NVIDIA GeForce RTX 4090, compute capability 8.9, VMM: yes, VRAM: 24082 MiB
-0.00.699.734 W model has unused tensor blk.64.attn_norm.weight (size = 20480 bytes) -- ignoring
-0.00.699.740 W model has unused tensor blk.64.post_attention_norm.weight (size = 20480 bytes) -- ignoring
-0.00.699.859 W model has unused tensor blk.64.attn_q.weight (size = 51609600 bytes) -- ignoring
-0.00.699.862 W model has unused tensor blk.64.attn_k.weight (size = 5570560 bytes) -- ignoring
-0.00.699.864 W model has unused tensor blk.64.attn_v.weight (size = 5570560 bytes) -- ignoring
-0.00.699.869 W model has unused tensor blk.64.attn_output.weight (size = 25804800 bytes) -- ignoring
-0.00.699.876 W model has unused tensor blk.64.attn_q_norm.weight (size = 1024 bytes) -- ignoring
-0.00.699.879 W model has unused tensor blk.64.attn_k_norm.weight (size = 1024 bytes) -- ignoring
-0.00.699.883 W model has unused tensor blk.64.ffn_gate.weight (size = 73113600 bytes) -- ignoring
-0.00.699.886 W model has unused tensor blk.64.ffn_down.weight (size = 73113600 bytes) -- ignoring
-0.00.699.889 W model has unused tensor blk.64.ffn_up.weight (size = 73113600 bytes) -- ignoring
-0.00.699.892 W model has unused tensor blk.64.nextn.eh_proj.weight (size = 43008000 bytes) -- ignoring
-0.00.699.895 W model has unused tensor blk.64.nextn.enorm.weight (size = 20480 bytes) -- ignoring
-0.00.699.897 W model has unused tensor blk.64.nextn.hnorm.weight (size = 20480 bytes) -- ignoring
-0.00.699.903 W model has unused tensor blk.64.nextn.shared_head_norm.weight (size = 20480 bytes) -- ignoring
-0.10.408.693 I common_init_result: fitting KV paged params to device memory
-0.10.408.840 I common_fit_paged_kv_blocks: free_vram=9672.5 MiB, free_ram=29246.1 MiB, margin=4816.6 MiB, bytes_per_block=4456448, n_gpu_blocks=48, n_cpu_blocks=16 (set) (set)
-0.10.443.408 I cmn          init: llama threadpool init, n_threads = 12
-0.10.443.439 I main: Loaded model and created context
-0.10.443.441 I main: benchmark repetition 1/1
-0.10.443.833 I add_request_from_pool: Successfully added request 0:  x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x
-0.10.443.852 I main: Start continuous batching loop. n_seq=1, n_predict=8, n_gpu_blocks=48, n_cpu_blocks=16
-0.11.142.064 I main: Finished paged example.
-0.11.142.083 I main: Paged KV cache outputs:
-0.11.142.084 I Request Id: 0:<s> x x x x x x x x x<\s>
-0.11.142.084 I 
-0.11.142.085 I === Paged KV Cache Summary ===
-0.11.142.085 I   n_sequences          : 1
-0.11.142.085 I   n_predict            : 8
-0.11.142.085 I   n_batch              : 1024
-0.11.142.086 I   n_gpu_blocks         : 48
-0.11.142.086 I   n_cpu_blocks         : 16
-0.11.142.089 I   total elapsed        : 0.70 s
-0.11.142.089 I   total prompt tokens  : 1024
-0.11.142.089 I   total decoded tokens : 8
-0.11.142.090 I   aggregate tps        : 11.46 tokens/s
-0.11.142.091 I   prefill tokens       : 1024
-0.11.142.091 I   prefill time         : 411.638 ms
-0.11.142.092 I   pp t/s               : 2487.62
-0.11.142.092 I   decode tokens        : 8
-0.11.142.092 I   decode time          : 284.112 ms
-0.11.142.093 I   tg t/s               : 28.16
-0.11.142.094 I   --- per-request latency ---
-0.11.142.095 I   ttft  avg / min / max : 412.6 / 412.6 / 412.6 ms
-0.11.142.096 I   tpot  avg             : 40.8 ms/token
-0.11.142.102 I   e2e   avg             : 698.0 ms
-0.11.142.103 I   tps   min / max       : 28.0 / 28.0 tokens/s
-0.11.142.103 I ==============================
-Collecting data...
-Generating '/workspace/llama-cpp/build-verify-cuda/tmp/nsys-report-dad3.qdstrm'
-[1/1] [0%                          ] qwen-p1024-bs32-ub1024.nsys-rep[1/1] [0%                          ] qwen-p1024-bs32-ub1024.nsys-rep[1/1] [======34%                   ] qwen-p1024-bs32-ub1024.nsys-rep[1/1] [===========50%              ] qwen-p1024-bs32-ub1024.nsys-rep[1/1] [========================100%] qwen-p1024-bs32-ub1024.nsys-rep[1/1] [========================100%] qwen-p1024-bs32-ub1024.nsys-rep
-Generated:
-	/workspace/llama-cpp/benchmark-results/paged-prefill-head256-20260827-v2/raw/profiler/qwen-p1024-bs32-ub1024.nsys-rep

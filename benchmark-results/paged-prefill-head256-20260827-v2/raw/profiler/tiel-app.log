@@ -1,60 +1,0 @@
-ggml_cuda_init: found 1 CUDA devices (Total VRAM: 24082 MiB):
-  Device 0: NVIDIA GeForce RTX 4090, compute capability 8.9, VMM: yes, VRAM: 24082 MiB
-0.00.736.437 W model has unused tensor blk.40.attn_norm.weight (size = 8192 bytes) -- ignoring
-0.00.736.448 W model has unused tensor blk.40.post_attention_norm.weight (size = 8192 bytes) -- ignoring
-0.00.736.586 W model has unused tensor blk.40.attn_q.weight (size = 17825792 bytes) -- ignoring
-0.00.736.604 W model has unused tensor blk.40.attn_k.weight (size = 1114112 bytes) -- ignoring
-0.00.736.606 W model has unused tensor blk.40.attn_v.weight (size = 1114112 bytes) -- ignoring
-0.00.736.612 W model has unused tensor blk.40.attn_output.weight (size = 8912896 bytes) -- ignoring
-0.00.736.616 W model has unused tensor blk.40.attn_q_norm.weight (size = 1024 bytes) -- ignoring
-0.00.736.618 W model has unused tensor blk.40.attn_k_norm.weight (size = 1024 bytes) -- ignoring
-0.00.736.621 W model has unused tensor blk.40.ffn_gate_inp.weight (size = 2097152 bytes) -- ignoring
-0.00.736.623 W model has unused tensor blk.40.ffn_down_exps.weight (size = 285212672 bytes) -- ignoring
-0.00.736.627 W model has unused tensor blk.40.ffn_gate_exps.weight (size = 285212672 bytes) -- ignoring
-0.00.736.630 W model has unused tensor blk.40.ffn_up_exps.weight (size = 285212672 bytes) -- ignoring
-0.00.736.632 W model has unused tensor blk.40.ffn_gate_inp_shexp.weight (size = 8192 bytes) -- ignoring
-0.00.736.634 W model has unused tensor blk.40.ffn_gate_shexp.weight (size = 1114112 bytes) -- ignoring
-0.00.736.637 W model has unused tensor blk.40.ffn_up_shexp.weight (size = 1114112 bytes) -- ignoring
-0.00.736.638 W model has unused tensor blk.40.ffn_down_shexp.weight (size = 1114112 bytes) -- ignoring
-0.00.736.643 W model has unused tensor blk.40.nextn.eh_proj.weight (size = 8912896 bytes) -- ignoring
-0.00.736.645 W model has unused tensor blk.40.nextn.enorm.weight (size = 8192 bytes) -- ignoring
-0.00.736.647 W model has unused tensor blk.40.nextn.hnorm.weight (size = 8192 bytes) -- ignoring
-0.00.736.652 W model has unused tensor blk.40.nextn.shared_head_norm.weight (size = 8192 bytes) -- ignoring
-0.22.954.685 I common_init_result: fitting KV paged params to device memory
-0.22.962.278 I common_fit_paged_kv_blocks: free_vram=4196.5 MiB, free_ram=27343.9 MiB, margin=3357.2 MiB, bytes_per_block=1392640, n_gpu_blocks=48, n_cpu_blocks=16 (set) (set)
-0.22.999.826 I cmn          init: llama threadpool init, n_threads = 12
-0.23.000.482 I main: Loaded model and created context
-0.23.000.489 I main: benchmark repetition 1/1
-0.23.001.658 I add_request_from_pool: Successfully added request 0:  x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x
-0.23.002.069 I main: Start continuous batching loop. n_seq=1, n_predict=8, n_gpu_blocks=48, n_cpu_blocks=16
-0.23.419.832 I main: Finished paged example.
-0.23.419.843 I main: Paged KV cache outputs:
-0.23.419.844 I Request Id: 0:<s> x x x x x x x x x<\s>
-0.23.419.844 I 
-0.23.419.844 I === Paged KV Cache Summary ===
-0.23.419.856 I   n_sequences          : 1
-0.23.419.856 I   n_predict            : 8
-0.23.419.857 I   n_batch              : 1024
-0.23.419.857 I   n_gpu_blocks         : 48
-0.23.419.857 I   n_cpu_blocks         : 16
-0.23.419.861 I   total elapsed        : 0.42 s
-0.23.419.861 I   total prompt tokens  : 1024
-0.23.419.862 I   total decoded tokens : 8
-0.23.419.863 I   aggregate tps        : 19.15 tokens/s
-0.23.419.863 I   prefill tokens       : 1024
-0.23.419.864 I   prefill time         : 277.853 ms
-0.23.419.864 I   pp t/s               : 3685.40
-0.23.419.865 I   decode tokens        : 8
-0.23.419.865 I   decode time          : 137.205 ms
-0.23.419.865 I   tg t/s               : 58.31
-0.23.419.866 I   --- per-request latency ---
-0.23.419.866 I   ttft  avg / min / max : 279.5 / 279.5 / 279.5 ms
-0.23.419.867 I   tpot  avg             : 19.8 ms/token
-0.23.419.867 I   e2e   avg             : 418.2 ms
-0.23.419.868 I   tps   min / max       : 57.7 / 57.7 tokens/s
-0.23.419.868 I ==============================
-Collecting data...
-Generating '/workspace/llama-cpp/build-verify-cuda/tmp/nsys-report-1c1d.qdstrm'
-[1/1] [0%                          ] tiel-p1024-bs32-ub1024.nsys-rep[1/1] [0%                          ] tiel-p1024-bs32-ub1024.nsys-rep[1/1] [=======36%                  ] tiel-p1024-bs32-ub1024.nsys-rep[1/1] [===========50%              ] tiel-p1024-bs32-ub1024.nsys-rep[1/1] [========================100%] tiel-p1024-bs32-ub1024.nsys-rep[1/1] [========================100%] tiel-p1024-bs32-ub1024.nsys-rep
-Generated:
-	/workspace/llama-cpp/benchmark-results/paged-prefill-head256-20260827-v2/raw/profiler/tiel-p1024-bs32-ub1024.nsys-rep
