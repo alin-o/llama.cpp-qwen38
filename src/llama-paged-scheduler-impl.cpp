@@ -69,7 +69,8 @@ int32_t llama_paged_scheduler_impl::get_curr_decode_tokens() const {
     return running.size();
 }
 
-llama_scheduler_status llama_paged_scheduler_impl::step(llama_batch & batch) {
+llama_scheduler_status llama_paged_scheduler_impl::step(llama_batch & batch, int32_t spec_n) {
+    this->spec_n = std::max(0, spec_n);
     // Free previous inference batches
     clear_batch(batch);
 
@@ -290,17 +291,15 @@ void llama_paged_scheduler_impl::process_running_list(llama_sequence_group_raw_l
             }
             continue;
         }
-
-        // Dynamically allocate more blocks to decode the request
         uint32_t current_capacity  = group->block_table.size() * block_size;
-        uint32_t required_capacity = group->n_past + 1;
+        uint32_t required_capacity = group->n_past + 1 + spec_n;
         LLAMA_LOG_DEBUG(
-            "%s: (running) request_id=%d: current_capacity (tokens)=%d toks, required capacity (tokens) = %d toks\n",
+            "%s: (running) request_id=%d: current_capacity (tokens)=%d, required capacity (tokens) = %d toks\n",
             __func__, group->request_id, current_capacity, required_capacity);
         if (required_capacity >= current_capacity) {
             LLAMA_LOG_DEBUG("%s: (running_pending) request_id=%d: requires a new block to decode.\n", __func__,
                             group->request_id);
-            bool success = kv_cache_manager->allocate(1, *group);  // decode phase
+            bool success = kv_cache_manager->allocate(1 + spec_n, *group);
             if (!success) {
                 if (running.size() > 1) {
                     activate_priority_request(candidates);
@@ -455,7 +454,7 @@ void llama_paged_scheduler_impl::populate_batch_from(const llama_sequence_group_
     // Calculating required sizes
     for (const auto & group : candidates) {
         GGML_ASSERT(group && "candidate request is nullptr.");
-        total_tokens += (group->n_decoded > 0) ? 1 : group->n_prompt;
+        total_tokens += (group->n_decoded > 0) ? 1 + spec_n : group->n_prompt;
         max_blocks = std::max(max_blocks, (int32_t) group->block_table.size());
     }
 
@@ -485,7 +484,7 @@ void llama_paged_scheduler_impl::populate_batch_from(const llama_sequence_group_
         GGML_ASSERT(group && "Make sure the candidates are not nullptr.");
 
         const bool    is_prefill = group->n_decoded == 0;
-        const int32_t new_tokens = is_prefill ? group->n_prompt : 1;
+        const int32_t new_tokens = is_prefill ? group->n_prompt : 1 + spec_n;
 
         if (is_prefill) {
             GGML_ASSERT(group->logical_seq.size() >= (size_t) new_tokens && "logical_seq too small for prefill");
@@ -528,7 +527,9 @@ void llama_paged_scheduler_impl::populate_batch_from(const llama_sequence_group_
 // new_tokens contain 1 token per sequence in the batch
 void llama_paged_scheduler_impl::update(const llama_batch &              batch,
                                         const std::vector<llama_token> & new_tokens,
+                                        const std::vector<uint32_t> &    accepted,
                                         const int8_t *                   stop_flags) {
+    (void) accepted;
     GGML_ASSERT((int32_t) new_tokens.size() >= curr_info.n_seq && "new_tokens size does not match with batch size.");
     GGML_ASSERT(stop_flags != nullptr && "stop_flags can't be null");
 

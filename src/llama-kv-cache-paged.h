@@ -31,6 +31,7 @@ class llama_kv_cache_paged : public llama_memory_i {
 
     bool allocate(int32_t num_tokens, llama_sequence_group & group);
     void free_blocks(llama_sequence_group & group);
+    bool release_seq_tail(llama_seq_id seq_id, uint32_t keep_tokens);
     bool swap_in(llama_sequence_group & group);
     bool swap_out(llama_sequence_group & group);
 

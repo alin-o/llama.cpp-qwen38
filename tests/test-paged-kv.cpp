@@ -491,6 +491,25 @@ TEST(test_free_blocks_releases_to_pool) {
 
     ggml_backend_free(backend);
 }
+TEST(test_release_seq_tail_releases_trailing_blocks) {
+    ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    EXPECT_TRUE(backend != nullptr);
+
+    auto kv = make_kv();
+    kv.init(backend, backend, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, 4, 1, 0.0f);
+    llama_sequence_group group;
+    group.request_id = 7;
+    group.n_prompt = 48;
+    EXPECT_TRUE(kv.allocate(0, group));
+    EXPECT_EQ(group.block_table.size(), 3u);
+    EXPECT_TRUE(kv.release_seq_tail(group.request_id, 17));
+    EXPECT_EQ(group.block_table.size(), 2u);
+    EXPECT_TRUE(kv.release_seq_tail(group.request_id, 32));
+    EXPECT_EQ(group.block_table.size(), 2u);
+    kv.free_blocks(group);
+    ggml_backend_free(backend);
+}
+
 
 TEST(test_clear_and_seq_rm_release_blocks) {
     ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
@@ -1199,6 +1218,7 @@ int main(int /*argc*/, char ** /*argv*/) {
 
     fprintf(stderr, "test-paged-kv: llama_kv_cache_paged free_blocks\n");
     RUN(test_free_blocks_releases_to_pool);
+    RUN(test_release_seq_tail_releases_trailing_blocks);
     RUN(test_clear_and_seq_rm_release_blocks);
     RUN(test_paged_state_round_trip);
     RUN(test_paged_sequence_state_preserves_other_sequences);

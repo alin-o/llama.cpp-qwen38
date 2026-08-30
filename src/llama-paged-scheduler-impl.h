@@ -10,14 +10,24 @@ enum class llama_scheduler_status {
     DEADLOCK,  // cannot make progress
 };
 
+// Speculative decode API design: a future spec step reserves 1 + spec_n target
+// tokens per decode sequence. Its update accepts per-sequence counts, commits
+// only accepted rows, and calls release_seq_tail(seq_id, keep_tokens) to free
+// rejected trailing blocks. Spec proposals remain resident while pressure
+// scheduling promotes the oldest request.
 class llama_paged_scheduler_impl {
   public:
     llama_paged_scheduler_impl(uint32_t n_ctx, uint32_t block_sz, int32_t n_batch, llama_kv_cache_paged * kv_manager);
     ~llama_paged_scheduler_impl();
 
-    llama_scheduler_status step(llama_batch & batch);
+    llama_scheduler_status step(llama_batch & batch, int32_t spec_n = 0);
     bool                   queue_request(llama_sequence_group group);
-    void                   update(const llama_batch & batch, const std::vector<llama_token> & new_tokens, const int8_t * stop_flags);
+    void                   update(const llama_batch & batch, const std::vector<llama_token> & new_tokens,
+                                   const std::vector<uint32_t> & accepted, const int8_t * stop_flags);
+    void                   update(const llama_batch & batch, const std::vector<llama_token> & new_tokens,
+                                   const int8_t * stop_flags) {
+        update(batch, new_tokens, {}, stop_flags);
+    }
     void                   remove_request(int32_t request_id);
     void                   set_on_finish(llama_paged_on_finish_cb cb, void * user_data);
     llama_sequence_group *         get_group_from_id(int32_t request_id) const;
@@ -61,6 +71,8 @@ class llama_paged_scheduler_impl {
     const int32_t          n_batch;
     llama_kv_cache_paged * kv_cache_manager = nullptr;
     llama_paged_batch_info curr_info;
+    int32_t spec_n = 0;
+
 
     int32_t priority_request_id = -1;
 

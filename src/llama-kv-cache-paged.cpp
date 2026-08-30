@@ -203,6 +203,27 @@ void llama_kv_cache_paged::free_blocks(llama_sequence_group & group) {
         group.block_table.clear();
     }
 }
+bool llama_kv_cache_paged::release_seq_tail(llama_seq_id seq_id, uint32_t keep_tokens) {
+    auto it = sequence_blocks.find(seq_id);
+    if (it == sequence_blocks.end()) {
+        return false;
+    }
+
+    auto & blocks = it->second;
+    const size_t keep_blocks = (keep_tokens + block_size - 1) / block_size;
+    if (keep_blocks >= blocks.size()) {
+        return true;
+    }
+
+    llama_block_ids released(blocks.begin() + keep_blocks, blocks.end());
+    release_block_ids(released);
+    blocks.resize(keep_blocks);
+    if (const auto group = sequence_groups.find(seq_id); group != sequence_groups.end()) {
+        group->second->block_table = blocks;
+    }
+    return true;
+}
+
 
 void llama_kv_cache_paged::do_block_copy(const llama_block_ids & src_ids,
                                          const llama_block_ids & new_ids,

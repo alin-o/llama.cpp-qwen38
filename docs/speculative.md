@@ -4,6 +4,17 @@ llama.cpp supports speculative decoding, a technique that can significantly acce
 
 [Speculative decoding](https://en.wikipedia.org/wiki/Transformer_(deep_learning)#Speculative_decoding) leverages the fact that computing n tokens in a batch (as in prompt processing) is more efficient than computing n sequentially (as in response generation). By generating draft tokens quickly and then verifying them with the target model in a single batch, this approach can achieve substantial speedups when the draft predictions are frequently correct.
 
+## Paged KV interaction
+
+The paged KV scheduler reserves space for the full MTP proposal and must keep
+that proposal resident until verification commits an accepted prefix. Rejected
+tokens are removed by truncating the sequence tail and releasing trailing
+blocks; the draft context remains non-paged and is rebuilt by its normal
+catch-up decode. Under memory pressure, an in-flight proposal is not swapped
+mid-draft; the scheduler gives priority to the oldest request instead.
+
+Paging the draft context is not part of this policy.
+
 ## Implementations
 
 The `llama-server` application supports several implementations of speculative decoding. An implementation with draft model can be mixed with an implementation without draft model.
