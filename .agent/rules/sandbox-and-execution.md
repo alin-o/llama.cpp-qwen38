@@ -22,3 +22,14 @@ description: Use when building, running, or testing llama.cpp binaries or models
 
 - When a downloaded GGUF fails to load, read its general.architecture from the GGUF header (first KV string) and grep src/llama-arch.cpp for that name to confirm the build supports it, rather than assuming the image is too old. Ornith's header reports qwen35moe, which this tree supports (src/models/qwen35moe.cpp) - no rebuild needed.
 - Agents verify code changes with `.agent/verify.sh` (build + `ctest -L main`), which may load test models on the full GPU. Real-model validation, including the 27B qwen38 working set, can run in the sandbox when relevant.
+
+## Benchmark configuration preflight
+
+- Before loading a large model, inspect the executable's `--help` and the relevant source validations and scheduler conditions. Record hard relationships such as mutually exclusive flags, required equality between batch and microbatch sizes, and whether a new prompt must fit entirely within one batch.
+- Build a small feasibility table that separates workload minimums (prompt length, generated tokens, and scheduler headroom), hard harness constraints, tunable memory allocations (context, batch, and cache blocks), and optional model components that are actually loaded.
+- Reduce memory allocations from workload requirements first. Do not reduce batch size when the harness requires the complete prompt to fit in one batch.
+- Validate a candidate incrementally: confirm that the process reaches health, one request completes, and timing fields are usable before running warmups and repeated samples.
+- Change one independent variable at a time. After a failed invariant, stop trying nearby values until the emitting validation or scheduler condition is understood.
+- Check load logs or GGUF metadata before attributing memory use to mmproj, MTP, or another optional component. Distinguish embedded but unused tensors from components that were allocated.
+- Treat error messages as hypotheses. If observed behavior conflicts with a message, inspect the source condition that emits it before attempting more configurations.
+- Keep rejected probes cheap and record why they were invalid. Reserve repeated sampling for a configuration whose harness and instrumentation have passed preflight.

@@ -1005,12 +1005,12 @@ TEST(test_decode_only_batch_skips_tiled_prefill) {
 }
 
 #if defined(GGML_USE_CUDA)
+template <int tokens_per_sequence>
 static std::vector<float> run_paged_attention_production_case(
         ggml_backend_t backend, int head_dim, int n_heads, int n_heads_kv) {
     constexpr int block_size = 16;
     constexpr int max_blocks = 2;
     constexpr int n_sequences = 2;
-    constexpr int tokens_per_sequence = 20;
     constexpr int context_length = 24;
     constexpr int n_cache_blocks = n_sequences * max_blocks;
     constexpr int n_tokens = n_sequences * tokens_per_sequence;
@@ -1099,13 +1099,14 @@ static std::vector<float> run_paged_attention_production_case(
     return result;
 }
 
+template <int tokens_per_sequence>
 static void check_paged_attention_production_case(
         ggml_backend_t cpu_backend, ggml_backend_t cuda_backend,
         int head_dim, int n_heads, int n_heads_kv, bool expect_tiled) {
-    const std::vector<float> reference = run_paged_attention_production_case(
+    const std::vector<float> reference = run_paged_attention_production_case<tokens_per_sequence>(
         cpu_backend, head_dim, n_heads, n_heads_kv);
     ggml_paged_attn_tiled_prefill_launch_count_reset();
-    const std::vector<float> actual = run_paged_attention_production_case(
+    const std::vector<float> actual = run_paged_attention_production_case<tokens_per_sequence>(
         cuda_backend, head_dim, n_heads, n_heads_kv);
     const unsigned long long launches = ggml_paged_attn_tiled_prefill_launch_count();
     EXPECT_TRUE(expect_tiled ? launches > 0 : launches == 0);
@@ -1128,9 +1129,10 @@ TEST(test_paged_attention_cuda_production_correctness) {
     EXPECT_TRUE(cpu_backend != nullptr);
     EXPECT_TRUE(cuda_backend != nullptr);
 
-    check_paged_attention_production_case(cpu_backend, cuda_backend, 128, 4, 1, true);
-    check_paged_attention_production_case(cpu_backend, cuda_backend, 256, 4, 2, true);
-    check_paged_attention_production_case(cpu_backend, cuda_backend, 64, 4, 1, false);
+    check_paged_attention_production_case<20>(cpu_backend, cuda_backend, 128, 4, 1, true);
+    check_paged_attention_production_case<20>(cpu_backend, cuda_backend, 256, 4, 2, true);
+    check_paged_attention_production_case<20>(cpu_backend, cuda_backend, 64, 4, 1, false);
+    check_paged_attention_production_case<1>(cpu_backend, cuda_backend, 256, 8, 1, false);
 
     ggml_backend_free(cuda_backend);
     ggml_backend_free(cpu_backend);

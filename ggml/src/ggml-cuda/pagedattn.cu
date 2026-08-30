@@ -303,6 +303,97 @@ __global__ void paged_attention_decode_gqa_kernel(
     }
 }
 
+// Warps process disjoint context positions, then warp 0 merges their online-softmax partials.
+template <int HEAD_DIM, int N_WARPS>
+__global__ void paged_attention_decode_q8_parallel_kernel(
+        const float * q, const char * k_cache, const char * v_cache,
+        const int * block_table, const int * context_lens, const int * batch_offsets,
+        size_t k_stride_token, size_t k_stride_head, size_t k_stride_block,
+        size_t v_stride_token, size_t v_stride_head, size_t v_stride_block,
+        int n_heads, int n_heads_kv, int block_size, int max_blocks, float scale, float * out) {
+    __shared__ float partial_max[N_WARPS];
+    __shared__ float partial_sum[N_WARPS];
+    __shared__ float partial_acc[N_WARPS][HEAD_DIM];
+    const int warp = threadIdx.x / WARP_SIZE;
+    const int lane = threadIdx.x % WARP_SIZE;
+    const int head = blockIdx.x;
+    const int seq = blockIdx.y;
+    const int kv_head = ggml_paged_attn_kv_head(head, n_heads, n_heads_kv);
+    const int batch_start = batch_offsets[seq];
+    const int limit = context_lens[seq];
+    const size_t q_base = (size_t) batch_start * n_heads * HEAD_DIM + (size_t) head * HEAD_DIM;
+    float qv[HEAD_DIM / WARP_SIZE];
+    float acc[HEAD_DIM / WARP_SIZE] = {};
+#pragma unroll
+    for (int i = 0; i < HEAD_DIM / WARP_SIZE; ++i) {
+        qv[i] = q[q_base + lane + i * WARP_SIZE];
+    }
+
+    float qk_max = -FLT_MAX;
+    float exp_sum = 0.0f;
+    for (int token = warp; token < limit; token += N_WARPS) {
+        const int physical_block = block_table[seq * max_blocks + token / block_size];
+        const int token_in_block = token % block_size;
+        const char * k_row = k_cache + (size_t) physical_block * k_stride_block +
+            (size_t) kv_head * k_stride_head + (size_t) token_in_block * k_stride_token;
+        const char * v_row = v_cache + (size_t) physical_block * v_stride_block +
+            (size_t) kv_head * v_stride_head + (size_t) token_in_block * v_stride_token;
+        float qk = 0.0f;
+#pragma unroll
+        for (int i = 0; i < HEAD_DIM / WARP_SIZE; ++i) {
+            qk += qv[i] * paged_cache_value(k_row, lane + i * WARP_SIZE, GGML_TYPE_Q8_0);
+        }
+        for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+            qk += __shfl_down_sync(0xffffffffu, qk, offset);
+        }
+        qk = __shfl_sync(0xffffffffu, qk, 0) * scale;
+        const float new_max = fmaxf(qk_max, qk);
+        const float old_scale = __expf(qk_max - new_max);
+        const float weight = __expf(qk - new_max);
+        exp_sum = exp_sum * old_scale + weight;
+#pragma unroll
+        for (int i = 0; i < HEAD_DIM / WARP_SIZE; ++i) {
+            acc[i] = acc[i] * old_scale +
+                weight * paged_cache_value(v_row, lane + i * WARP_SIZE, GGML_TYPE_Q8_0);
+        }
+        qk_max = new_max;
+    }
+
+    if (lane == 0) {
+        partial_max[warp] = qk_max;
+        partial_sum[warp] = exp_sum;
+    }
+#pragma unroll
+    for (int i = 0; i < HEAD_DIM / WARP_SIZE; ++i) {
+        partial_acc[warp][lane + i * WARP_SIZE] = acc[i];
+    }
+    __syncthreads();
+
+    if (warp == 0) {
+        float final_max = -FLT_MAX;
+#pragma unroll
+        for (int w = 0; w < N_WARPS; ++w) {
+            final_max = fmaxf(final_max, partial_max[w]);
+        }
+        float final_sum = 0.0f;
+        float final_acc[HEAD_DIM / WARP_SIZE] = {};
+#pragma unroll
+        for (int w = 0; w < N_WARPS; ++w) {
+            const float rescale = __expf(partial_max[w] - final_max);
+            final_sum += partial_sum[w] * rescale;
+#pragma unroll
+            for (int i = 0; i < HEAD_DIM / WARP_SIZE; ++i) {
+                final_acc[i] += partial_acc[w][lane + i * WARP_SIZE] * rescale;
+            }
+        }
+        const float inv_sum = 1.0f / (final_sum + 1e-6f);
+#pragma unroll
+        for (int i = 0; i < HEAD_DIM / WARP_SIZE; ++i) {
+            out[q_base + lane + i * WARP_SIZE] = final_acc[i] * inv_sum;
+        }
+    }
+}
+
 #endif
 
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
@@ -662,14 +753,12 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
     const bool decode_gqa = k_cache->type == GGML_TYPE_Q8_0 && v_cache->type == GGML_TYPE_Q8_0 &&
         head_dim == 256 && n_heads / n_heads_kv == 8 && q->ne[2] == batch_lens->ne[0];
     if (decode_gqa) {
-        constexpr size_t smem_bytes_gqa = 2 * 32 * 256 * sizeof(float);
-        CUDA_CHECK(cudaFuncSetAttribute(paged_attention_decode_gqa_kernel<256, 32>,
-                                        cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes_gqa));
-        paged_attention_decode_gqa_kernel<256, 32><<<dim3(n_heads_kv, batch_lens->ne[0]), dim3(256), smem_bytes_gqa, ctx.stream()>>>(
+        constexpr int n_warps = 32;
+        paged_attention_decode_q8_parallel_kernel<256, n_warps><<<dim3(n_heads, batch_lens->ne[0]), dim3(n_warps * WARP_SIZE), 0, ctx.stream()>>>(
             (const float *) q->data, (const char *) k_cache->data, (const char *) v_cache->data,
             (const int *) block_table->data, (const int *) context_lens->data, (const int *) batch_offsets->data,
             k_cache->nb[1], k_cache->nb[2], k_cache->nb[3], v_cache->nb[1], v_cache->nb[2], v_cache->nb[3],
-            n_heads, n_heads_kv, block_size, max_blocks, k_cache->type, v_cache->type, op_params_f[0], (float *) dst->data);
+            n_heads, n_heads_kv, block_size, max_blocks, op_params_f[0], (float *) dst->data);
         CUDA_CHECK(cudaGetLastError());
         return;
     }
