@@ -62,7 +62,7 @@ def test_paged_mtp_matches_target_greedy():
         pytest.skip("set LLAMA_SERVER_PAGED_MODEL and LLAMA_SERVER_MTP_MODEL to run paged MTP equivalence")
 
     prompts = [
-        "Continue the following passage in a factual, concise style:\n\nIn the late eighteenth century, improvements in steam engines began to change manufacturing and transport. Early engines had mainly pumped water from mines, but engineers gradually made them smaller, more efficient, and suitable for rotary motion. This allowed factories to",
+        "Explain to a curious high-school student why the sky is blue during the day but often red or orange near sunset. Include the roles of wavelength, scattering, and the longer path through the atmosphere.",
         "A water tank is initially 30 percent full. A pump adds 18 liters per minute while a leak removes 3 liters per minute. After 14 minutes the tank is 65 percent full. Find the tank's total capacity and show the calculation step by step.",
     ]
     request = {
@@ -90,7 +90,7 @@ def test_paged_mtp_matches_target_greedy():
         server.n_ubatch = 1024
         server.n_slots = 1
         server.server_port = 18089
-        server.ctk = os.environ.get("LLAMA_SERVER_MTP_KV_TYPE", "turbo4")
+        server.ctk = os.environ.get("LLAMA_SERVER_MTP_KV_TYPE", "q8_0")
         server.ctv = server.ctk
         server.fa = "on"
         server.kv_paged = True
