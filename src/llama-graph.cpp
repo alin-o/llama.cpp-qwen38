@@ -1,6 +1,8 @@
 #include "llama-memory-hybrid-paged.h"
 #include "llama-graph.h"
 
+#include "ggml-paged-attn.h"
+
 #include "llama-impl.h"
 #include "llama-model.h"
 #include "llama-batch.h"
@@ -1075,7 +1077,8 @@ llm_graph_input_attn_kv_paged::llm_graph_input_attn_kv_paged(
         const llama_hparams & hparams,
         const llama_cparams & cparams,
         const llama_kv_cache_paged_context * mctx) :
-    llm_graph_input_attn_kv(hparams, cparams, nullptr), mctx(mctx) {
+    llm_graph_input_attn_kv(hparams, cparams, nullptr),
+    paged_attn_context_bucket(ggml_paged_attn_context_bucket(mctx->get_max_context_len())), mctx(mctx) {
     for (uint32_t il = 0; il < hparams.n_layer(); ++il) {
         paged_k.push_back(mctx->get_k(il));
         paged_v.push_back(mctx->get_v(il));
@@ -1122,6 +1125,10 @@ static bool can_reuse_paged_attention(
         !check_1d(inp->paged_context_lens, batch_size) ||
         !check_1d(inp->paged_batch_offsets, batch_size) ||
         !check_1d(inp->paged_batch_lens, batch_size)) {
+        return false;
+    }
+
+    if (inp->paged_attn_context_bucket != ggml_paged_attn_context_bucket(new_mctx->get_max_context_len())) {
         return false;
     }
 
@@ -2694,7 +2701,8 @@ ggml_tensor * llm_graph_context::build_attn_mha_paged(
          ggml_tensor * batch_lens,      // [batch_size]
                float   kq_scale,
                  int   block_size,
-                 int   max_blocks) const {
+                 int   max_blocks,
+                 int   context_bucket) const {
 
     // Paged attention reads dense current K/V tensors. Store them with the
     // CUDA set_rows quantizers before the paged read.
@@ -2729,7 +2737,7 @@ ggml_tensor * llm_graph_context::build_attn_mha_paged(
     ggml_tensor * cur = ggml_paged_attn(ctx0,
                                         q, k_cur, v_cur, k_cache, v_cache,
                                         block_table, write_rows, context_lens, batch_offsets, batch_lens,
-                                        kq_scale, block_size, max_blocks);
+                                        kq_scale, block_size, max_blocks, context_bucket);
     if (v_cache->type == GGML_TYPE_TURBO3_0 || v_cache->type == GGML_TYPE_TURBO4_0) {
         cur = ggml_turbo_wht(ctx0, cur, 1);
     }
@@ -3457,7 +3465,7 @@ ggml_tensor * llm_graph_context::build_attn(
         inp->paged_context_lens,
         inp->paged_batch_offsets,
         inp->paged_batch_lens,
-        kq_scale, cparams.block_size, max_blocks);
+        kq_scale, cparams.block_size, max_blocks, inp->paged_attn_context_bucket);
     cb(cur, "kqv_out", il);
 
     // Flatten attention heads before the output projection.

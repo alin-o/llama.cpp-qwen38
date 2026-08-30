@@ -910,6 +910,14 @@ int32_t llama_kv_cache_paged_context::get_max_blocks() const {
     return max_blocks;
 }
 
+int32_t llama_kv_cache_paged_context::get_max_context_len() const {
+    int32_t result = 0;
+    for (const int32_t context_len : paged_context_lens) {
+        result = std::max(result, context_len);
+    }
+    return result;
+}
+
 const int32_t * llama_kv_cache_paged_context::get_write_slots() const {
     return paged_write_slots.data();
 }

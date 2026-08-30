@@ -595,6 +595,8 @@ public:
     std::vector<ggml_tensor *> paged_k;
     std::vector<ggml_tensor *> paged_v;
 
+    int32_t paged_attn_context_bucket = 0;
+
     int32_t last_n_tokens = 0;
     const llama_kv_cache_paged_context * mctx;
 };
@@ -1232,7 +1234,8 @@ struct llm_graph_context {
              ggml_tensor * batch_lens,      // [batch_size]
                    float   kq_scale,
                      int   block_size,
-                     int   max_blocks) const;
+                     int   max_blocks,
+                     int   context_bucket) const;
 
     ggml_tensor * build_attn_mha(
             ggml_tensor * q,       // [n_embd_head_q, n_head_q, n_tokens]

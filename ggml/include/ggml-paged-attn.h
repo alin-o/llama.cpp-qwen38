@@ -30,6 +30,74 @@ static inline bool ggml_paged_attn_tiled_prefill_supported(
         q_contiguous && q_aligned && n_q_tiles > 0 && n_q_tiles <= 65535 && k_native && v_native;
 }
 
+enum ggml_paged_attn_context_bucket {
+    GGML_PAGED_ATTN_CONTEXT_4K = 0,
+    GGML_PAGED_ATTN_CONTEXT_16K,
+    GGML_PAGED_ATTN_CONTEXT_32K,
+    GGML_PAGED_ATTN_CONTEXT_64K,
+    GGML_PAGED_ATTN_CONTEXT_128K,
+    GGML_PAGED_ATTN_CONTEXT_LONG,
+};
+
+struct ggml_paged_attn_cuda_variant {
+    int32_t n_warps;
+    int32_t n_partitions;
+    int32_t n_q_heads;
+};
+
+static inline int ggml_paged_attn_context_bucket(int max_context_len) {
+    if (max_context_len <= 4096) {
+        return GGML_PAGED_ATTN_CONTEXT_4K;
+    }
+    if (max_context_len <= 16384) {
+        return GGML_PAGED_ATTN_CONTEXT_16K;
+    }
+    if (max_context_len <= 32768) {
+        return GGML_PAGED_ATTN_CONTEXT_32K;
+    }
+    if (max_context_len <= 65536) {
+        return GGML_PAGED_ATTN_CONTEXT_64K;
+    }
+    if (max_context_len <= 131072) {
+        return GGML_PAGED_ATTN_CONTEXT_128K;
+    }
+    return GGML_PAGED_ATTN_CONTEXT_LONG;
+}
+
+static inline int ggml_paged_attn_bucket_upper_bound(int bucket) {
+    static const int bounds[] = { 4096, 16384, 32768, 65536, 131072, INT32_MAX };
+    return bounds[bucket];
+}
+
+static inline int ggml_paged_attn_tail_partition(int context_len, int n_partitions) {
+    int tokens_per_partition{};
+    for (int covered = 0; covered < context_len; covered += n_partitions) {
+        ++tokens_per_partition;
+    }
+    return context_len > 0 ? (context_len - 1) / tokens_per_partition : 0;
+}
+
+static inline struct ggml_paged_attn_cuda_variant ggml_paged_attn_select_cuda_variant(
+        int context_bucket, int n_heads, int n_heads_kv, int n_sequences, int n_sms) {
+    struct ggml_paged_attn_cuda_variant result = { 32, 1, 1 };
+    if (context_bucket == GGML_PAGED_ATTN_CONTEXT_4K || n_heads <= 0 || n_heads_kv <= 0 || n_sequences <= 0) {
+        return result;
+    }
+
+    const int gqa_ratio = n_heads / n_heads_kv;
+    result.n_warps = 8;
+    result.n_partitions = 8;
+    if (n_sequences == 4 && gqa_ratio % 4 == 0 && (n_heads / 4) * n_sequences * 4 >= n_sms) {
+        result.n_warps = 16;
+        result.n_partitions = 4;
+        result.n_q_heads = 4;
+    } else if (n_sequences >= 4 && gqa_ratio % 2 == 0 &&
+               (n_heads / 2) * n_sequences * result.n_partitions >= n_sms) {
+        result.n_q_heads = 2;
+    }
+    return result;
+}
+
 #if defined(GGML_USE_CUDA)
 #ifdef __cplusplus
 extern "C" {

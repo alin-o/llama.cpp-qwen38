@@ -163,6 +163,7 @@ class llama_kv_cache_paged_context : public llama_memory_context_i {
     int32_t tokens() const { return n_tokens; }
     int32_t get_batch_size() const;
     int32_t get_max_blocks() const;
+    int32_t get_max_context_len() const;
 
     const int32_t * get_write_slots() const;
     const int32_t * get_block_table() const;
