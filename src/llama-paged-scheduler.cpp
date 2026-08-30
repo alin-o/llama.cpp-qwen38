@@ -7,8 +7,13 @@
 struct llama_paged_scheduler {
     llama_paged_scheduler_impl impl;
 
-    llama_paged_scheduler(uint32_t n_ctx, uint32_t block_sz, uint32_t n_batch, llama_kv_cache_paged * kv_manager) :
-        impl(n_ctx, block_sz, n_batch, kv_manager) {}
+    llama_paged_scheduler(
+            uint32_t                  n_ctx,
+            uint32_t                  block_sz,
+            uint32_t                  n_batch,
+            llama_kv_cache_paged *    kv_manager,
+            llama_memory_recurrent *  recurrent_manager) :
+        impl(n_ctx, block_sz, n_batch, kv_manager, recurrent_manager) {}
 };
 
 LLAMA_API struct llama_paged_scheduler * llama_paged_scheduler_init(struct llama_context * ctx) {
@@ -18,8 +23,10 @@ LLAMA_API struct llama_paged_scheduler * llama_paged_scheduler_init(struct llama
 
     auto * memory = ctx->get_memory();
     auto * paged_kv = dynamic_cast<llama_kv_cache_paged *>(memory);
+    llama_memory_recurrent * recurrent = nullptr;
     if (auto * hybrid = dynamic_cast<llama_memory_hybrid_paged *>(memory)) {
         paged_kv = hybrid->get_mem_attn();
+        recurrent = hybrid->get_mem_recr();
     }
     if (!paged_kv) {
         LLAMA_LOG_ERROR(
@@ -38,7 +45,7 @@ LLAMA_API struct llama_paged_scheduler * llama_paged_scheduler_init(struct llama
     GGML_ASSERT(n_batch == ctx->n_ubatch() && "kv_paged requires n_batch == n_ubatch.");
 
     try {
-        return new llama_paged_scheduler(n_ctx, block_sz, n_batch, paged_kv);
+        return new llama_paged_scheduler(n_ctx, block_sz, n_batch, paged_kv, recurrent);
     } catch (const std::exception & e) {
         LLAMA_LOG_ERROR("%s: Error when creating llama_paged_scheduler: %s\n", __func__, e.what());
         return nullptr;

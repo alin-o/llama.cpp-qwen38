@@ -257,7 +257,7 @@ void llama_kv_cache_paged::do_block_copy(const llama_block_ids & src_ids,
     }
 }
 
-bool llama_kv_cache_paged::swap_in(llama_sequence_group & group) {
+bool llama_kv_cache_paged::swap_in(llama_sequence_group & group, int32_t num_tokens) {
     const uint32_t num_blocks = group.block_table.size();
     if (num_blocks == 0) {
         return true;
@@ -265,7 +265,7 @@ bool llama_kv_cache_paged::swap_in(llama_sequence_group & group) {
 
     const uint32_t required_blocks = std::max(
         num_blocks,
-        (uint32_t) std::ceil((float) (group.n_past + 1) / block_size));
+        (uint32_t) std::ceil((float) (group.n_past + num_tokens) / block_size));
     if (!block_manager.has_free_gpu_blocks(required_blocks)) {
         return false;
     }
@@ -782,12 +782,79 @@ void llama_kv_cache_paged::state_read(llama_io_read_i & io, llama_seq_id seq_id,
 // llama_kv_cache_paged_context
 
 void llama_kv_cache_paged_context::set_batch_data(const llama_paged_batch_info & info) {
-    paged_write_slots   = info.write_slots;
-    paged_block_table   = info.block_table;
-    paged_context_lens  = info.context_lens;
-    paged_batch_offsets = info.batch_offsets;
-    paged_batch_lens    = info.batch_lens;
-    n_tokens = info.n_tokens;
+    full_info  = &info;
+    max_blocks = info.n_blocks_per_seq;
+    select_ubatch();
+}
+
+void llama_kv_cache_paged_context::select_ubatch() {
+    GGML_ASSERT(full_info != nullptr);
+    GGML_ASSERT(i_cur < ubatches.size());
+
+    const llama_ubatch & ubatch = ubatches[i_cur];
+    if (ubatch.idx == nullptr) {
+        n_tokens  = full_info->n_tokens;
+        batch_size = full_info->n_seq;
+        paged_write_slots.assign(full_info->write_slots, full_info->write_slots + n_tokens);
+        paged_block_table.assign(
+                full_info->block_table,
+                full_info->block_table + (size_t) batch_size * max_blocks);
+        paged_context_lens.assign(full_info->context_lens, full_info->context_lens + batch_size);
+        paged_batch_offsets.assign(full_info->batch_offsets, full_info->batch_offsets + batch_size);
+        paged_batch_lens.assign(full_info->batch_lens, full_info->batch_lens + batch_size);
+
+        paged_write_rows.resize((size_t) n_tokens * manager->n_heads_kv);
+        for (int32_t token = 0; token < n_tokens; ++token) {
+            const int32_t slot = paged_write_slots[token];
+            const int32_t block = slot / (int32_t) manager->block_size;
+            const int32_t token_in_block = slot % (int32_t) manager->block_size;
+            for (uint32_t head = 0; head < manager->n_heads_kv; ++head) {
+                paged_write_rows[(size_t) token * manager->n_heads_kv + head] =
+                    block * (int32_t) (manager->block_size * manager->n_heads_kv) +
+                    (int32_t) head * manager->block_size + token_in_block;
+            }
+        }
+        return;
+    }
+    GGML_ASSERT(ubatch.equal_seqs());
+
+    n_tokens  = ubatch.n_tokens;
+    batch_size = ubatch.n_seqs;
+
+    paged_write_slots.resize(n_tokens);
+    for (int32_t token = 0; token < n_tokens; ++token) {
+        const int32_t raw = ubatch.idx ? ubatch.idx[token] : token;
+        paged_write_slots[token] = full_info->write_slots[raw];
+    }
+
+    paged_block_table.resize((size_t) batch_size * max_blocks);
+    paged_context_lens.resize(batch_size);
+    paged_batch_offsets.resize(batch_size);
+    paged_batch_lens.resize(batch_size);
+
+    for (int32_t seq = 0; seq < batch_size; ++seq) {
+        const int32_t token = seq * ubatch.n_seq_tokens;
+        const int32_t raw = ubatch.idx ? ubatch.idx[token] : token;
+        int32_t full_seq = -1;
+        for (int32_t i = 0; i < full_info->n_seq; ++i) {
+            const int32_t begin = full_info->batch_offsets[i];
+            const int32_t end = begin + full_info->batch_lens[i];
+            if (raw >= begin && raw < end) {
+                full_seq = i;
+                break;
+            }
+        }
+        GGML_ASSERT(full_seq >= 0);
+
+        std::copy_n(
+                full_info->block_table + (size_t) full_seq * max_blocks,
+                max_blocks,
+                paged_block_table.data() + (size_t) seq * max_blocks);
+        paged_context_lens[seq]  = ubatch.pos[token + ubatch.n_seq_tokens - 1] + 1;
+        paged_batch_offsets[seq] = token;
+        paged_batch_lens[seq]    = ubatch.n_seq_tokens;
+    }
+
     paged_write_rows.resize((size_t) n_tokens * manager->n_heads_kv);
     for (int32_t token = 0; token < n_tokens; ++token) {
         const int32_t slot = paged_write_slots[token];
@@ -800,8 +867,6 @@ void llama_kv_cache_paged_context::set_batch_data(const llama_paged_batch_info &
         }
     }
 
-    max_blocks          = info.n_blocks_per_seq;
-    batch_size          = info.n_seq;
 }
 
 bool llama_kv_cache_paged_context::next() {
@@ -809,6 +874,7 @@ bool llama_kv_cache_paged_context::next() {
     if (++i_cur >= ubatches.size()) {
         return false;
     }
+    select_ubatch();
     return true;
 }
 
@@ -844,8 +910,8 @@ int32_t llama_kv_cache_paged_context::get_max_blocks() const {
     return max_blocks;
 }
 
-int32_t * llama_kv_cache_paged_context::get_write_slots() const {
-    return paged_write_slots;
+const int32_t * llama_kv_cache_paged_context::get_write_slots() const {
+    return paged_write_slots.data();
 }
 
 const int32_t * llama_kv_cache_paged_context::get_write_rows() const {
@@ -853,20 +919,20 @@ const int32_t * llama_kv_cache_paged_context::get_write_rows() const {
 }
 
 
-int32_t * llama_kv_cache_paged_context::get_block_table() const {
-    return paged_block_table;
+const int32_t * llama_kv_cache_paged_context::get_block_table() const {
+    return paged_block_table.data();
 }
 
-int32_t * llama_kv_cache_paged_context::get_context_lens() const {
-    return paged_context_lens;
+const int32_t * llama_kv_cache_paged_context::get_context_lens() const {
+    return paged_context_lens.data();
 }
 
-int32_t * llama_kv_cache_paged_context::get_batch_offsets() const {
-    return paged_batch_offsets;
+const int32_t * llama_kv_cache_paged_context::get_batch_offsets() const {
+    return paged_batch_offsets.data();
 }
 
-int32_t * llama_kv_cache_paged_context::get_batch_lens() const {
-    return paged_batch_lens;
+const int32_t * llama_kv_cache_paged_context::get_batch_lens() const {
+    return paged_batch_lens.data();
 }
 
 void llama_kv_cache_paged_context::set_n_tokens(int32_t new_n_tokens) {

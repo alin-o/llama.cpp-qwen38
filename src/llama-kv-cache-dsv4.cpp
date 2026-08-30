@@ -142,6 +142,7 @@ static llama_ubatch dsv4_build_raw_write_ubatch(const llama_ubatch & ubatch) {
             }
             data->n_seq_id.push_back(1);
             data->seq_id_data.push_back(seq_id);
+            data->idx.push_back(ubatch.idx ? ubatch.idx[i] : (int32_t) dst);
         }
     }
 
@@ -164,6 +165,7 @@ static llama_ubatch dsv4_build_raw_write_ubatch(const llama_ubatch & ubatch) {
         /*.seq_id_unq   =*/ data->seq_id_unq.data(),
         /*.seq_idx      =*/ data->seq_idx.data(),
         /*.output       =*/ data->output.data(),
+        /*.idx          =*/ data->idx.data(),
         /*.data         =*/ data,
     };
 

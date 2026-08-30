@@ -5,6 +5,8 @@
 #include <clocale>
 #include <vector>
 
+class llama_memory_recurrent;
+
 enum class llama_scheduler_status {
     OK,
     DEADLOCK,  // cannot make progress
@@ -17,7 +19,12 @@ enum class llama_scheduler_status {
 // scheduling promotes the oldest request.
 class llama_paged_scheduler_impl {
   public:
-    llama_paged_scheduler_impl(uint32_t n_ctx, uint32_t block_sz, int32_t n_batch, llama_kv_cache_paged * kv_manager);
+    llama_paged_scheduler_impl(
+            uint32_t                 n_ctx,
+            uint32_t                 block_sz,
+            int32_t                  n_batch,
+            llama_kv_cache_paged *   kv_manager,
+            llama_memory_recurrent * recurrent_manager = nullptr);
     ~llama_paged_scheduler_impl();
 
     llama_scheduler_status step(llama_batch & batch, int32_t spec_n = 0);
@@ -70,6 +77,7 @@ class llama_paged_scheduler_impl {
     const uint32_t         block_size;
     const int32_t          n_batch;
     llama_kv_cache_paged * kv_cache_manager = nullptr;
+    llama_memory_recurrent * recurrent_manager = nullptr;
     llama_paged_batch_info curr_info;
     int32_t spec_n = 0;
 

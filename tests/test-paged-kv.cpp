@@ -1197,6 +1197,46 @@ TEST(test_scheduler_swaps_and_resumes_request) {
     llama_batch_free(batch);
 }
 
+TEST(test_scheduler_reserves_spec_batch_after_swap) {
+    auto fixture = make_fixture(/*n_ctx=*/128, /*block_size=*/32, /*n_batch=*/64,
+                                /*n_gpu_blocks=*/2, /*n_cpu_blocks=*/1);
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/0, /*n_prompt=*/30)));
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/1, /*n_prompt=*/30)));
+
+    llama_batch batch = {};
+    const int8_t continue_flags[] = { 0, 0 };
+    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    fixture.sched->update(batch, { 1, 2 }, continue_flags);
+
+    EXPECT_TRUE(fixture.sched->step(batch, /*spec_n=*/3) == llama_scheduler_status::OK);
+    EXPECT_EQ(batch.n_tokens, 4);
+    const llama_paged_batch_info * info = fixture.sched->get_curr_batch_info();
+    EXPECT_EQ(info->n_seq, 1);
+    EXPECT_EQ(info->batch_lens[0], 4);
+
+    auto * first  = fixture.sched->get_group_from_id(0);
+    auto * second = fixture.sched->get_group_from_id(1);
+    EXPECT_TRUE(first != nullptr);
+    EXPECT_TRUE(second != nullptr);
+    EXPECT_EQ(first->block_table.size(), 2u);
+    EXPECT_TRUE(second->status == llama_sequence_group_status::SWAPPED);
+
+    const int8_t finish_flags[] = { 1 };
+    fixture.sched->update(batch, { 3 }, { 4 }, finish_flags);
+
+    EXPECT_TRUE(fixture.sched->step(batch, /*spec_n=*/3) == llama_scheduler_status::OK);
+    info = fixture.sched->get_curr_batch_info();
+    EXPECT_EQ(info->n_seq, 1);
+    EXPECT_EQ(info->batch_lens[0], 4);
+    EXPECT_EQ(batch.n_tokens, 4);
+    EXPECT_EQ(batch.seq_id[0][0], 1);
+    second = fixture.sched->get_group_from_id(1);
+    EXPECT_TRUE(second != nullptr);
+    EXPECT_TRUE(second->status == llama_sequence_group_status::RUNNING);
+    EXPECT_EQ(second->block_table.size(), 2u);
+    llama_batch_free(batch);
+}
+
 int main(int /*argc*/, char ** /*argv*/) {
     fprintf(stderr, "test-paged-kv: block_manager\n");
     RUN(test_paged_graph_tensor_compatibility);
@@ -1239,6 +1279,7 @@ int main(int /*argc*/, char ** /*argv*/) {
     RUN(test_scheduler_batches_two_cross_block_prefills);
     RUN(test_paged_attention_head_mapping_and_dispatch_selection);
     RUN(test_scheduler_swaps_and_resumes_request);
+    RUN(test_scheduler_reserves_spec_batch_after_swap);
 
 #if defined(GGML_USE_CUDA)
     RUN(test_paged_attention_cuda_production_correctness);

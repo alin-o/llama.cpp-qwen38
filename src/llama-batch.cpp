@@ -7,6 +7,7 @@
 #include <cassert>
 #include <cstring>
 #include <algorithm>
+#include <numeric>
 #include <sstream>
 
 llama_batch_allocr::llama_batch_allocr(uint32_t n_pos_per_embd) : n_pos_per_embd(n_pos_per_embd) {
@@ -224,6 +225,7 @@ bool llama_batch_allocr::init(
             /*.seq_id_unq   =*/ this->seq_id_unq.data(),
             /*.seq_idx      =*/ this->seq_idx.data(),
             /*.output       =*/ batch.logits,
+            /*.idx          =*/ nullptr,
             /*.data         =*/ {},
         };
 
@@ -408,11 +410,13 @@ llama_ubatch llama_batch_allocr::ubatch_reserve(uint32_t n_seq_tokens, uint32_t 
     udata->seq_id_unq.resize(0);
     udata->seq_idx   .resize(LLAMA_MAX_SEQ, -1);
     udata->output    .resize(n_tokens);
+    udata->idx       .resize(n_tokens);
 
     for (uint32_t s = 0; s < n_seqs; ++s) {
         udata->seq_idx[s] = s;
         udata->seq_id_unq.push_back(s);
     }
+    std::iota(udata->idx.begin(), udata->idx.end(), 0);
 
     llama_ubatch res {
         /*.b_equal_seqs =*/ true,
@@ -430,6 +434,7 @@ llama_ubatch llama_batch_allocr::ubatch_reserve(uint32_t n_seq_tokens, uint32_t 
         /*.seq_id_unq   =*/ udata->seq_id_unq.data(),
         /*.seq_idx      =*/ udata->seq_idx.data(),
         /*.output       =*/ udata->output.data(),
+        /*.idx          =*/ udata->idx.data(),
         /*.data         =*/ std::move(udata),
     };
 
@@ -764,6 +769,7 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
     udata->seq_id_unq.resize(0);
     udata->seq_idx   .resize(LLAMA_MAX_SEQ, -1);
     udata->output    .resize(n_tokens);
+    udata->idx       = idxs;
 
     udata->seq_id_data.reserve(n_tokens);
 
@@ -831,6 +837,7 @@ llama_ubatch llama_batch_allocr::ubatch_add(const std::vector<int32_t> & idxs, u
         /*.seq_id_unq   =*/ udata->seq_id_unq.data(),
         /*.seq_idx      =*/ udata->seq_idx.data(),
         /*.output       =*/ udata->output.data(),
+        /*.idx          =*/ udata->idx.data(),
         /*.data         =*/ std::move(udata),
     };
 

@@ -32,7 +32,7 @@ class llama_kv_cache_paged : public llama_memory_i {
     bool allocate(int32_t num_tokens, llama_sequence_group & group);
     void free_blocks(llama_sequence_group & group);
     bool release_seq_tail(llama_seq_id seq_id, uint32_t keep_tokens);
-    bool swap_in(llama_sequence_group & group);
+    bool swap_in(llama_sequence_group & group, int32_t num_tokens = 1);
     bool swap_out(llama_sequence_group & group);
 
     void     set_paged_batch_info(const llama_paged_batch_info * info);
@@ -164,13 +164,13 @@ class llama_kv_cache_paged_context : public llama_memory_context_i {
     int32_t get_batch_size() const;
     int32_t get_max_blocks() const;
 
-    int32_t * get_write_slots() const;
-    int32_t * get_block_table() const;
+    const int32_t * get_write_slots() const;
+    const int32_t * get_block_table() const;
     const int32_t * get_write_rows() const;
 
-    int32_t * get_context_lens() const;
-    int32_t * get_batch_offsets() const;
-    int32_t * get_batch_lens() const;
+    const int32_t * get_context_lens() const;
+    const int32_t * get_batch_offsets() const;
+    const int32_t * get_batch_lens() const;
 
     void set_n_tokens(int32_t new_n_tokens);
     void set_batch_size(int32_t new_batch_size);
@@ -197,11 +197,14 @@ class llama_kv_cache_paged_context : public llama_memory_context_i {
     std::vector<llama_ubatch> ubatches;
     size_t                    i_cur = 0;      // index of ubatch to process
 
-    int32_t * paged_write_slots   = nullptr;  // [n_tokens]
-    int32_t * paged_block_table   = nullptr;  // [batch_size, max_blocks]
-    int32_t * paged_context_lens  = nullptr;  // [batch_size]
-    int32_t * paged_batch_offsets = nullptr;  // [batch_size]
-    int32_t * paged_batch_lens    = nullptr;  // [batch_size]
+    void select_ubatch();
+
+    const llama_paged_batch_info * full_info = nullptr;
+    std::vector<int32_t> paged_write_slots;
+    std::vector<int32_t> paged_block_table;
+    std::vector<int32_t> paged_context_lens;
+    std::vector<int32_t> paged_batch_offsets;
+    std::vector<int32_t> paged_batch_lens;
     std::vector<int32_t> paged_write_rows;
 
 

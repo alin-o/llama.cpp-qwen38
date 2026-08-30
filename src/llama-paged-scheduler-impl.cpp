@@ -1,16 +1,21 @@
 #include "llama-paged-scheduler-impl.h"
 
 #include <algorithm>
+#include <stdexcept>
 #include "llama-impl.h"
+#include "llama-memory-recurrent.h"
 
-llama_paged_scheduler_impl::llama_paged_scheduler_impl(uint32_t               n_ctx,
-                                                       uint32_t               block_sz,
-                                                       int32_t                n_batch,
-                                                       llama_kv_cache_paged * kv_manager) :
+llama_paged_scheduler_impl::llama_paged_scheduler_impl(
+        uint32_t                 n_ctx,
+        uint32_t                 block_sz,
+        int32_t                  n_batch,
+        llama_kv_cache_paged *   kv_manager,
+        llama_memory_recurrent * recurrent_manager) :
     n_seq_max_ctx(n_ctx),
     block_size(block_sz),
     n_batch(n_batch),
     kv_cache_manager(kv_manager),
+    recurrent_manager(recurrent_manager),
     curr_info{} {}
 
 llama_paged_scheduler_impl::~llama_paged_scheduler_impl() {
@@ -310,7 +315,7 @@ void llama_paged_scheduler_impl::process_running_list(llama_sequence_group_raw_l
                     }
 
                     // Try allocating again after swapping younger requests.
-                    success = kv_cache_manager->allocate(1, *group);
+                    success = kv_cache_manager->allocate(1 + spec_n, *group);
                 }
 
                 if (!success) {
@@ -343,7 +348,7 @@ void llama_paged_scheduler_impl::process_swapped_list(llama_sequence_group_raw_l
         llama_sequence_group * group = it->get();
 
         GGML_ASSERT(group && "the group to swap is nullptr.");
-        const bool success = kv_cache_manager->swap_in(*group);
+        const bool success = kv_cache_manager->swap_in(*group, 1 + spec_n);
         if (!success) {
             // We respect FCFS, so we stop here to prevent a younger swapped request from jumping ahead.
             break;
@@ -504,6 +509,9 @@ void llama_paged_scheduler_impl::populate_batch_from(const llama_sequence_group_
             batch.logits[batch_start_id] = (token_idx == (new_tokens - 1));  // only the last token
 
             int32_t token_pos                     = group->n_past + token_idx;
+            if (!is_prefill) {
+                batch.logits[batch_start_id] = true;
+            }
             curr_info.write_slots[batch_start_id] = calculate_global_slot_index(token_pos, group->block_table);
             LLAMA_LOG_DEBUG("%s: llama_batch seq_id: %d (req_id %d) token %d: pos: %d, global_slot_idx=%d\n", __func__,
                             seq_id, group->request_id, token_idx, token_pos, curr_info.write_slots[batch_start_id]);
@@ -561,12 +569,15 @@ void llama_paged_scheduler_impl::update(const llama_batch &              batch,
 
         group->n_past += commit;
         group->n_decoded += commit;
-        group->logical_seq.push_back(new_tokens[i]);
         for (uint32_t j = 1; j < commit; ++j) {
             group->logical_seq.push_back(batch.token[token_offset + j]);
         }
+        group->logical_seq.push_back(new_tokens[i]);
 
         if (commit < proposal) {
+            if (recurrent_manager && !recurrent_manager->seq_rm(request_id, group->n_past, -1)) {
+                throw std::runtime_error("failed to roll back paged recurrent state");
+            }
             kv_cache_manager->release_seq_tail(request_id, group->n_past);
         }
 

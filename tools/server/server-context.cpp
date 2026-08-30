@@ -840,7 +840,71 @@ private:
     llama_batch paged_batch = {};
 
     bool update_slots_paged() {
-        if (!llama_paged_scheduler_prepare_batch(paged_scheduler.get(), &paged_batch)) {
+        int32_t spec_n = 0;
+        std::vector<server_slot *> drafting;
+
+        if (spec) {
+            iterate(slots, [&](server_slot & slot) {
+                if (slot.state != SLOT_STATE_GENERATING) {
+                    return;
+                }
+
+                auto & dparams = common_speculative_get_draft_params(spec.get(), slot.id);
+                dparams.drafting = false;
+                const int n_draft_max = slot.get_n_draft_max();
+                if (n_draft_max <= 0) {
+                    return;
+                }
+
+                slot.spec_ckpt.update_pos(
+                        slot.prompt.n_tokens(),
+                        llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id),
+                        llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id));
+                slot.spec_prompt = slot.prompt.tokens.get_text_tokens();
+                dparams = {
+                    /* .drafting = */ true,
+                    /* .n_max    = */ n_draft_max,
+                    /* .n_past   = */ slot.prompt.n_tokens(),
+                    /* .id_last  = */ slot.sampled,
+                    /* .prompt   = */ &slot.spec_prompt,
+                    /* .result   = */ &slot.spec_draft,
+                };
+                drafting.push_back(&slot);
+            });
+
+            if (!drafting.empty()) {
+                queue_tasks.yield_to_queue([&]() {
+                    common_speculative_draft(spec.get());
+                });
+            }
+
+            for (server_slot * slot : drafting) {
+                slot->stats.n_draft_tokens += slot->spec_draft.size();
+                if (ctx_dft && !llama_memory_seq_rm(
+                            llama_get_memory(ctx_dft), slot->id, slot->spec_ckpt.pos_max + 1, -1)) {
+                    throw std::runtime_error("failed to trim paged speculative draft context");
+                }
+            }
+
+            spec_n = common_speculative_n_max(&params_base.speculative);
+            bool has_generating = false;
+            for (server_slot & slot : slots) {
+                if (slot.state == SLOT_STATE_GENERATING) {
+                    has_generating = true;
+                    spec_n = std::min(spec_n, (int32_t) slot.spec_draft.size());
+                }
+            }
+            if (!has_generating) {
+                spec_n = 0;
+            }
+            for (server_slot & slot : slots) {
+                if (slot.state == SLOT_STATE_GENERATING && (int32_t) slot.spec_draft.size() > spec_n) {
+                    slot.spec_draft.resize(spec_n);
+                }
+            }
+        }
+
+        if (!llama_paged_scheduler_prepare_batch_ex(paged_scheduler.get(), &paged_batch, spec_n)) {
             throw std::runtime_error("paged scheduler failed to prepare batch");
         }
         if (paged_batch.n_tokens <= 0) {
@@ -850,16 +914,56 @@ private:
         if (info == nullptr) {
             throw std::runtime_error("paged scheduler returned no batch info");
         }
+
+        if (spec) {
+            std::vector<bool> scheduled(slots.size(), false);
+            for (int i = 0; i < info->n_seq; ++i) {
+                scheduled[paged_batch.seq_id[info->batch_offsets[i]][0]] = true;
+            }
+            for (server_slot * slot : drafting) {
+                if (!scheduled[slot->id]) {
+                    slot->spec_draft.clear();
+                    slot->spec_i_batch.clear();
+                    common_speculative_get_draft_params(spec.get(), slot->id).drafting = false;
+                }
+            }
+        }
+
+        for (int i = 0; i < info->n_seq; ++i) {
+            const int offset = info->batch_offsets[i];
+            server_slot & slot = slots[paged_batch.seq_id[offset][0]];
+            if (slot.state != SLOT_STATE_GENERATING || slot.spec_draft.empty()) {
+                continue;
+            }
+
+            slot.spec_i_batch.clear();
+            const int n_verify = std::min(info->batch_lens[i], (int32_t) slot.spec_draft.size() + 1);
+            for (int j = 0; j < n_verify; ++j) {
+                const int idx = offset + j;
+                slot.spec_i_batch.push_back(idx);
+                if (j > 0) {
+                    paged_batch.token[idx] = slot.spec_draft[j - 1];
+                }
+            }
+        }
+
         if (llama_decode(ctx_tgt, paged_batch) != 0) {
             throw std::runtime_error("paged scheduler decode failed");
         }
         llama_synchronize(ctx_tgt);
+        if (spec && !common_speculative_process(spec.get(), paged_batch)) {
+            throw std::runtime_error("failed to process paged speculative batch");
+        }
+
         std::vector<llama_token> sampled_tokens(info->n_seq);
+        std::vector<uint32_t> accepted_counts(info->n_seq);
         std::vector<int8_t> stop_flags(info->n_seq, 0);
         std::vector<int32_t> finished_slots;
         for (int i = 0; i < info->n_seq; ++i) {
-            const int slot_id = paged_batch.seq_id[info->batch_offsets[i]][0];
+            const int offset = info->batch_offsets[i];
+            const int slot_id = paged_batch.seq_id[offset][0];
             server_slot & slot = slots[slot_id];
+            const bool is_prefill = slot.state == SLOT_STATE_STARTED;
             if (slot.state == SLOT_STATE_STARTED) {
                 slot.prompt.clear();
                 slot.prompt.tokens.insert(slot.task->tokens.get_text_tokens());
@@ -868,31 +972,72 @@ private:
                 slot.stats.n_prompt_processed = slot.prompt.n_tokens();
                 slot.init_sampler();
                 slot.state = SLOT_STATE_DONE_PROMPT;
+                if (spec) {
+                    common_speculative_begin(spec.get(), slot.id, slot.prompt.tokens.get_text_tokens());
+                }
             }
-            int token_idx{};
-            for (int j = 0; j <= i; ++j) {
-                token_idx += info->batch_lens[j];
+
+            if (!is_prefill && !slot.spec_draft.empty()) {
+                auto accepted = common_sampler_sample_and_accept_n(
+                        slot.smpl.get(), ctx_tgt, slot.spec_i_batch, slot.spec_draft);
+                slot.spec_i_batch.clear();
+                if (accepted.empty()) {
+                    throw std::runtime_error("paged speculative sampler accepted no tokens");
+                }
+
+                accepted_counts[i] = accepted.size();
+                sampled_tokens[i] = accepted.back();
+                common_speculative_accept(spec.get(), slot.id, accepted.size() - 1);
+                slot.stats.n_draft_accepted += accepted.size() - 1;
+                slot.stats.n_draft_verif_steps++;
+                slot.prompt.tokens.push_back(paged_batch.token[offset]);
+                slot.prompt.tokens.insert({accepted.begin(), accepted.end() - 1});
+                if (ctx_dft && !llama_memory_seq_rm(
+                            llama_get_memory(ctx_dft), slot.id, slot.prompt.tokens.pos_next(), -1)) {
+                    throw std::runtime_error("failed to roll back rejected paged draft tokens");
+                }
+                slot.spec_draft.clear();
+
+                for (llama_token id : accepted) {
+                    completion_token_output result;
+                    result.tok = id;
+                    result.text_to_send = common_token_to_piece(ctx_tgt, id, params_base.special);
+                    result.prob = 1.0f;
+                    slot.stats.n_gen++;
+                    if (!process_token(result, slot)) {
+                        stop_flags[i] = 1;
+                        break;
+                    }
+                }
+            } else {
+                if (!is_prefill) {
+                    slot.prompt.tokens.push_back(paged_batch.token[offset]);
+                }
+                const int token_idx = offset + info->batch_lens[i] - 1;
+                const llama_token id = common_sampler_sample(slot.smpl.get(), ctx_tgt, token_idx);
+                common_sampler_accept(slot.smpl.get(), id, true);
+                completion_token_output result;
+                result.tok = id;
+                result.text_to_send = common_token_to_piece(ctx_tgt, id, params_base.special);
+                result.prob = 1.0f;
+                slot.stats.n_gen++;
+                sampled_tokens[i] = id;
+                accepted_counts[i] = info->batch_lens[i];
+                if (!process_token(result, slot)) {
+                    stop_flags[i] = 1;
+                }
             }
-            token_idx--;
-            const llama_token id = common_sampler_sample(slot.smpl.get(), ctx_tgt, token_idx);
-            common_sampler_accept(slot.smpl.get(), id, true);
-            completion_token_output result;
-            result.tok = id;
-            result.text_to_send = common_token_to_piece(ctx_tgt, id, params_base.special);
-            result.prob = 1.0f;
-            slot.stats.n_gen++;
-            sampled_tokens[i] = id;
-            if (!process_token(result, slot)) {
-                stop_flags[i] = 1;
+
+            if (stop_flags[i]) {
                 slot.print_timings();
                 send_final_response(slot);
                 finished_slots.push_back(slot.id);
             } else {
-                slot.prompt.tokens.push_back(id);
                 slot.state = SLOT_STATE_GENERATING;
             }
         }
-        llama_paged_scheduler_update(paged_scheduler.get(), &paged_batch, sampled_tokens.data(), stop_flags.data());
+        llama_paged_scheduler_update_ex(
+                paged_scheduler.get(), &paged_batch, sampled_tokens.data(), accepted_counts.data(), stop_flags.data());
         for (int id_slot : finished_slots) {
             llama_paged_scheduler_remove_request(paged_scheduler.get(), id_slot);
             slots[id_slot].release();
@@ -1036,8 +1181,8 @@ private:
                                         params_base.speculative.types.end(),
                                         COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end();
         const bool has_spec = has_draft || spec_mtp;
-        if (params.kv_paged && (has_spec || params.ctx_shift || params.n_cache_reuse)) {
-            throw std::runtime_error("--kv-paged does not support speculative decoding, context shift, or KV cache reuse");
+        if (params.kv_paged && ((has_spec && !spec_mtp) || params.ctx_shift || params.n_cache_reuse)) {
+            throw std::runtime_error("--kv-paged supports only MTP speculative decoding and does not support context shift or KV cache reuse");
         }
         if (callback_state) {
             std::vector<std::string> stages = {"text_model"};
@@ -1141,6 +1286,7 @@ private:
 
             {
                 common_params params_dft = common_base_params_to_speculative(params_base);
+                params_dft.kv_paged = false;
 
                 // progress callback
                 params_dft.load_progress_callback           = load_progress_callback;
@@ -1250,7 +1396,7 @@ private:
         }
 
         // try speculative decoding
-        if (ctx_tgt_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
+        if (ctx_tgt_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_NO || (params_base.kv_paged && spec_mtp)) {
             try {
                 spec.reset(common_speculative_init(params_base.speculative, params_base.n_parallel));
             } catch (const std::exception & e) {

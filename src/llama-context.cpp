@@ -2006,17 +2006,34 @@ int llama_context::decode(const llama_batch & batch_inp) {
         {
             const bool masked    = cparams.embeddings_nextn_masked;
             const int64_t n_rows = masked ? n_outputs       : (int64_t) ubatch.n_tokens;
-            const int64_t offset = masked ? n_outputs_prev  : n_tokens_prev;
-
             if (embd_nextn.data && t_h_nextn && n_rows > 0 && cparams.pooling_type == LLAMA_POOLING_TYPE_NONE) {
                 ggml_backend_t backend_h = ggml_backend_sched_get_tensor_backend(sched.get(), t_h_nextn);
                 GGML_ASSERT(backend_h != nullptr);
 
                 const uint32_t n_embd  = hparams.n_embd_out();
-                float * embd_nextn_out = embd_nextn.data + offset*n_embd;
+                if (masked) {
+                    float * embd_nextn_out = embd_nextn.data + n_outputs_prev*n_embd;
+                    GGML_ASSERT((n_outputs_prev + n_rows)*n_embd <= (int64_t) embd_nextn.size);
+                    ggml_backend_tensor_get_async(backend_h, t_h_nextn, embd_nextn_out, 0, n_rows*n_embd*sizeof(float));
+                } else {
+                    GGML_ASSERT(ubatch.idx != nullptr);
+                    for (int64_t row = 0; row < n_rows;) {
+                        const int32_t dst = ubatch.idx[row];
+                        int64_t run = 1;
+                        while (row + run < n_rows && ubatch.idx[row + run] == dst + run) {
+                            ++run;
+                        }
 
-                GGML_ASSERT((offset + n_rows)*n_embd <= (int64_t) embd_nextn.size);
-                ggml_backend_tensor_get_async(backend_h, t_h_nextn, embd_nextn_out, 0, n_rows*n_embd*sizeof(float));
+                        GGML_ASSERT((int64_t) (dst + run)*n_embd <= (int64_t) embd_nextn.size);
+                        ggml_backend_tensor_get_async(
+                                backend_h,
+                                t_h_nextn,
+                                embd_nextn.data + (size_t) dst*n_embd,
+                                (size_t) row*n_embd*sizeof(float),
+                                (size_t) run*n_embd*sizeof(float));
+                        row += run;
+                    }
+                }
             }
         }
 
@@ -2305,7 +2322,7 @@ void llama_context::output_reorder() {
             }
         }
 
-        if (embd_nextn.size > 0) {
+        if (embd_nextn.size > 0 && cparams.embeddings_nextn_masked) {
             for (uint64_t k = 0; k < n_embd_out; k++) {
                 std::swap(embd_nextn.data[i0*n_embd_out + k], embd_nextn.data[i1*n_embd_out + k]);
             }
