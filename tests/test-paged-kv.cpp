@@ -982,6 +982,9 @@ TEST(test_paged_attention_head_mapping_and_dispatch_selection) {
     for (int q_head = 0; q_head < 8; ++q_head) {
         EXPECT_TRUE(ggml_paged_attn_kv_head(q_head, 8, 2) == q_head / 4);
     }
+    for (int q_head = 0; q_head < 24; ++q_head) {
+        EXPECT_TRUE(ggml_paged_attn_kv_head(q_head, 24, 4) == q_head / 6);
+    }
 
     EXPECT_TRUE(ggml_paged_attn_tiled_prefill_supported(
         128, GGML_TYPE_F32, true, true, 32, 1, 2, true, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0));
@@ -1138,6 +1141,195 @@ TEST(test_paged_attention_cuda_production_correctness) {
     ggml_backend_free(cpu_backend);
 }
 
+struct paged_decode_result {
+    std::vector<float> output;
+    std::vector<uint8_t> k_cache;
+    std::vector<uint8_t> v_cache;
+};
+
+static paged_decode_result run_paged_attention_decode_case(
+        ggml_backend_t backend, int n_heads, int n_heads_kv,
+        int context_length, int n_sequences, int block_size) {
+    constexpr int head_dim = 256;
+    const int max_blocks = (context_length + block_size - 1) / block_size;
+    const int n_cache_blocks = n_sequences * max_blocks;
+    const int n_tokens = n_sequences;
+    const int n_write_rows = n_tokens * n_heads_kv;
+
+    const size_t graph_size = 16;
+    ggml_init_params params = {
+        /* .mem_size = */ ggml_tensor_overhead() * 32 + ggml_graph_overhead_custom(graph_size, false),
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc = */ true,
+    };
+    ggml_context * ctx = ggml_init(params);
+    EXPECT_TRUE(ctx != nullptr);
+
+    ggml_tensor * q = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim, n_heads, n_tokens);
+    ggml_tensor * k_new = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim, n_heads_kv, n_tokens);
+    ggml_tensor * v_new = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, head_dim, n_heads_kv, n_tokens);
+    ggml_tensor * k_cache = ggml_new_tensor_4d(
+        ctx, GGML_TYPE_Q8_0, head_dim, block_size, n_heads_kv, n_cache_blocks);
+    ggml_tensor * v_cache = ggml_new_tensor_4d(
+        ctx, GGML_TYPE_Q8_0, head_dim, block_size, n_heads_kv, n_cache_blocks);
+    ggml_tensor * block_table = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, max_blocks, n_sequences);
+    ggml_tensor * write_rows = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_write_rows);
+    ggml_tensor * context_lens = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_sequences);
+    ggml_tensor * batch_offsets = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_sequences);
+    ggml_tensor * batch_lens = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_sequences);
+    ggml_tensor * out = ggml_paged_attn(
+        ctx, q, k_new, v_new, k_cache, v_cache, block_table, write_rows,
+        context_lens, batch_offsets, batch_lens, 1.0f / std::sqrt((float) head_dim), block_size, max_blocks);
+
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    EXPECT_TRUE(buffer != nullptr);
+
+    std::vector<float> q_data(ggml_nelements(q));
+    std::vector<float> k_new_data(ggml_nelements(k_new));
+    std::vector<float> v_new_data(ggml_nelements(v_new));
+    for (size_t i = 0; i < q_data.size(); ++i) {
+        const int dim = i % head_dim;
+        const int head = (i / head_dim) % n_heads;
+        const int seq = i / ((size_t) head_dim * n_heads);
+        q_data[i] = 0.55f * std::sin(0.071f * (dim + 1) * (1 + head % 3)) +
+            0.35f * std::cos(0.113f * (dim + 3) + 0.29f * head + 0.41f * seq);
+    }
+    for (size_t i = 0; i < k_new_data.size(); ++i) {
+        const int dim = i % head_dim;
+        const int head = (i / head_dim) % n_heads_kv;
+        const int seq = i / ((size_t) head_dim * n_heads_kv);
+        k_new_data[i] = 0.60f * std::sin(0.071f * (dim + 1) * (1 + (head + seq) % 3)) +
+            0.30f * std::cos(0.113f * (dim + 3) + 0.37f * head - 0.43f * seq);
+        v_new_data[i] = 0.45f * std::cos(0.097f * (dim + 5) + 0.31f * head + 0.53f * seq);
+    }
+
+    const size_t n_cache_rows = (size_t) n_cache_blocks * n_heads_kv * block_size;
+    std::vector<float> k_data(n_cache_rows * head_dim);
+    std::vector<float> v_data(n_cache_rows * head_dim);
+    for (size_t row = 0; row < n_cache_rows; ++row) {
+        for (int dim = 0; dim < head_dim; ++dim) {
+            const size_t i = row * head_dim + dim;
+            const float direction = row % 2 == 0 ? 1.0f : -1.0f;
+            k_data[i] = direction * 0.65f * std::sin(0.071f * (dim + 1) * (1 + row % 3)) +
+                0.35f * std::cos(0.113f * (dim + 3) + 0.37f * row);
+            v_data[i] = 0.50f * std::cos(0.097f * (dim + 5) + 0.23f * row) +
+                0.15f * std::sin(0.047f * (dim + 1) * (1 + row % 5));
+        }
+    }
+    std::vector<uint8_t> k_quantized(ggml_nbytes(k_cache));
+    std::vector<uint8_t> v_quantized(ggml_nbytes(v_cache));
+    EXPECT_TRUE(ggml_quantize_chunk(
+        GGML_TYPE_Q8_0, k_data.data(), k_quantized.data(), 0, n_cache_rows, head_dim, nullptr) == k_quantized.size());
+    EXPECT_TRUE(ggml_quantize_chunk(
+        GGML_TYPE_Q8_0, v_data.data(), v_quantized.data(), 0, n_cache_rows, head_dim, nullptr) == v_quantized.size());
+
+    std::vector<int32_t> block_table_data((size_t) n_sequences * max_blocks);
+    std::vector<int32_t> write_rows_data(n_write_rows);
+    std::vector<int32_t> context_lens_data(n_sequences, context_length);
+    std::vector<int32_t> batch_offsets_data(n_sequences);
+    std::vector<int32_t> batch_lens_data(n_sequences, 1);
+    for (int seq = 0; seq < n_sequences; ++seq) {
+        batch_offsets_data[seq] = seq;
+        for (int logical = 0; logical < max_blocks; ++logical) {
+            block_table_data[(size_t) seq * max_blocks + logical] =
+                seq * max_blocks + max_blocks - logical - 1;
+        }
+        const int logical_pos = context_length - 1;
+        const int physical_block = block_table_data[(size_t) seq * max_blocks + logical_pos / block_size];
+        for (int head = 0; head < n_heads_kv; ++head) {
+            write_rows_data[seq * n_heads_kv + head] = physical_block * n_heads_kv * block_size +
+                head * block_size + logical_pos % block_size;
+        }
+    }
+
+    ggml_backend_tensor_set(q, q_data.data(), 0, ggml_nbytes(q));
+    ggml_backend_tensor_set(k_new, k_new_data.data(), 0, ggml_nbytes(k_new));
+    ggml_backend_tensor_set(v_new, v_new_data.data(), 0, ggml_nbytes(v_new));
+    ggml_backend_tensor_set(k_cache, k_quantized.data(), 0, k_quantized.size());
+    ggml_backend_tensor_set(v_cache, v_quantized.data(), 0, v_quantized.size());
+    ggml_backend_tensor_set(block_table, block_table_data.data(), 0, ggml_nbytes(block_table));
+    ggml_backend_tensor_set(write_rows, write_rows_data.data(), 0, ggml_nbytes(write_rows));
+    ggml_backend_tensor_set(context_lens, context_lens_data.data(), 0, ggml_nbytes(context_lens));
+    ggml_backend_tensor_set(batch_offsets, batch_offsets_data.data(), 0, ggml_nbytes(batch_offsets));
+    ggml_backend_tensor_set(batch_lens, batch_lens_data.data(), 0, ggml_nbytes(batch_lens));
+
+    ggml_cgraph * graph = ggml_new_graph_custom(ctx, graph_size, false);
+    ggml_build_forward_expand(graph, out);
+    EXPECT_TRUE(ggml_backend_graph_compute(backend, graph) == GGML_STATUS_SUCCESS);
+
+    paged_decode_result result;
+    result.output.resize(ggml_nelements(out));
+    result.k_cache.resize(ggml_nbytes(k_cache));
+    result.v_cache.resize(ggml_nbytes(v_cache));
+    ggml_backend_tensor_get(out, result.output.data(), 0, ggml_nbytes(out));
+    ggml_backend_tensor_get(k_cache, result.k_cache.data(), 0, ggml_nbytes(k_cache));
+    ggml_backend_tensor_get(v_cache, result.v_cache.data(), 0, ggml_nbytes(v_cache));
+    ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+    return result;
+}
+
+static double paged_decode_relative_squared_error(
+        const std::vector<float> & actual, const std::vector<float> & reference) {
+    EXPECT_TRUE(actual.size() == reference.size());
+    double squared_error = 0.0;
+    double squared_reference = 0.0;
+    for (size_t i = 0; i < actual.size(); ++i) {
+        EXPECT_TRUE(std::isfinite(actual[i]));
+        squared_error += (double) (actual[i] - reference[i]) * (actual[i] - reference[i]);
+        squared_reference += (double) reference[i] * reference[i];
+    }
+    EXPECT_TRUE(squared_reference > 0.0);
+    return squared_error / squared_reference;
+}
+
+static void check_paged_attention_decode_case(
+        ggml_backend_t cpu_backend, ggml_backend_t cuda_backend,
+        int n_heads, int n_heads_kv, int context_length, int n_sequences, int block_size) {
+    const paged_decode_result reference = run_paged_attention_decode_case(
+        cpu_backend, n_heads, n_heads_kv, context_length, n_sequences, block_size);
+
+    setenv("GGML_CUDA_PAGED_Q8_FLOAT_Q", "1", 1);
+    ggml_paged_attn_q8_decode_launch_count_reset();
+    const paged_decode_result float_q = run_paged_attention_decode_case(
+        cuda_backend, n_heads, n_heads_kv, context_length, n_sequences, block_size);
+    EXPECT_TRUE(ggml_paged_attn_q8_decode_launch_count() > 0);
+    unsetenv("GGML_CUDA_PAGED_Q8_FLOAT_Q");
+
+    ggml_paged_attn_q8_decode_launch_count_reset();
+    const paged_decode_result packed_q = run_paged_attention_decode_case(
+        cuda_backend, n_heads, n_heads_kv, context_length, n_sequences, block_size);
+    EXPECT_TRUE(ggml_paged_attn_q8_decode_launch_count() > 0);
+    EXPECT_TRUE(float_q.k_cache == reference.k_cache);
+    EXPECT_TRUE(float_q.v_cache == reference.v_cache);
+    EXPECT_TRUE(packed_q.k_cache == reference.k_cache);
+    EXPECT_TRUE(packed_q.v_cache == reference.v_cache);
+
+    const double float_error = paged_decode_relative_squared_error(float_q.output, reference.output);
+    const double packed_error = paged_decode_relative_squared_error(packed_q.output, reference.output);
+    const double added_error = fmax(0.0, packed_error - float_error);
+    fprintf(stderr, " q8_1 error: float=%g packed=%g added=%g ", float_error, packed_error, added_error);
+    EXPECT_TRUE(float_error < 5e-3);
+    EXPECT_TRUE(packed_error < 5e-3);
+    EXPECT_TRUE(added_error < 1e-4);
+}
+
+TEST(test_paged_attention_q8_decode_boundaries) {
+    ggml_backend_t cpu_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    ggml_backend_t cuda_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr);
+    EXPECT_TRUE(cpu_backend != nullptr);
+    EXPECT_TRUE(cuda_backend != nullptr);
+
+    for (int context_length : { 1, 15, 16, 17, 31, 32, 33 }) {
+        check_paged_attention_decode_case(cpu_backend, cuda_backend, 24, 4, context_length, 1, 16);
+    }
+    check_paged_attention_decode_case(cpu_backend, cuda_backend, 24, 4, 33, 3, 16);
+    check_paged_attention_decode_case(cpu_backend, cuda_backend, 32, 4, 33, 2, 32);
+
+    ggml_backend_free(cuda_backend);
+    ggml_backend_free(cpu_backend);
+}
+
 TEST(test_paged_attention_cuda_runtime_coverage) {
     EXPECT_TRUE(ggml_paged_attn_cuda_runtime_test());
 }
@@ -1261,6 +1453,9 @@ TEST(test_scheduler_caps_constrained_spec_batch) {
 }
 
 int main(int /*argc*/, char ** /*argv*/) {
+#if defined(GGML_USE_CUDA)
+    setenv("GGML_CUDA_DISABLE_GRAPHS", "1", 1);
+#endif
     fprintf(stderr, "test-paged-kv: block_manager\n");
     RUN(test_paged_graph_tensor_compatibility);
     RUN(test_paged_graph_reuse_accepts_mapping_remap);
@@ -1307,6 +1502,7 @@ int main(int /*argc*/, char ** /*argv*/) {
 
 #if defined(GGML_USE_CUDA)
     RUN(test_paged_attention_cuda_production_correctness);
+    RUN(test_paged_attention_q8_decode_boundaries);
     RUN(test_paged_attention_cuda_runtime_coverage);
 #endif
     RUN(test_decode_only_batch_skips_tiled_prefill);

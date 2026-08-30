@@ -12036,11 +12036,11 @@ void ggml_compute_forward_paged_attn(const ggml_compute_params * params, ggml_te
 
     const ggml_tensor * q             = dst->src[0];
     const ggml_tensor * k_new         = dst->src[1];
-    GGML_UNUSED(dst->src[2]);
-    const ggml_tensor * k_cache      = dst->src[3];
-    const ggml_tensor * v_cache      = dst->src[4];
+    const ggml_tensor * v_new         = dst->src[2];
+    ggml_tensor * k_cache             = dst->src[3];
+    ggml_tensor * v_cache             = dst->src[4];
     const ggml_tensor * block_table   = dst->src[5];
-    GGML_UNUSED(dst->src[6]);
+    const ggml_tensor * write_rows    = dst->src[6];
     const ggml_tensor * ctx_lens      = dst->src[7];
     const ggml_tensor * batch_offsets = dst->src[8];
     const ggml_tensor * batch_lens    = dst->src[9];
@@ -12059,6 +12059,44 @@ void ggml_compute_forward_paged_attn(const ggml_compute_params * params, ggml_te
     GGML_ASSERT(n_heads != 0 && "n_head cannot be 0.");
     GGML_ASSERT(n_heads_kv != 0 && "n_head_kv cannot be 0.");
     GGML_ASSERT(n_heads % n_heads_kv == 0 && "n_heads must be divisible by n_head_kv.");
+
+    const int64_t n_write_rows = k_new->ne[1] * k_new->ne[2] * k_new->ne[3];
+    const ggml_tensor * k_write_source = k_cache;
+    while ((k_write_source->op == GGML_OP_RESHAPE || k_write_source->op == GGML_OP_VIEW) &&
+           k_write_source->src[0] != nullptr) {
+        k_write_source = k_write_source->src[0];
+    }
+    const bool separate_write_scheduled = k_write_source->op == GGML_OP_SET_ROWS;
+    const bool combined_q8_write = !separate_write_scheduled &&
+        k_cache->type == GGML_TYPE_Q8_0 && v_cache->type == GGML_TYPE_Q8_0 &&
+        k_new->type == GGML_TYPE_F32 && v_new->type == GGML_TYPE_F32 && ggml_is_contiguous(k_new) &&
+        ggml_is_contiguous(v_new) && ggml_are_same_shape(k_new, v_new) && ggml_are_same_shape(k_cache, v_cache) &&
+        k_new->ne[0] == head_dim && k_cache->ne[0] == head_dim && ggml_is_contiguous(k_cache) &&
+        ggml_is_contiguous(v_cache) &&
+        write_rows->type == GGML_TYPE_I32 && ggml_is_contiguous(write_rows) &&
+        ggml_nelements(write_rows) == n_write_rows;
+    if (combined_q8_write) {
+        std::vector<float> k_new_host(ggml_nelements(k_new));
+        std::vector<float> v_new_host(ggml_nelements(v_new));
+        std::vector<int32_t> write_rows_host(ggml_nelements(write_rows));
+        const size_t k_row_bytes = ggml_row_size(k_cache->type, head_dim);
+        const size_t v_row_bytes = ggml_row_size(v_cache->type, head_dim);
+        std::vector<uint8_t> k_row(k_row_bytes);
+        std::vector<uint8_t> v_row(v_row_bytes);
+        ggml_backend_tensor_get(k_new, k_new_host.data(), 0, ggml_nbytes(k_new));
+        ggml_backend_tensor_get(v_new, v_new_host.data(), 0, ggml_nbytes(v_new));
+        ggml_backend_tensor_get(write_rows, write_rows_host.data(), 0, ggml_nbytes(write_rows));
+        const ggml_from_float_t k_from_float = ggml_get_type_traits_cpu(k_cache->type)->from_float;
+        const ggml_from_float_t v_from_float = ggml_get_type_traits_cpu(v_cache->type)->from_float;
+        for (int64_t row = 0; row < n_write_rows; ++row) {
+            k_from_float(k_new_host.data() + row * head_dim, k_row.data(), head_dim);
+            v_from_float(v_new_host.data() + row * head_dim, v_row.data(), head_dim);
+            const int32_t dst_row = write_rows_host[row];
+            GGML_ASSERT(dst_row >= 0 && dst_row < k_cache->ne[1] * k_cache->ne[2] * k_cache->ne[3]);
+            ggml_backend_tensor_set(k_cache, k_row.data(), (size_t) dst_row * k_cache->nb[1], k_row_bytes);
+            ggml_backend_tensor_set(v_cache, v_row.data(), (size_t) dst_row * v_cache->nb[1], v_row_bytes);
+        }
+    }
 
     const auto * k_traits = ggml_get_type_traits(k_cache->type);
     const auto * v_traits = ggml_get_type_traits(v_cache->type);

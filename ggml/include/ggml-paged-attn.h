@@ -36,6 +36,8 @@ extern "C" {
 #endif
 unsigned long long ggml_paged_attn_tiled_prefill_launch_count(void);
 void ggml_paged_attn_tiled_prefill_launch_count_reset(void);
+unsigned long long ggml_paged_attn_q8_decode_launch_count(void);
+void ggml_paged_attn_q8_decode_launch_count_reset(void);
 #ifdef __cplusplus
 }
 #endif
