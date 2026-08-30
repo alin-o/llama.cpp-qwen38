@@ -1288,6 +1288,7 @@ private:
             slot.callback_on_release = [this](int id_slot) {
                 if (params_base.kv_paged) {
                     llama_paged_scheduler_remove_request(paged_scheduler.get(), id_slot);
+                    slots[id_slot].prompt_clear();
                 }
                 queue_tasks.pop_deferred_task(id_slot);
             };

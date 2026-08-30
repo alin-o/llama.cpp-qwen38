@@ -345,6 +345,7 @@ def test_paged_slot_reuse_pressure():
     assert all(res.status_code == 200 for res in results)
     log = open(server.log_path, encoding="utf-8").read()
     assert "already queued" not in log
+    assert "paged KV sequence state is empty" not in log
     assert "non-consecutive token position" not in log
     assert "HTTP 500" not in log
 
