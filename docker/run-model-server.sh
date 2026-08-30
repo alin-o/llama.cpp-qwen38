@@ -62,6 +62,7 @@ ARGS=(
     -b 2048
     -ub 2048
     --parallel "${NP:-1}"
+    --cont-batching
     --jinja
     --metrics
     --slots
