@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1
 
-FROM nvidia/cuda:13.3.1-devel-ubuntu26.04 AS build
+ARG CUDA_VERSION=13.3.1
+
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu26.04 AS build
 
 RUN apt-get update && apt-get install -y \
     cmake build-essential git libssl-dev libcurl4-openssl-dev \
@@ -28,7 +30,7 @@ RUN --mount=type=cache,id=qwen38-cmake-cuda133-sm89,target=/workspace/build,shar
     && mkdir -p /out \
     && cp -a build/bin/. /out/
 
-FROM nvidia/cuda:13.3.1-runtime-ubuntu26.04
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu26.04
 
 RUN apt-get update && apt-get install -y \
     curl libssl3t64 libcurl4t64 python3 \
