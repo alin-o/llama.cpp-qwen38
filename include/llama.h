@@ -1675,9 +1675,17 @@ extern "C" {
                                                      int32_t                        n_tokens,
                                                      int32_t                        request_id);
 
+    LLAMA_API bool llama_paged_scheduler_prepare_batch_ex(struct llama_paged_scheduler * sched,
+                                                          struct llama_batch *           batch,
+                                                          int32_t                        spec_n);
     LLAMA_API bool llama_paged_scheduler_prepare_batch(struct llama_paged_scheduler * sched,
                                                        struct llama_batch *           batch);
 
+    LLAMA_API void llama_paged_scheduler_update_ex(struct llama_paged_scheduler * sched,
+                                                   struct llama_batch *           batch,
+                                                   const llama_token *            tokens,
+                                                   const uint32_t *               accepted,
+                                                   const int8_t *                 stop_flags);
     LLAMA_API void llama_paged_scheduler_update(struct llama_paged_scheduler * sched,
                                                 struct llama_batch *           batch,
                                                 const llama_token *            tokens,

@@ -525,18 +525,18 @@ void llama_paged_scheduler_impl::populate_batch_from(const llama_sequence_group_
 }
 
 // new_tokens contain 1 token per sequence in the batch
+// accepted contains one count per sequence; empty uses the full batch lengths.
 void llama_paged_scheduler_impl::update(const llama_batch &              batch,
                                         const std::vector<llama_token> & new_tokens,
                                         const std::vector<uint32_t> &    accepted,
                                         const int8_t *                   stop_flags) {
-    (void) accepted;
     GGML_ASSERT((int32_t) new_tokens.size() >= curr_info.n_seq && "new_tokens size does not match with batch size.");
+    GGML_ASSERT(accepted.empty() || (int32_t) accepted.size() >= curr_info.n_seq);
     GGML_ASSERT(stop_flags != nullptr && "stop_flags can't be null");
 
     for (int i = 0; i < curr_info.n_seq; ++i) {
-        int32_t token_offset = curr_info.batch_offsets[i];
-        int32_t request_id   = batch.seq_id[token_offset][0];
-
+        const int32_t token_offset = curr_info.batch_offsets[i];
+        const int32_t request_id = batch.seq_id[token_offset][0];
         auto it = id_to_group.find(request_id);
         if (it == id_to_group.end()) {
             LLAMA_LOG_WARN("%s: request_id %d not found in scheduler, skipping\n", __func__, request_id);
@@ -544,26 +544,32 @@ void llama_paged_scheduler_impl::update(const llama_batch &              batch,
         }
 
         llama_sequence_group * group = it->second;
-        GGML_ASSERT(group && "group is nullptr.");
-
-        // TTFT
+        GGML_ASSERT(group != nullptr);
         if (group->n_decoded == 0) {
             group->t_first_token_us = ggml_time_us();
         }
 
-        // Setting token ranges
-        llama_pos range_min = kv_cache_manager->seq_pos_min(group->request_id);
-        if (range_min == -1) {
-            kv_cache_manager->set_seq_min_pos(group->request_id, batch.pos[token_offset]);
+        const uint32_t proposal = curr_info.batch_lens[i];
+        const uint32_t commit = accepted.empty() ? proposal : std::min(accepted[i], proposal);
+        GGML_ASSERT(commit > 0 && commit <= proposal);
+
+        const llama_pos range_min = kv_cache_manager->seq_pos_min(request_id);
+        if (range_min < 0) {
+            kv_cache_manager->set_seq_min_pos(request_id, batch.pos[token_offset]);
         }
-        int32_t last_token_in_batch_idx = token_offset + curr_info.batch_lens[i] - 1;
-        kv_cache_manager->set_seq_max_pos(group->request_id, batch.pos[last_token_in_batch_idx]);
+        kv_cache_manager->set_seq_max_pos(request_id, batch.pos[token_offset + commit - 1]);
 
-        group->n_past += curr_info.batch_lens[i];
-        group->n_decoded += curr_info.batch_lens[i];
+        group->n_past += commit;
+        group->n_decoded += commit;
         group->logical_seq.push_back(new_tokens[i]);
+        for (uint32_t j = 1; j < commit; ++j) {
+            group->logical_seq.push_back(batch.token[token_offset + j]);
+        }
 
-        // Default stop flags are n_seq_max
+        if (commit < proposal) {
+            kv_cache_manager->release_seq_tail(request_id, group->n_past);
+        }
+
         if (stop_flags[i] || group->n_past >= n_seq_max_ctx) {
             group->status = llama_sequence_group_status::FINISHED;
             remove_request(request_id);

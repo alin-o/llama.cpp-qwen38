@@ -153,3 +153,32 @@ LLAMA_API const struct llama_paged_batch_info * llama_paged_scheduler_get_batch_
     }
     return sched->impl.get_curr_batch_info();
 }
+LLAMA_API bool llama_paged_scheduler_prepare_batch_ex(struct llama_paged_scheduler * sched, struct llama_batch * batch, int32_t spec_n) {
+    if (!sched || !batch) {
+        return false;
+    }
+    try {
+        return sched->impl.step(*batch, spec_n) != llama_scheduler_status::DEADLOCK;
+    } catch (const std::exception & e) {
+        LLAMA_LOG_ERROR("%s: %s\n", __func__, e.what());
+        return false;
+    }
+}
+
+LLAMA_API void llama_paged_scheduler_update_ex(struct llama_paged_scheduler * sched,
+                                               struct llama_batch * batch,
+                                               const llama_token * tokens,
+                                               const uint32_t * accepted,
+                                               const int8_t * stop_flags) {
+    if (!sched || !batch || !tokens || !stop_flags) {
+        return;
+    }
+    const auto * info = sched->impl.get_curr_batch_info();
+    GGML_ASSERT(info != nullptr);
+    std::vector<llama_token> token_vec(tokens, tokens + info->n_seq);
+    std::vector<uint32_t> accepted_vec;
+    if (accepted) {
+        accepted_vec.assign(accepted, accepted + info->n_seq);
+    }
+    sched->impl.update(*batch, token_vec, accepted_vec, stop_flags);
+}
