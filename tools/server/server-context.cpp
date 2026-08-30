@@ -2785,7 +2785,12 @@ private:
         }
 
         if (params_base.kv_paged) {
-            update_slots_paged();
+            try {
+                update_slots_paged();
+            } catch (const std::exception & e) {
+                SRV_ERR("update_slots_paged() failed: %s\n", e.what());
+                abort_all_slots("update_slots_paged() failed: " + std::string(e.what()));
+            }
             return;
         }
         try {

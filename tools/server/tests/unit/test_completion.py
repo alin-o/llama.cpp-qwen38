@@ -326,10 +326,17 @@ def test_paged_slot_reuse_pressure():
     if not model:
         pytest.skip("set LLAMA_SERVER_PAGED_MODEL to run paged slot reuse pressure")
 
-    global server
     server.model_file = model
+    server.model_hf_repo = None
+    server.model_hf_file = None
+    server.offline = True
     server.kv_paged = True
+    server.server_port = 18088
     server.n_slots = 2
+    server.n_ctx = 8192
+    server.n_batch = 512
+    server.n_ubatch = 512
+    server.n_gpu_layer = 99
     server.n_predict = 8
     server.debug = True
     server.log_path = os.path.join(TMP_DIR, "paged-slot-reuse.log")
