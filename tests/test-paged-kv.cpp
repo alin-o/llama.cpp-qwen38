@@ -1237,6 +1237,27 @@ TEST(test_scheduler_reserves_spec_batch_after_swap) {
     llama_batch_free(batch);
 }
 
+TEST(test_scheduler_caps_constrained_spec_batch) {
+    auto fixture = make_fixture(/*n_ctx=*/128, /*block_size=*/16, /*n_batch=*/4,
+                                /*n_gpu_blocks=*/4, /*n_cpu_blocks=*/2);
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/0, /*n_prompt=*/1)));
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/1, /*n_prompt=*/1)));
+
+    llama_batch batch = {};
+    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    const int8_t continue_flags[] = { 0, 0 };
+    fixture.sched->update(batch, { 2, 3 }, continue_flags);
+
+    EXPECT_TRUE(fixture.sched->step(batch, /*spec_n=*/3) == llama_scheduler_status::OK);
+    const auto * info = fixture.sched->get_curr_batch_info();
+    EXPECT_EQ(info->n_seq, 1);
+    EXPECT_EQ(info->batch_lens[0], 4);
+    EXPECT_EQ(batch.n_tokens, 4);
+    const int8_t stop_flag[] = { 1 };
+    fixture.sched->update(batch, { 4 }, { 2 }, stop_flag);
+    llama_batch_free(batch);
+}
+
 int main(int /*argc*/, char ** /*argv*/) {
     fprintf(stderr, "test-paged-kv: block_manager\n");
     RUN(test_paged_graph_tensor_compatibility);
@@ -1258,6 +1279,7 @@ int main(int /*argc*/, char ** /*argv*/) {
 
     fprintf(stderr, "test-paged-kv: llama_kv_cache_paged free_blocks\n");
     RUN(test_free_blocks_releases_to_pool);
+    RUN(test_scheduler_caps_constrained_spec_batch);
     RUN(test_release_seq_tail_releases_trailing_blocks);
     RUN(test_clear_and_seq_rm_release_blocks);
     RUN(test_paged_state_round_trip);

@@ -71,7 +71,7 @@ bool llama_paged_scheduler_impl::check_livelock(
 }
 
 int32_t llama_paged_scheduler_impl::get_curr_decode_tokens() const {
-    return running.size();
+    return running.size() * (1 + spec_n);
 }
 
 llama_scheduler_status llama_paged_scheduler_impl::step(llama_batch & batch, int32_t spec_n) {
@@ -86,7 +86,17 @@ llama_scheduler_status llama_paged_scheduler_impl::step(llama_batch & batch, int
     const int32_t remaining = n_batch - get_curr_decode_tokens();
     process_waiting_list(candidates, remaining);
 
-    const uint32_t n_running    = running.size();
+    while (!candidates.empty()) {
+        int32_t total_tokens = 0;
+        for (const auto * group : candidates) {
+            total_tokens += group->n_decoded > 0 ? 1 + spec_n : group->n_prompt;
+        }
+        if (total_tokens <= n_batch) {
+            break;
+        }
+        candidates.pop_back();
+    }
+    const uint32_t n_running = running.size();
     const uint32_t n_swapped    = swapped.size();
     const uint32_t n_waiting    = waiting.size();
     const uint32_t n_candidates = candidates.size();
@@ -373,14 +383,14 @@ void llama_paged_scheduler_impl::process_waiting_list(llama_sequence_group_raw_l
         llama_sequence_group * group = it->get();
         GGML_ASSERT(group && "the waiting group is nullptr.");
 
-        const int32_t batch_tokens = group->n_decoded > 0 ? 1 : group->n_prompt;
-        const int32_t capacity_tokens = group->n_decoded > 0 ? 1 : group->n_prompt + 1;
+        const int32_t batch_tokens = group->n_decoded > 0 ? 1 + spec_n : group->n_prompt;
+        const int32_t capacity_tokens = group->n_decoded > 0 ? 1 + spec_n : group->n_prompt + 1;
         if (batch_tokens > remaining_token_budget) {
             break;
         }
 
         ++count;
-        // Reserve room for one decode token without charging it to this prefill batch.
+        // Reserve room for speculative decode without charging it to prefill.
         const bool success = kv_cache_manager->allocate(capacity_tokens, *group);
         if (!success) {
             // We respect FCFS, so we stop here to prevent a younger waiting request from jumping ahead.
