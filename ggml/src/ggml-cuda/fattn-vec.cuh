@@ -256,6 +256,8 @@ static __global__ void flash_attn_ext_vec(
              // Increment pointers after each loop:
              K += gridDim.y*nthreads*nb11, V += gridDim.y*nthreads*nb21, maskh += gridDim.y*nthreads) {
 
+        const fattn_contiguous_kv_address kv_address = { K, V, (size_t) nb11, (size_t) nb21 };
+
         // Calculate KQ tile and keep track of new maximum KQ values:
         float KQ_reg[ncols]; // KQ in registers.
 
@@ -271,7 +273,8 @@ static __global__ void flash_attn_ext_vec(
 
 #pragma unroll
             for (int j = 0; j < ncols; ++j) {
-                float sum = vec_dot_KQ(K + i_KQ*nb11, Q_reg[j], Q_i32[j], Q_ds[j]);
+                const fattn_kv_rows rows = kv_address.rows(i_KQ);
+                float sum = vec_dot_KQ(rows.k, Q_reg[j], Q_i32[j], Q_ds[j]);
                 sum = warp_reduce_sum<nthreads_KQ>(sum);
 
                 if (use_logit_softcap) {
@@ -296,7 +299,7 @@ static __global__ void flash_attn_ext_vec(
             for (int offset = nthreads_KQ; offset < WARP_SIZE; offset <<= 1) {
                 KQ_max_new[j] = fmaxf(KQ_max_new[j], __shfl_xor_sync(0xFFFFFFFF, KQ_max_new[j], offset, WARP_SIZE));
             }
-            const float KQ_max_scale = expf(KQ_max[j] - KQ_max_new[j]);
+            const float KQ_max_scale = fattn_softmax_rescale(KQ_max[j], KQ_max_new[j]);
             KQ_max[j] = KQ_max_new[j];
 
             KQ_reg[j] = expf(KQ_reg[j] - KQ_max[j]);
@@ -337,14 +340,14 @@ static __global__ void flash_attn_ext_vec(
                 half2 tmp[V_rows_per_thread/2];
                 if constexpr (type_V == GGML_TYPE_BF16) {
                     float2 tmp_f[V_rows_per_thread/2];
-                    dequantize_V(V + k*nb21, tmp_f,
+                    dequantize_V(kv_address.rows(k).v, tmp_f,
                         2*i_VKQ_0 + (nthreads_V == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads_V)*V_rows_per_thread);
 #pragma unroll
                     for (int i_VKQ_1 = 0; i_VKQ_1 < V_rows_per_thread/2; ++i_VKQ_1) {
                         tmp[i_VKQ_1] = __float22half2_rn(tmp_f[i_VKQ_1]);
                     }
                 } else {
-                    dequantize_V(V + k*nb21, tmp,
+                    dequantize_V(kv_address.rows(k).v, tmp,
                         2*i_VKQ_0 + (nthreads_V == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads_V)*V_rows_per_thread);
                 }
 #pragma unroll
@@ -364,7 +367,7 @@ static __global__ void flash_attn_ext_vec(
 #pragma unroll
             for (int i_VKQ_0 = 0; i_VKQ_0 < D/2; i_VKQ_0 += nthreads_V*V_rows_per_thread/2) {
                 float2 tmp[V_rows_per_thread/2];
-                dequantize_V(V + k*nb21, tmp,
+                dequantize_V(kv_address.rows(k).v, tmp,
                     2*i_VKQ_0 + (nthreads_V == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads_V)*V_rows_per_thread);
 #pragma unroll
                 for (int i_VKQ_1 = 0; i_VKQ_1 < V_rows_per_thread/2; ++i_VKQ_1) {
@@ -391,7 +394,7 @@ static __global__ void flash_attn_ext_vec(
             }
 
             const float kqmax_new_j = fmaxf(sink, KQ_max[j]);
-            const float KQ_max_scale = expf(KQ_max[j] - kqmax_new_j);
+            const float KQ_max_scale = fattn_softmax_rescale(KQ_max[j], kqmax_new_j);
             KQ_max[j] = kqmax_new_j;
 
             KQ_sum[j] = KQ_sum[j]*KQ_max_scale + (threadIdx.x == 0 ? expf(sink - KQ_max[j]) : 0.0f);
@@ -440,7 +443,7 @@ static __global__ void flash_attn_ext_vec(
 
         float kqmax_new = KQ_max_shared[j_VKQ][threadIdx.x];
         kqmax_new = warp_reduce_max(kqmax_new);
-        const float kqmax_scale = expf(KQ_max[j_VKQ] - kqmax_new);
+        const float kqmax_scale = fattn_softmax_rescale(KQ_max[j_VKQ], kqmax_new);
         KQ_max[j_VKQ] = kqmax_new;
 
 #ifdef V_DOT2_F32_F16_AVAILABLE

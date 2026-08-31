@@ -1144,6 +1144,12 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
     const int kv_head = ggml_paged_attn_kv_head(head, n_heads, n_heads_kv);
     const int limit = context_lens[seq];
     const size_t q_base = (size_t) batch_offsets[seq] * n_heads * HEAD_DIM + (size_t) head * HEAD_DIM;
+    const fattn_paged_kv_address kv_address = {
+        k_cache + (size_t) kv_head * k_stride_head,
+        v_cache + (size_t) kv_head * v_stride_head,
+        block_table + (size_t) seq * max_blocks,
+        k_stride_token, k_stride_block, v_stride_token, v_stride_block, block_size,
+    };
     const float2 * q_row = (const float2 *) (q + q_base);
     float2 q_reg[Q_FRAGMENTS];
     float acc[HEAD_DIM / WARP_SIZE] = {};
@@ -1158,18 +1164,9 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
     float qk_max = -FLT_MAX;
     float exp_sum = 0.0f;
     for (int token = warp; token < limit; token += N_WARPS) {
-        int physical_block = 0;
-        int token_in_block = 0;
-        if (lane == 0) {
-            physical_block = block_table[seq * max_blocks + token / block_size];
-            token_in_block = token % block_size;
-        }
-        physical_block = __shfl_sync(0xffffffffu, physical_block, 0);
-        token_in_block = __shfl_sync(0xffffffffu, token_in_block, 0);
-        const char * k_row = k_cache + (size_t) physical_block * k_stride_block +
-            (size_t) kv_head * k_stride_head + (size_t) token_in_block * k_stride_token;
-        const char * v_row = v_cache + (size_t) physical_block * v_stride_block +
-            (size_t) kv_head * v_stride_head + (size_t) token_in_block * v_stride_token;
+        const fattn_kv_rows rows = kv_address.rows(token);
+        const char * k_row = rows.k;
+        const char * v_row = rows.v;
 
         float qk = vec_dot_KQ(k_row, q_reg, nullptr, nullptr);
         for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
@@ -1179,7 +1176,7 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
         float new_max;
         float old_scale;
         float weight;
-        paged_online_softmax_scales(qk, qk_max, new_max, old_scale, weight);
+        fattn_online_softmax_scales(qk, qk_max, new_max, old_scale, weight);
 #pragma unroll
         for (int group = 0; group < V_GROUPS; ++group) {
             float values[4];
@@ -1214,8 +1211,7 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
         }
 #pragma unroll
         for (int w = 0; w < N_WARPS; ++w) {
-            const float partial_scale = partial_max[w] == final_max ?
-                1.0f : __expf(partial_max[w] - final_max);
+            const float partial_scale = fattn_softmax_rescale(partial_max[w], final_max);
             final_sum += partial_sum[w] * partial_scale;
 #pragma unroll
             for (int i = 0; i < HEAD_DIM / WARP_SIZE; ++i) {

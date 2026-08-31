@@ -45,6 +45,62 @@ typedef void (* fattn_kernel_t)(
 typedef float (*vec_dot_KQ_t)(
     const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8 , const void * __restrict__ Q_ds);
 
+struct fattn_kv_rows {
+    const char * k;
+    const char * v;
+};
+
+struct fattn_contiguous_kv_address {
+    const char * k;
+    const char * v;
+    size_t k_stride_token;
+    size_t v_stride_token;
+
+    __device__ __forceinline__ fattn_kv_rows rows(int token) const {
+        return {
+            k + (size_t) token * k_stride_token,
+            v + (size_t) token * v_stride_token,
+        };
+    }
+};
+
+struct fattn_paged_kv_address {
+    const char * k;
+    const char * v;
+    const int * block_table;
+    size_t k_stride_token;
+    size_t k_stride_block;
+    size_t v_stride_token;
+    size_t v_stride_block;
+    int block_size;
+
+    __device__ __forceinline__ fattn_kv_rows rows(int token) const {
+        int physical_block = 0;
+        int token_in_block = 0;
+        if ((threadIdx.x & (WARP_SIZE - 1)) == 0) {
+            physical_block = block_table[token / block_size];
+            token_in_block = token % block_size;
+        }
+        physical_block = __shfl_sync(0xffffffffu, physical_block, 0);
+        token_in_block = __shfl_sync(0xffffffffu, token_in_block, 0);
+        return {
+            k + (size_t) physical_block * k_stride_block + (size_t) token_in_block * k_stride_token,
+            v + (size_t) physical_block * v_stride_block + (size_t) token_in_block * v_stride_token,
+        };
+    }
+};
+
+static __device__ __forceinline__ float fattn_softmax_rescale(float value, float new_max) {
+    return value == new_max ? 1.0f : __expf(value - new_max);
+}
+
+static __device__ __forceinline__ void fattn_online_softmax_scales(
+        float value, float current_max, float & new_max, float & old_scale, float & value_scale) {
+    new_max = fmaxf(value, current_max);
+    old_scale = fattn_softmax_rescale(current_max, new_max);
+    value_scale = fattn_softmax_rescale(value, new_max);
+}
+
 struct ggml_cuda_flash_attn_ext_f16_extra_data {
     uintptr_t K;
     uintptr_t V;
