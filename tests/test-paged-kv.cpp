@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 #define TEST(name) static void name()
@@ -1359,6 +1360,148 @@ TEST(test_paged_attention_cuda_production_correctness) {
     ggml_backend_free(cpu_backend);
 }
 
+static double run_contiguous_turbo_attention_case(
+        ggml_backend_t backend, ggml_type cache_type, int n_heads, int n_heads_kv) {
+    constexpr int head_dim = 256;
+    constexpr int context_length = 1024;
+    constexpr int n_sequences = 2;
+    constexpr int n_queries = 1;
+    const int gqa = n_heads / n_heads_kv;
+    EXPECT_TRUE(n_heads % n_heads_kv == 0);
+
+    ggml_init_params params = {
+        /* .mem_size = */ ggml_tensor_overhead() * 16 + ggml_graph_overhead_custom(8, false),
+        /* .mem_buffer = */ nullptr,
+        /* .no_alloc = */ true,
+    };
+    ggml_context * ctx = ggml_init(params);
+    EXPECT_TRUE(ctx != nullptr);
+
+    ggml_tensor * q = ggml_new_tensor_4d(
+        ctx, GGML_TYPE_F32, head_dim, n_queries, n_heads, n_sequences);
+    ggml_tensor * k = ggml_new_tensor_4d(
+        ctx, cache_type, head_dim, context_length, n_heads_kv, n_sequences);
+    ggml_tensor * v = ggml_new_tensor_4d(
+        ctx, cache_type, head_dim, context_length, n_heads_kv, n_sequences);
+    ggml_tensor * mask = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, context_length, n_queries);
+    ggml_tensor * out = ggml_flash_attn_ext(
+        ctx, q, k, v, mask, 1.0f / std::sqrt((float) head_dim), 0.0f, 0.0f);
+
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    EXPECT_TRUE(buffer != nullptr);
+
+    std::vector<float> q_data(ggml_nelements(q));
+    for (size_t i = 0; i < q_data.size(); ++i) {
+        const int dim = i % head_dim;
+        const int head = (i / head_dim) % n_heads;
+        const int seq = i / ((size_t) head_dim * n_heads);
+        q_data[i] = 0.55f * std::sin(0.071f * (dim + 1) * (1 + head % 3)) +
+            0.35f * std::cos(0.113f * (dim + 3) + 0.29f * head + 0.41f * seq);
+    }
+
+    const size_t n_cache_rows = (size_t) n_sequences * n_heads_kv * context_length;
+    std::vector<float> k_data(n_cache_rows * head_dim);
+    std::vector<float> v_data(n_cache_rows * head_dim);
+    for (size_t row = 0; row < n_cache_rows; ++row) {
+        for (int dim = 0; dim < head_dim; ++dim) {
+            const size_t i = row * head_dim + dim;
+            const float direction = row % 2 == 0 ? 1.0f : -1.0f;
+            k_data[i] = direction * 0.65f * std::sin(0.071f * (dim + 1) * (1 + row % 3)) +
+                0.35f * std::cos(0.113f * (dim + 3) + 0.37f * row);
+            v_data[i] = 0.50f * std::cos(0.097f * (dim + 5) + 0.23f * row) +
+                0.15f * std::sin(0.047f * (dim + 1) * (1 + row % 5));
+        }
+    }
+    std::vector<uint8_t> k_quantized(ggml_nbytes(k));
+    std::vector<uint8_t> v_quantized(ggml_nbytes(v));
+    EXPECT_TRUE(ggml_quantize_chunk(
+        cache_type, k_data.data(), k_quantized.data(), 0, n_cache_rows, head_dim, nullptr) == k_quantized.size());
+    EXPECT_TRUE(ggml_quantize_chunk(
+        cache_type, v_data.data(), v_quantized.data(), 0, n_cache_rows, head_dim, nullptr) == v_quantized.size());
+    const std::vector<uint16_t> mask_data(ggml_nelements(mask), 0);
+
+    ggml_backend_tensor_set(q, q_data.data(), 0, ggml_nbytes(q));
+    ggml_backend_tensor_set(k, k_quantized.data(), 0, k_quantized.size());
+    ggml_backend_tensor_set(v, v_quantized.data(), 0, v_quantized.size());
+    ggml_backend_tensor_set(mask, mask_data.data(), 0, ggml_nbytes(mask));
+
+    ggml_cgraph * graph = ggml_new_graph_custom(ctx, 8, false);
+    ggml_build_forward_expand(graph, out);
+    EXPECT_TRUE(ggml_backend_graph_compute(backend, graph) == GGML_STATUS_SUCCESS);
+
+    std::vector<float> actual(ggml_nelements(out));
+    ggml_backend_tensor_get(out, actual.data(), 0, ggml_nbytes(out));
+
+    const ggml_type_traits * traits = ggml_get_type_traits(cache_type);
+    EXPECT_TRUE(traits != nullptr && traits->to_float != nullptr);
+    const size_t cache_row_size = ggml_row_size(cache_type, head_dim);
+    std::vector<float> k_row(head_dim);
+    std::vector<float> v_row(head_dim);
+    std::vector<float> reference(actual.size(), 0.0f);
+    std::vector<float> logits(context_length);
+    const float scale = 1.0f / std::sqrt((float) head_dim);
+    for (int seq = 0; seq < n_sequences; ++seq) {
+        for (int head = 0; head < n_heads; ++head) {
+            const int kv_head = head / gqa;
+            const float * q_row = q_data.data() + ((size_t) seq * n_heads + head) * head_dim;
+            float max_logit = -1.0e30f;
+            for (int token = 0; token < context_length; ++token) {
+                const size_t row = ((size_t) seq * n_heads_kv + kv_head) * context_length + token;
+                traits->to_float(k_quantized.data() + row * cache_row_size, k_row.data(), head_dim);
+                float dot = 0.0f;
+                for (int dim = 0; dim < head_dim; ++dim) {
+                    dot += q_row[dim] * k_row[dim];
+                }
+                logits[token] = dot * scale;
+                max_logit = std::max(max_logit, logits[token]);
+            }
+            float sum = 0.0f;
+            for (float & logit : logits) {
+                logit = std::exp(logit - max_logit);
+                sum += logit;
+            }
+            float * ref_row = reference.data() + ((size_t) seq * n_heads + head) * head_dim;
+            for (int token = 0; token < context_length; ++token) {
+                const size_t row = ((size_t) seq * n_heads_kv + kv_head) * context_length + token;
+                traits->to_float(v_quantized.data() + row * cache_row_size, v_row.data(), head_dim);
+                const float weight = logits[token] / sum;
+                for (int dim = 0; dim < head_dim; ++dim) {
+                    ref_row[dim] += weight * v_row[dim];
+                }
+            }
+        }
+    }
+
+    double squared_error = 0.0;
+    double squared_reference = 0.0;
+    for (size_t i = 0; i < actual.size(); ++i) {
+        EXPECT_TRUE(std::isfinite(actual[i]));
+        squared_error += (double) (actual[i] - reference[i]) * (actual[i] - reference[i]);
+        squared_reference += (double) reference[i] * reference[i];
+    }
+    EXPECT_TRUE(squared_reference > 0.0);
+    ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+    return squared_error / squared_reference;
+}
+
+TEST(test_contiguous_turbo_attention_reference_equivalence) {
+    ggml_backend_t cuda_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr);
+    EXPECT_TRUE(cuda_backend != nullptr);
+
+    for (const auto [cache_type, n_heads] : {
+            std::pair<ggml_type, int>{ GGML_TYPE_TURBO3_0, 24 },
+            { GGML_TYPE_TURBO4_0, 32 },
+        }) {
+        const double error = run_contiguous_turbo_attention_case(cuda_backend, cache_type, n_heads, 4);
+        fprintf(stderr, " %s gqa=%d depth=1024 sequences=2 error=%g ",
+            ggml_type_name(cache_type), n_heads / 4, error);
+        EXPECT_TRUE(error < 5e-4);
+    }
+
+    ggml_backend_free(cuda_backend);
+}
+
 struct paged_decode_result {
     std::vector<float> output;
     std::vector<uint8_t> k_cache;
@@ -2100,6 +2243,10 @@ int main(int argc, char ** argv) {
         return 0;
     }
     setenv("GGML_CUDA_DISABLE_GRAPHS", "1", 1);
+    if (argc > 1 && strcmp(argv[1], "--contiguous-turbo-test") == 0) {
+        RUN(test_contiguous_turbo_attention_reference_equivalence);
+        return 0;
+    }
     if (argc > 1 && strcmp(argv[1], "--paged-decode-bench") == 0) {
         return run_paged_attention_decode_benchmark(argc, argv);
     }
@@ -2155,6 +2302,7 @@ int main(int argc, char ** argv) {
 
 #if defined(GGML_USE_CUDA)
     RUN(test_paged_attention_cuda_production_correctness);
+    RUN(test_contiguous_turbo_attention_reference_equivalence);
     RUN(test_paged_attention_q8_decode_boundaries);
     RUN(test_paged_attention_turbo_decode_boundaries_and_dispatch);
     RUN(test_paged_attention_q8_partition_and_group_candidates);
