@@ -8,6 +8,7 @@
 
 #include <stdexcept>
 
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -170,7 +171,7 @@ TEST(test_paged_graph_reuse_accepts_mapping_remap) {
     EXPECT_TRUE(input.can_reuse(graph_params));
     current_ctx.set_batch_data(info_a);
     EXPECT_TRUE(input.can_reuse(graph_params));
-    int32_t context_lens_long[] = { 4097 };
+    int32_t context_lens_long[] = { 65536 };
     llama_paged_batch_info info_long = {
         4, 1, 1, write_slots_b, block_table_b, context_lens_long, batch_offsets_b, batch_lens_b
     };
@@ -1023,24 +1024,37 @@ TEST(test_paged_attention_head_mapping_and_dispatch_selection) {
         }
     }
 
+    const ggml_paged_attn_cuda_device_caps ada = { 890, 128, 32, 1024, 48 * 1024, true };
     const ggml_paged_attn_cuda_variant shallow = ggml_paged_attn_select_cuda_variant(
-        GGML_PAGED_ATTN_CONTEXT_4K, 32, 4, 1, 128);
+        GGML_PAGED_ATTN_CONTEXT_4K, 32, 4, 1, ada);
     EXPECT_TRUE(shallow.n_warps == 32 && shallow.n_partitions == 1 && shallow.n_q_heads == 1);
     const ggml_paged_attn_cuda_variant long_single = ggml_paged_attn_select_cuda_variant(
-        GGML_PAGED_ATTN_CONTEXT_64K, 32, 4, 1, 128);
+        GGML_PAGED_ATTN_CONTEXT_64K, 32, 4, 1, ada);
     EXPECT_TRUE(long_single.n_warps == 8 && long_single.n_partitions == 8 && long_single.n_q_heads == 1);
     const ggml_paged_attn_cuda_variant long_batch = ggml_paged_attn_select_cuda_variant(
-        GGML_PAGED_ATTN_CONTEXT_64K, 32, 4, 2, 128);
+        GGML_PAGED_ATTN_CONTEXT_64K, 32, 4, 2, ada);
     EXPECT_TRUE(long_batch.n_warps == 8 && long_batch.n_partitions == 8 && long_batch.n_q_heads == 1);
     const ggml_paged_attn_cuda_variant long_batch4 = ggml_paged_attn_select_cuda_variant(
-        GGML_PAGED_ATTN_CONTEXT_16K, 32, 4, 4, 128);
+        GGML_PAGED_ATTN_CONTEXT_16K, 32, 4, 4, ada);
     EXPECT_TRUE(long_batch4.n_warps == 32 && long_batch4.n_partitions == 1 && long_batch4.n_q_heads == 1);
     const ggml_paged_attn_cuda_variant long_batch8 = ggml_paged_attn_select_cuda_variant(
-        GGML_PAGED_ATTN_CONTEXT_16K, 32, 4, 8, 128);
+        GGML_PAGED_ATTN_CONTEXT_16K, 32, 4, 8, ada);
     EXPECT_TRUE(long_batch8.n_warps == 32 && long_batch8.n_partitions == 1 && long_batch8.n_q_heads == 1);
     const ggml_paged_attn_cuda_variant long_batch6 = ggml_paged_attn_select_cuda_variant(
-        GGML_PAGED_ATTN_CONTEXT_16K, 24, 4, 4, 128);
+        GGML_PAGED_ATTN_CONTEXT_16K, 24, 4, 4, ada);
     EXPECT_TRUE(long_batch6.n_warps == 8 && long_batch6.n_partitions == 8 && long_batch6.n_q_heads == 2);
+
+    for (const ggml_paged_attn_cuda_device_caps unsupported : {
+            ggml_paged_attn_cuda_device_caps{ 860, 128, 32, 1024, 48 * 1024, true },
+            ggml_paged_attn_cuda_device_caps{ 890, 128, 64, 1024, 48 * 1024, true },
+            ggml_paged_attn_cuda_device_caps{ 890, 128, 32, 512, 48 * 1024, true },
+            ggml_paged_attn_cuda_device_caps{ 890, 128, 32, 1024, 32 * 1024, true },
+            ggml_paged_attn_cuda_device_caps{ 890, 128, 32, 1024, 48 * 1024, false },
+        }) {
+        const ggml_paged_attn_cuda_variant fallback = ggml_paged_attn_select_cuda_variant(
+            GGML_PAGED_ATTN_CONTEXT_64K, 32, 4, 1, unsupported);
+        EXPECT_TRUE(fallback.n_warps == 32 && fallback.n_partitions == 1 && fallback.n_q_heads == 1);
+    }
 }
 
 TEST(test_decode_only_batch_skips_tiled_prefill) {
@@ -1191,11 +1205,28 @@ struct paged_decode_result {
     std::vector<uint8_t> v_cache;
 };
 
+struct paged_decode_resources {
+    ggml_context * ctx = nullptr;
+    ggml_backend_buffer_t buffer = nullptr;
+    ggml_cgraph * graph = nullptr;
+};
+
 static paged_decode_result run_paged_attention_decode_case(
         ggml_backend_t backend, int n_heads, int n_heads_kv,
-        int context_length, int n_sequences, int block_size) {
+        int context_length, int n_sequences, int block_size,
+        const std::vector<int32_t> * initial_context_lens = nullptr,
+        const std::vector<int32_t> * replay_context_lens = nullptr,
+        int n_graph_computes = 1, bool remap_before_last_compute = false,
+        paged_decode_resources * retained_resources = nullptr) {
     constexpr int head_dim = 256;
-    const int max_blocks = (context_length + block_size - 1) / block_size;
+    int max_context_length = context_length;
+    for (const std::vector<int32_t> * lengths : { initial_context_lens, replay_context_lens }) {
+        if (lengths != nullptr) {
+            EXPECT_TRUE((int) lengths->size() == n_sequences);
+            max_context_length = std::max(max_context_length, *std::max_element(lengths->begin(), lengths->end()));
+        }
+    }
+    const int max_blocks = (max_context_length + block_size - 1) / block_size;
     const int n_cache_blocks = n_sequences * max_blocks;
     const int n_tokens = n_sequences;
     const int n_write_rows = n_tokens * n_heads_kv;
@@ -1270,7 +1301,8 @@ static paged_decode_result run_paged_attention_decode_case(
 
     std::vector<int32_t> block_table_data((size_t) n_sequences * max_blocks);
     std::vector<int32_t> write_rows_data(n_write_rows);
-    std::vector<int32_t> context_lens_data(n_sequences, context_length);
+    std::vector<int32_t> context_lens_data = initial_context_lens != nullptr ?
+        *initial_context_lens : std::vector<int32_t>(n_sequences, context_length);
     std::vector<int32_t> batch_offsets_data(n_sequences);
     std::vector<int32_t> batch_lens_data(n_sequences, 1);
     for (int seq = 0; seq < n_sequences; ++seq) {
@@ -1279,7 +1311,7 @@ static paged_decode_result run_paged_attention_decode_case(
             block_table_data[(size_t) seq * max_blocks + logical] =
                 seq * max_blocks + max_blocks - logical - 1;
         }
-        const int logical_pos = context_length - 1;
+        const int logical_pos = context_lens_data[seq] - 1;
         const int physical_block = block_table_data[(size_t) seq * max_blocks + logical_pos / block_size];
         for (int head = 0; head < n_heads_kv; ++head) {
             write_rows_data[seq * n_heads_kv + head] = physical_block * n_heads_kv * block_size +
@@ -1300,7 +1332,31 @@ static paged_decode_result run_paged_attention_decode_case(
 
     ggml_cgraph * graph = ggml_new_graph_custom(ctx, graph_size, false);
     ggml_build_forward_expand(graph, out);
-    EXPECT_TRUE(ggml_backend_graph_compute(backend, graph) == GGML_STATUS_SUCCESS);
+    EXPECT_TRUE(n_graph_computes > 0);
+    for (int compute = 0; compute < n_graph_computes; ++compute) {
+        if (compute == n_graph_computes - 1 &&
+                (remap_before_last_compute || replay_context_lens != nullptr)) {
+            if (replay_context_lens != nullptr) {
+                context_lens_data = *replay_context_lens;
+            }
+            for (int seq = 0; seq < n_sequences; ++seq) {
+                if (remap_before_last_compute && max_blocks > 1) {
+                    std::swap(block_table_data[(size_t) seq * max_blocks],
+                        block_table_data[(size_t) seq * max_blocks + 1]);
+                }
+                const int logical_pos = context_lens_data[seq] - 1;
+                const int physical_block = block_table_data[(size_t) seq * max_blocks + logical_pos / block_size];
+                for (int head = 0; head < n_heads_kv; ++head) {
+                    write_rows_data[seq * n_heads_kv + head] = physical_block * n_heads_kv * block_size +
+                        head * block_size + logical_pos % block_size;
+                }
+            }
+            ggml_backend_tensor_set(block_table, block_table_data.data(), 0, ggml_nbytes(block_table));
+            ggml_backend_tensor_set(write_rows, write_rows_data.data(), 0, ggml_nbytes(write_rows));
+            ggml_backend_tensor_set(context_lens, context_lens_data.data(), 0, ggml_nbytes(context_lens));
+        }
+        EXPECT_TRUE(ggml_backend_graph_compute(backend, graph) == GGML_STATUS_SUCCESS);
+    }
 
     paged_decode_result result;
     result.output.resize(ggml_nelements(out));
@@ -1309,8 +1365,14 @@ static paged_decode_result run_paged_attention_decode_case(
     ggml_backend_tensor_get(out, result.output.data(), 0, ggml_nbytes(out));
     ggml_backend_tensor_get(k_cache, result.k_cache.data(), 0, ggml_nbytes(k_cache));
     ggml_backend_tensor_get(v_cache, result.v_cache.data(), 0, ggml_nbytes(v_cache));
-    ggml_backend_buffer_free(buffer);
-    ggml_free(ctx);
+    if (retained_resources != nullptr) {
+        retained_resources->ctx = ctx;
+        retained_resources->buffer = buffer;
+        retained_resources->graph = graph;
+    } else {
+        ggml_backend_buffer_free(buffer);
+        ggml_free(ctx);
+    }
     return result;
 }
 
@@ -1533,9 +1595,65 @@ TEST(test_paged_attention_q8_partition_and_group_candidates) {
     }
     check_paged_attention_decode_variant(
         cpu_backend, cuda_backend, 32, 4, 97, 2, 32, 16, 4, 4);
+    setenv("GGML_CUDA_PAGED_Q8_CP_ASYNC", "1", 1);
+    check_paged_attention_decode_variant(
+        cpu_backend, cuda_backend, 24, 4, 97, 4, 16, 8, 8, 2);
+    unsetenv("GGML_CUDA_PAGED_Q8_CP_ASYNC");
 
     ggml_backend_free(cuda_backend);
     ggml_backend_free(cpu_backend);
+}
+
+TEST(test_paged_attention_q8_graph_replay_restore_and_mixed_depth) {
+    ggml_backend_t cpu_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    ggml_backend_t cuda_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr);
+    EXPECT_TRUE(cpu_backend != nullptr);
+    EXPECT_TRUE(cuda_backend != nullptr);
+
+    const std::vector<int32_t> initial_lens = { 4097, 1025, 128, 65 };
+    const std::vector<int32_t> restored_lens = { 8192, 2049, 256, 33 };
+    const paged_decode_result reference = run_paged_attention_decode_case(
+        cpu_backend, 24, 4, 8192, 4, 16, &initial_lens, &restored_lens, 2, true);
+
+    ggml_paged_attn_q8_decode_launch_count_reset();
+    const paged_decode_result replayed = run_paged_attention_decode_case(
+        cuda_backend, 24, 4, 8192, 4, 16, &initial_lens, &restored_lens, 4, true);
+    const unsigned long long launches = ggml_paged_attn_q8_decode_launch_count();
+    fprintf(stderr, " mixed-depth same-bucket graph: host launches=%llu replayed=2 remap=1 ", launches);
+    EXPECT_TRUE(launches == 2);
+    EXPECT_TRUE(replayed.k_cache == reference.k_cache);
+    EXPECT_TRUE(replayed.v_cache == reference.v_cache);
+    EXPECT_TRUE(paged_decode_relative_squared_error(replayed.output, reference.output) < 5e-3);
+
+    ggml_backend_free(cuda_backend);
+    ggml_backend_free(cpu_backend);
+
+    ggml_backend_t transition_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr);
+    EXPECT_TRUE(transition_backend != nullptr);
+    ggml_paged_attn_q8_decode_launch_count_reset();
+    paged_decode_resources transition_resources[2];
+    int transition_index = 0;
+    unsigned long long previous_launches = 0;
+    for (int context_length : { 4096, 65536 }) {
+        const paged_decode_result transitioned = run_paged_attention_decode_case(
+            transition_backend, 24, 4, context_length, 1, 16, nullptr, nullptr, 3, false,
+            &transition_resources[transition_index++]);
+        EXPECT_TRUE(!transitioned.output.empty());
+        const unsigned long long transition_launches = ggml_paged_attn_q8_decode_launch_count();
+        fprintf(stderr, " bucket-transition depth=%d host launches=%llu replayed=1 ",
+            context_length, transition_launches - previous_launches);
+        EXPECT_TRUE(transition_launches - previous_launches == 2);
+        previous_launches = transition_launches;
+    }
+    EXPECT_TRUE(ggml_backend_graph_compute(transition_backend, transition_resources[0].graph) == GGML_STATUS_SUCCESS);
+    EXPECT_TRUE(ggml_backend_graph_compute(transition_backend, transition_resources[1].graph) == GGML_STATUS_SUCCESS);
+    EXPECT_TRUE(ggml_paged_attn_q8_decode_launch_count() == previous_launches);
+    fprintf(stderr, " bucket-transition cached variants replayed=2 ");
+    for (paged_decode_resources & resources : transition_resources) {
+        ggml_backend_buffer_free(resources.buffer);
+        ggml_free(resources.ctx);
+    }
+    ggml_backend_free(transition_backend);
 }
 
 TEST(test_paged_attention_cuda_runtime_coverage) {
@@ -1662,10 +1780,18 @@ TEST(test_scheduler_caps_constrained_spec_batch) {
 
 int main(int argc, char ** argv) {
 #if defined(GGML_USE_CUDA)
+    if (argc > 1 && strcmp(argv[1], "--paged-graph-test") == 0) {
+        unsetenv("GGML_CUDA_DISABLE_GRAPHS");
+        RUN(test_paged_attention_q8_graph_replay_restore_and_mixed_depth);
+        return 0;
+    }
     setenv("GGML_CUDA_DISABLE_GRAPHS", "1", 1);
     if (argc > 1 && strcmp(argv[1], "--paged-decode-bench") == 0) {
         return run_paged_attention_decode_benchmark(argc, argv);
     }
+#else
+    GGML_UNUSED(argc);
+    GGML_UNUSED(argv);
 #endif
     fprintf(stderr, "test-paged-kv: block_manager\n");
     RUN(test_paged_graph_tensor_compatibility);

@@ -45,6 +45,15 @@ struct ggml_paged_attn_cuda_variant {
     int32_t n_q_heads;
 };
 
+struct ggml_paged_attn_cuda_device_caps {
+    int32_t cc;
+    int32_t n_sms;
+    int32_t warp_size;
+    int32_t max_threads_per_block;
+    int64_t shared_mem_per_block;
+    bool    graph_capture_safe;
+};
+
 static inline int ggml_paged_attn_context_bucket(int max_context_len) {
     if (max_context_len <= 4096) {
         return GGML_PAGED_ATTN_CONTEXT_4K;
@@ -78,9 +87,14 @@ static inline int ggml_paged_attn_tail_partition(int context_len, int n_partitio
 }
 
 static inline struct ggml_paged_attn_cuda_variant ggml_paged_attn_select_cuda_variant(
-        int context_bucket, int n_heads, int n_heads_kv, int n_sequences, int n_sms) {
+        int context_bucket, int n_heads, int n_heads_kv, int n_sequences,
+        struct ggml_paged_attn_cuda_device_caps caps) {
     struct ggml_paged_attn_cuda_variant result = { 32, 1, 1 };
-    if (context_bucket == GGML_PAGED_ATTN_CONTEXT_4K || n_heads <= 0 || n_heads_kv <= 0 || n_sequences <= 0) {
+    // The bucket policy below is benchmarked only for native Ada (SM 8.9). Keep the legacy kernel elsewhere.
+    const bool supported_device = caps.cc == 890 && caps.n_sms > 0 && caps.warp_size == 32 &&
+        caps.max_threads_per_block >= 1024 && caps.shared_mem_per_block >= 44 * 1024 && caps.graph_capture_safe;
+    if (!supported_device || context_bucket == GGML_PAGED_ATTN_CONTEXT_4K ||
+            n_heads <= 0 || n_heads_kv <= 0 || n_sequences <= 0) {
         return result;
     }
 
@@ -91,7 +105,7 @@ static inline struct ggml_paged_attn_cuda_variant ggml_paged_attn_select_cuda_va
 
     result.n_warps = 8;
     result.n_partitions = 8;
-    if (n_sequences >= 4 && (n_heads / 2) * n_sequences * result.n_partitions >= n_sms) {
+    if (n_sequences >= 4 && (n_heads / 2) * n_sequences * result.n_partitions >= caps.n_sms) {
         result.n_q_heads = 2;
     }
     return result;
