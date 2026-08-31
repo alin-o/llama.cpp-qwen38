@@ -1191,6 +1191,8 @@ TEST(test_paged_attention_head_mapping_and_dispatch_selection) {
     }
 
     const ggml_paged_attn_cuda_device_caps ada = { 890, 128, 32, 1024, 48 * 1024, true, true };
+    EXPECT_TRUE(ggml_paged_attn_select_cuda_prefill_row_cache(256, ada));
+    EXPECT_FALSE(ggml_paged_attn_select_cuda_prefill_row_cache(128, ada));
     const ggml_paged_attn_cuda_variant shallow = ggml_paged_attn_select_cuda_variant(
         GGML_PAGED_ATTN_CONTEXT_4K, 256, 32, 4, 1, 1, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, ada);
     EXPECT_TRUE(shallow.n_warps == 32 && shallow.n_partitions == 1 && shallow.n_q_heads == 1);
@@ -1254,6 +1256,7 @@ TEST(test_paged_attention_head_mapping_and_dispatch_selection) {
             GGML_PAGED_ATTN_CONTEXT_16K, 256, 32, 4, 1, 1,
             GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0, unsupported);
         EXPECT_TRUE(fallback.n_warps == 32 && fallback.n_partitions == 1 && fallback.n_q_heads == 1);
+        EXPECT_FALSE(ggml_paged_attn_select_cuda_prefill_row_cache(256, unsupported));
     }
 }
 

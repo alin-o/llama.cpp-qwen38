@@ -55,6 +55,15 @@ struct ggml_paged_attn_cuda_device_caps {
     bool    graph_capture_safe;
 };
 
+static inline bool ggml_paged_attn_select_cuda_prefill_row_cache(
+        int head_dim, struct ggml_paged_attn_cuda_device_caps caps) {
+    // The shared row-address cache is benchmarked only for native Ada (SM 8.9).
+    const bool supported_device = caps.cc == 890 && caps.n_sms > 0 && caps.warp_size == 32 &&
+        caps.max_threads_per_block >= 1024 && caps.shared_mem_per_block >= 44 * 1024 &&
+        caps.sm89_compiled && caps.graph_capture_safe;
+    return supported_device && head_dim == 256;
+}
+
 static inline int ggml_paged_attn_context_bucket(int max_context_len) {
     if (max_context_len <= 4096) {
         return GGML_PAGED_ATTN_CONTEXT_4K;
