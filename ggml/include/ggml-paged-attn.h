@@ -85,14 +85,13 @@ static inline struct ggml_paged_attn_cuda_variant ggml_paged_attn_select_cuda_va
     }
 
     const int gqa_ratio = n_heads / n_heads_kv;
+    if (n_sequences >= 4 && gqa_ratio != 6) {
+        return result;
+    }
+
     result.n_warps = 8;
     result.n_partitions = 8;
-    if (n_sequences == 4 && gqa_ratio % 4 == 0 && (n_heads / 4) * n_sequences * 4 >= n_sms) {
-        result.n_warps = 16;
-        result.n_partitions = 4;
-        result.n_q_heads = 4;
-    } else if (n_sequences >= 4 && gqa_ratio % 2 == 0 &&
-               (n_heads / 2) * n_sequences * result.n_partitions >= n_sms) {
+    if (n_sequences >= 4 && (n_heads / 2) * n_sequences * result.n_partitions >= n_sms) {
         result.n_q_heads = 2;
     }
     return result;

@@ -1034,10 +1034,13 @@ TEST(test_paged_attention_head_mapping_and_dispatch_selection) {
     EXPECT_TRUE(long_batch.n_warps == 8 && long_batch.n_partitions == 8 && long_batch.n_q_heads == 1);
     const ggml_paged_attn_cuda_variant long_batch4 = ggml_paged_attn_select_cuda_variant(
         GGML_PAGED_ATTN_CONTEXT_16K, 32, 4, 4, 128);
-    EXPECT_TRUE(long_batch4.n_warps == 16 && long_batch4.n_partitions == 4 && long_batch4.n_q_heads == 4);
+    EXPECT_TRUE(long_batch4.n_warps == 32 && long_batch4.n_partitions == 1 && long_batch4.n_q_heads == 1);
     const ggml_paged_attn_cuda_variant long_batch8 = ggml_paged_attn_select_cuda_variant(
         GGML_PAGED_ATTN_CONTEXT_16K, 32, 4, 8, 128);
-    EXPECT_TRUE(long_batch8.n_warps == 8 && long_batch8.n_partitions == 8 && long_batch8.n_q_heads == 2);
+    EXPECT_TRUE(long_batch8.n_warps == 32 && long_batch8.n_partitions == 1 && long_batch8.n_q_heads == 1);
+    const ggml_paged_attn_cuda_variant long_batch6 = ggml_paged_attn_select_cuda_variant(
+        GGML_PAGED_ATTN_CONTEXT_16K, 24, 4, 4, 128);
+    EXPECT_TRUE(long_batch6.n_warps == 8 && long_batch6.n_partitions == 8 && long_batch6.n_q_heads == 2);
 }
 
 TEST(test_decode_only_batch_skips_tiled_prefill) {
