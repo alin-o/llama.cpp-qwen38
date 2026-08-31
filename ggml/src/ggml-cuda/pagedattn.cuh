@@ -6,6 +6,8 @@ extern "C" unsigned long long ggml_paged_attn_tiled_prefill_launch_count(void);
 extern "C" void ggml_paged_attn_tiled_prefill_launch_count_reset(void);
 extern "C" unsigned long long ggml_paged_attn_q8_decode_launch_count(void);
 extern "C" void ggml_paged_attn_q8_decode_launch_count_reset(void);
+extern "C" unsigned long long ggml_paged_attn_turbo_decode_launch_count(void);
+extern "C" void ggml_paged_attn_turbo_decode_launch_count_reset(void);
 extern "C" unsigned long long ggml_paged_attn_q8_combined_write_launch_count(void);
 extern "C" void ggml_paged_attn_q8_combined_write_launch_count_reset(void);
 extern "C" unsigned long long ggml_paged_attn_q8_fused_write_launch_count(void);

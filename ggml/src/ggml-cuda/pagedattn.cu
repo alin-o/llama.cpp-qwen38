@@ -12,6 +12,7 @@
 
 static std::atomic<unsigned long long> g_paged_prefill_launch_count{ 0 };
 static std::atomic<unsigned long long> g_paged_q8_decode_launch_count{ 0 };
+static std::atomic<unsigned long long> g_paged_turbo_decode_launch_count{ 0 };
 static std::atomic<unsigned long long> g_paged_q8_combined_write_launch_count{ 0 };
 static std::atomic<unsigned long long> g_paged_q8_fused_write_launch_count{ 0 };
 
@@ -29,6 +30,14 @@ extern "C" unsigned long long ggml_paged_attn_q8_decode_launch_count(void) {
 
 extern "C" void ggml_paged_attn_q8_decode_launch_count_reset(void) {
     g_paged_q8_decode_launch_count.store(0, std::memory_order_relaxed);
+}
+
+extern "C" unsigned long long ggml_paged_attn_turbo_decode_launch_count(void) {
+    return g_paged_turbo_decode_launch_count.load(std::memory_order_relaxed);
+}
+
+extern "C" void ggml_paged_attn_turbo_decode_launch_count_reset(void) {
+    g_paged_turbo_decode_launch_count.store(0, std::memory_order_relaxed);
 }
 
 extern "C" unsigned long long ggml_paged_attn_q8_combined_write_launch_count(void) {
@@ -1106,6 +1115,123 @@ __global__ void paged_attention_decode_reduce_kernel(
     out[((size_t) batch_offsets[seq] * n_heads + head) * HEAD_DIM + dim] = final_acc / (final_sum + 1e-6f);
 }
 
+// Each warp resolves one logical token row, then reuses fattn-vec's format arithmetic.
+template <int HEAD_DIM, int N_WARPS, ggml_type TYPE_K, ggml_type TYPE_V>
+__global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode_turbo_vec_kernel(
+        const float * q, const char * k_cache, const char * v_cache,
+        const int * block_table, const int * context_lens, const int * batch_offsets,
+        size_t k_stride_token, size_t k_stride_head, size_t k_stride_block,
+        size_t v_stride_token, size_t v_stride_head, size_t v_stride_block,
+        int n_heads, int n_heads_kv, int block_size, int max_blocks, float scale, float * out) {
+    static_assert(TYPE_K == GGML_TYPE_TURBO3_0 || TYPE_K == GGML_TYPE_TURBO4_0,
+        "Turbo paged decode requires a Turbo K cache");
+    static_assert(TYPE_V == GGML_TYPE_TURBO3_0 || TYPE_V == GGML_TYPE_TURBO4_0,
+        "Turbo paged decode requires a Turbo V cache");
+    static_assert(HEAD_DIM % (2 * WARP_SIZE) == 0, "head dimension must map evenly to float2 query fragments");
+
+    constexpr vec_dot_KQ_t vec_dot_KQ = get_vec_dot_KQ<TYPE_K, HEAD_DIM, WARP_SIZE>();
+    constexpr dequantize_V_t dequantize_V = get_dequantize_V<TYPE_V, float, 4>();
+    constexpr int Q_FRAGMENTS = HEAD_DIM / (2 * WARP_SIZE);
+    constexpr int V_GROUPS = HEAD_DIM / (4 * WARP_SIZE);
+
+    __shared__ float partial_max[N_WARPS];
+    __shared__ float partial_sum[N_WARPS];
+    __shared__ float partial_acc[N_WARPS][HEAD_DIM];
+    const int warp = threadIdx.y;
+    const int lane = threadIdx.x;
+    const int head = blockIdx.x;
+    const int seq = blockIdx.y;
+    const int kv_head = ggml_paged_attn_kv_head(head, n_heads, n_heads_kv);
+    const int limit = context_lens[seq];
+    const size_t q_base = (size_t) batch_offsets[seq] * n_heads * HEAD_DIM + (size_t) head * HEAD_DIM;
+    const float2 * q_row = (const float2 *) (q + q_base);
+    float2 q_reg[Q_FRAGMENTS];
+    float acc[HEAD_DIM / WARP_SIZE] = {};
+
+#pragma unroll
+    for (int i = 0; i < Q_FRAGMENTS; ++i) {
+        q_reg[i] = q_row[lane * Q_FRAGMENTS + i];
+        q_reg[i].x *= scale;
+        q_reg[i].y *= scale;
+    }
+
+    float qk_max = -FLT_MAX;
+    float exp_sum = 0.0f;
+    for (int token = warp; token < limit; token += N_WARPS) {
+        int physical_block = 0;
+        int token_in_block = 0;
+        if (lane == 0) {
+            physical_block = block_table[seq * max_blocks + token / block_size];
+            token_in_block = token % block_size;
+        }
+        physical_block = __shfl_sync(0xffffffffu, physical_block, 0);
+        token_in_block = __shfl_sync(0xffffffffu, token_in_block, 0);
+        const char * k_row = k_cache + (size_t) physical_block * k_stride_block +
+            (size_t) kv_head * k_stride_head + (size_t) token_in_block * k_stride_token;
+        const char * v_row = v_cache + (size_t) physical_block * v_stride_block +
+            (size_t) kv_head * v_stride_head + (size_t) token_in_block * v_stride_token;
+
+        float qk = vec_dot_KQ(k_row, q_reg, nullptr, nullptr);
+        for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+            qk += __shfl_down_sync(0xffffffffu, qk, offset);
+        }
+        qk = __shfl_sync(0xffffffffu, qk, 0);
+        float new_max;
+        float old_scale;
+        float weight;
+        paged_online_softmax_scales(qk, qk_max, new_max, old_scale, weight);
+#pragma unroll
+        for (int group = 0; group < V_GROUPS; ++group) {
+            float values[4];
+            dequantize_V(v_row, values, lane * 4 + group * 4 * WARP_SIZE);
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                acc[group * 4 + i] = acc[group * 4 + i] * old_scale + weight * values[i];
+            }
+        }
+        exp_sum = exp_sum * old_scale + weight;
+        qk_max = new_max;
+    }
+
+    if (lane == 0) {
+        partial_max[warp] = qk_max;
+        partial_sum[warp] = exp_sum;
+    }
+#pragma unroll
+    for (int i = 0; i < HEAD_DIM / WARP_SIZE; ++i) {
+        const int dim = lane * 4 + (i / 4) * 4 * WARP_SIZE + i % 4;
+        partial_acc[warp][dim] = acc[i];
+    }
+    __syncthreads();
+
+    if (warp == 0) {
+        float final_max = -FLT_MAX;
+        float final_sum = 0.0f;
+        float final_acc[HEAD_DIM / WARP_SIZE] = {};
+#pragma unroll
+        for (int w = 0; w < N_WARPS; ++w) {
+            final_max = fmaxf(final_max, partial_max[w]);
+        }
+#pragma unroll
+        for (int w = 0; w < N_WARPS; ++w) {
+            const float partial_scale = partial_max[w] == final_max ?
+                1.0f : __expf(partial_max[w] - final_max);
+            final_sum += partial_sum[w] * partial_scale;
+#pragma unroll
+            for (int i = 0; i < HEAD_DIM / WARP_SIZE; ++i) {
+                const int dim = lane * 4 + (i / 4) * 4 * WARP_SIZE + i % 4;
+                final_acc[i] += partial_acc[w][dim] * partial_scale;
+            }
+        }
+        const float inv_sum = 1.0f / (final_sum + 1e-6f);
+#pragma unroll
+        for (int i = 0; i < HEAD_DIM / WARP_SIZE; ++i) {
+            const int dim = lane * 4 + (i / 4) * 4 * WARP_SIZE + i % 4;
+            out[q_base + dim] = final_acc[i] * inv_sum;
+        }
+    }
+}
+
 #endif
 
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
@@ -1482,11 +1608,18 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
         k_cache->nb[1] == ggml_row_size(GGML_TYPE_Q8_0, head_dim) &&
         v_cache->nb[1] == ggml_row_size(GGML_TYPE_Q8_0, head_dim);
     bool decode_q8 = false;
+    bool decode_turbo = false;
     bool fuse_current_q8 = false;
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
     decode_q8 = k_cache->type == GGML_TYPE_Q8_0 && v_cache->type == GGML_TYPE_Q8_0 &&
         head_dim == 256 && q->type == GGML_TYPE_F32 && ggml_is_contiguous(q) &&
         ggml_cuda_is_aligned(q, sizeof(float4)) && q->ne[2] == batch_lens->ne[0] && q->ne[3] == 1;
+    const char * turbo_vec_env = getenv("GGML_CUDA_PAGED_TURBO_VEC");
+    decode_turbo = (turbo_vec_env == nullptr || atoi(turbo_vec_env) != 0) &&
+        (k_cache->type == GGML_TYPE_TURBO3_0 || k_cache->type == GGML_TYPE_TURBO4_0) &&
+        (v_cache->type == GGML_TYPE_TURBO3_0 || v_cache->type == GGML_TYPE_TURBO4_0) &&
+        head_dim == 256 && q->type == GGML_TYPE_F32 && ggml_is_contiguous(q) &&
+        ggml_cuda_is_aligned(q, sizeof(float2)) && q->ne[2] == batch_lens->ne[0] && q->ne[3] == 1;
     // The candidate remains opt-in because matched 27B decode did not beat the combined-write fallback.
     const char * fused_write_env = getenv("GGML_CUDA_PAGED_Q8_FUSED_WRITE");
     fuse_current_q8 = combined_q8_write && decode_q8 && k_new->ne[2] == batch_lens->ne[0] && k_new->ne[3] == 1 &&
@@ -1739,6 +1872,59 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
             attribute.accessPolicyWindow.missProp = cudaAccessPropertyNormal;
             CUDA_CHECK(cudaStreamSetAttribute(ctx.stream(), cudaStreamAttributeAccessPolicyWindow, &attribute));
         }
+        CUDA_CHECK(cudaGetLastError());
+        return;
+    }
+#endif
+
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+    if (decode_turbo) {
+        g_paged_turbo_decode_launch_count.fetch_add(1, std::memory_order_relaxed);
+        int turbo_warps = 32;
+        const char * turbo_warps_env = getenv("GGML_CUDA_PAGED_TURBO_WARPS");
+        if (turbo_warps_env != nullptr) {
+            turbo_warps = atoi(turbo_warps_env);
+        }
+        if (turbo_warps != 4 && turbo_warps != 8 && turbo_warps != 16 && turbo_warps != 32) {
+            GGML_LOG_WARN("%s: invalid Turbo decode warp count %d; using 32\n", __func__, turbo_warps);
+            turbo_warps = 32;
+        }
+#define LAUNCH_TURBO_VEC(N_WARPS, TYPE_K, TYPE_V) \
+        paged_attention_decode_turbo_vec_kernel<256, N_WARPS, TYPE_K, TYPE_V> \
+            <<<dim3(n_heads, batch_lens->ne[0]), dim3(WARP_SIZE, N_WARPS), 0, ctx.stream()>>>( \
+            (const float *) q->data, (const char *) k_cache->data, (const char *) v_cache->data, \
+            (const int *) block_table->data, (const int *) context_lens->data, \
+            (const int *) batch_offsets->data, k_cache->nb[1], k_cache->nb[2], k_cache->nb[3], \
+            v_cache->nb[1], v_cache->nb[2], v_cache->nb[3], n_heads, n_heads_kv, block_size, max_blocks, \
+            op_params_f[0], (float *) dst->data)
+#define DISPATCH_TURBO_TYPES(N_WARPS) \
+        if (k_cache->type == GGML_TYPE_TURBO3_0) { \
+            if (v_cache->type == GGML_TYPE_TURBO3_0) { \
+                LAUNCH_TURBO_VEC(N_WARPS, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0); \
+            } else { \
+                LAUNCH_TURBO_VEC(N_WARPS, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO4_0); \
+            } \
+        } else if (v_cache->type == GGML_TYPE_TURBO3_0) { \
+            LAUNCH_TURBO_VEC(N_WARPS, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO3_0); \
+        } else { \
+            LAUNCH_TURBO_VEC(N_WARPS, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0); \
+        }
+        switch (turbo_warps) {
+            case 4:
+                DISPATCH_TURBO_TYPES(4);
+                break;
+            case 8:
+                DISPATCH_TURBO_TYPES(8);
+                break;
+            case 16:
+                DISPATCH_TURBO_TYPES(16);
+                break;
+            default:
+                DISPATCH_TURBO_TYPES(32);
+                break;
+        }
+#undef DISPATCH_TURBO_TYPES
+#undef LAUNCH_TURBO_VEC
         CUDA_CHECK(cudaGetLastError());
         return;
     }
