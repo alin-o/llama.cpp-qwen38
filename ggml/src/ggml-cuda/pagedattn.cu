@@ -1115,7 +1115,7 @@ __global__ void paged_attention_decode_reduce_kernel(
     out[((size_t) batch_offsets[seq] * n_heads + head) * HEAD_DIM + dim] = final_acc / (final_sum + 1e-6f);
 }
 
-// Each warp resolves one logical token row, then reuses fattn-vec's format arithmetic.
+// Address setup is paged; attention control flow is shared with contiguous Turbo decode.
 template <int HEAD_DIM, int N_WARPS, ggml_type TYPE_K, ggml_type TYPE_V>
 __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode_turbo_vec_kernel(
         const float * q, const char * k_cache, const char * v_cache,
@@ -1123,22 +1123,7 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
         size_t k_stride_token, size_t k_stride_head, size_t k_stride_block,
         size_t v_stride_token, size_t v_stride_head, size_t v_stride_block,
         int n_heads, int n_heads_kv, int block_size, int max_blocks, float scale, float * out) {
-    static_assert(TYPE_K == GGML_TYPE_TURBO3_0 || TYPE_K == GGML_TYPE_TURBO4_0,
-        "Turbo paged decode requires a Turbo K cache");
-    static_assert(TYPE_V == GGML_TYPE_TURBO3_0 || TYPE_V == GGML_TYPE_TURBO4_0,
-        "Turbo paged decode requires a Turbo V cache");
-    static_assert(HEAD_DIM % (2 * WARP_SIZE) == 0, "head dimension must map evenly to float2 query fragments");
-
-    constexpr vec_dot_KQ_t vec_dot_KQ = get_vec_dot_KQ<TYPE_K, HEAD_DIM, WARP_SIZE>();
-    constexpr dequantize_V_t dequantize_V = get_dequantize_V<TYPE_V, float, 4>();
-    constexpr int Q_FRAGMENTS = HEAD_DIM / (2 * WARP_SIZE);
-    constexpr int V_GROUPS = HEAD_DIM / (4 * WARP_SIZE);
-
-    __shared__ float partial_max[N_WARPS];
-    __shared__ float partial_sum[N_WARPS];
-    __shared__ float partial_acc[N_WARPS][HEAD_DIM];
-    const int warp = threadIdx.y;
-    const int lane = threadIdx.x;
+    __shared__ fattn_decode_vec_shared<HEAD_DIM, N_WARPS> shared;
     const int head = blockIdx.x;
     const int seq = blockIdx.y;
     const int kv_head = ggml_paged_attn_kv_head(head, n_heads, n_heads_kv);
@@ -1150,82 +1135,8 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
         block_table + (size_t) seq * max_blocks,
         k_stride_token, k_stride_block, v_stride_token, v_stride_block, block_size,
     };
-    const float2 * q_row = (const float2 *) (q + q_base);
-    float2 q_reg[Q_FRAGMENTS];
-    float acc[HEAD_DIM / WARP_SIZE] = {};
-
-#pragma unroll
-    for (int i = 0; i < Q_FRAGMENTS; ++i) {
-        q_reg[i] = q_row[lane * Q_FRAGMENTS + i];
-        q_reg[i].x *= scale;
-        q_reg[i].y *= scale;
-    }
-
-    float qk_max = -FLT_MAX;
-    float exp_sum = 0.0f;
-    for (int token = warp; token < limit; token += N_WARPS) {
-        const fattn_kv_rows rows = kv_address.rows(token);
-        const char * k_row = rows.k;
-        const char * v_row = rows.v;
-
-        float qk = vec_dot_KQ(k_row, q_reg, nullptr, nullptr);
-        for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
-            qk += __shfl_down_sync(0xffffffffu, qk, offset);
-        }
-        qk = __shfl_sync(0xffffffffu, qk, 0);
-        float new_max;
-        float old_scale;
-        float weight;
-        fattn_online_softmax_scales(qk, qk_max, new_max, old_scale, weight);
-#pragma unroll
-        for (int group = 0; group < V_GROUPS; ++group) {
-            float values[4];
-            dequantize_V(v_row, values, lane * 4 + group * 4 * WARP_SIZE);
-#pragma unroll
-            for (int i = 0; i < 4; ++i) {
-                acc[group * 4 + i] = acc[group * 4 + i] * old_scale + weight * values[i];
-            }
-        }
-        exp_sum = exp_sum * old_scale + weight;
-        qk_max = new_max;
-    }
-
-    if (lane == 0) {
-        partial_max[warp] = qk_max;
-        partial_sum[warp] = exp_sum;
-    }
-#pragma unroll
-    for (int i = 0; i < HEAD_DIM / WARP_SIZE; ++i) {
-        const int dim = lane * 4 + (i / 4) * 4 * WARP_SIZE + i % 4;
-        partial_acc[warp][dim] = acc[i];
-    }
-    __syncthreads();
-
-    if (warp == 0) {
-        float final_max = -FLT_MAX;
-        float final_sum = 0.0f;
-        float final_acc[HEAD_DIM / WARP_SIZE] = {};
-#pragma unroll
-        for (int w = 0; w < N_WARPS; ++w) {
-            final_max = fmaxf(final_max, partial_max[w]);
-        }
-#pragma unroll
-        for (int w = 0; w < N_WARPS; ++w) {
-            const float partial_scale = fattn_softmax_rescale(partial_max[w], final_max);
-            final_sum += partial_sum[w] * partial_scale;
-#pragma unroll
-            for (int i = 0; i < HEAD_DIM / WARP_SIZE; ++i) {
-                const int dim = lane * 4 + (i / 4) * 4 * WARP_SIZE + i % 4;
-                final_acc[i] += partial_acc[w][dim] * partial_scale;
-            }
-        }
-        const float inv_sum = 1.0f / (final_sum + 1e-6f);
-#pragma unroll
-        for (int i = 0; i < HEAD_DIM / WARP_SIZE; ++i) {
-            const int dim = lane * 4 + (i / 4) * 4 * WARP_SIZE + i % 4;
-            out[q_base + dim] = final_acc[i] * inv_sum;
-        }
-    }
+    fattn_decode_vec_core<HEAD_DIM, N_WARPS, TYPE_K, TYPE_V>(
+        q + q_base, kv_address, fattn_decode_identity_score{}, nullptr, limit, scale, out + q_base, shared);
 }
 
 #endif

@@ -5,6 +5,22 @@
 #include "fattn-vec.cuh"
 #include "fattn.cuh"
 
+#include <atomic>
+
+static std::atomic<unsigned long long> g_fattn_shared_turbo_decode_launch_count{ 0 };
+
+extern "C" unsigned long long ggml_cuda_fattn_shared_turbo_decode_launch_count(void) {
+    return g_fattn_shared_turbo_decode_launch_count.load(std::memory_order_relaxed);
+}
+
+extern "C" void ggml_cuda_fattn_shared_turbo_decode_launch_count_reset(void) {
+    g_fattn_shared_turbo_decode_launch_count.store(0, std::memory_order_relaxed);
+}
+
+extern "C" void ggml_cuda_fattn_shared_turbo_decode_launch_count_add(void) {
+    g_fattn_shared_turbo_decode_launch_count.fetch_add(1, std::memory_order_relaxed);
+}
+
 template <int DKQ, int DV, int ncols2>
 static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;

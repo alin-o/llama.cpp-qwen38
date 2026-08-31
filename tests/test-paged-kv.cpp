@@ -47,6 +47,11 @@
     } while (0)
 #define EXPECT_FALSE(x) EXPECT_TRUE(!(x))
 
+#if defined(GGML_USE_CUDA)
+extern "C" unsigned long long ggml_cuda_fattn_shared_turbo_decode_launch_count(void);
+extern "C" void ggml_cuda_fattn_shared_turbo_decode_launch_count_reset(void);
+#endif
+
 class memory_io final : public llama_io_write_i, public llama_io_read_i {
 public:
     void write(const void * src, size_t size) override {
@@ -1361,10 +1366,10 @@ TEST(test_paged_attention_cuda_production_correctness) {
 }
 
 static double run_contiguous_turbo_attention_case(
-        ggml_backend_t backend, ggml_type cache_type, int n_heads, int n_heads_kv) {
+        ggml_backend_t backend, ggml_type cache_type, int n_heads, int n_heads_kv,
+        int context_length = 1024, int n_sequences = 2, int benchmark_repetitions = 0,
+        double * benchmark_us = nullptr, bool check_reference = true) {
     constexpr int head_dim = 256;
-    constexpr int context_length = 1024;
-    constexpr int n_sequences = 2;
     constexpr int n_queries = 1;
     const int gqa = n_heads / n_heads_kv;
     EXPECT_TRUE(n_heads % n_heads_kv == 0);
@@ -1429,6 +1434,25 @@ static double run_contiguous_turbo_attention_case(
     ggml_build_forward_expand(graph, out);
     EXPECT_TRUE(ggml_backend_graph_compute(backend, graph) == GGML_STATUS_SUCCESS);
 
+    if (benchmark_repetitions > 0) {
+        ggml_backend_synchronize(backend);
+        const auto begin = std::chrono::steady_clock::now();
+        for (int repetition = 0; repetition < benchmark_repetitions; ++repetition) {
+            EXPECT_TRUE(ggml_backend_graph_compute(backend, graph) == GGML_STATUS_SUCCESS);
+        }
+        ggml_backend_synchronize(backend);
+        const auto end = std::chrono::steady_clock::now();
+        if (benchmark_us != nullptr) {
+            *benchmark_us = std::chrono::duration<double, std::micro>(end - begin).count() / benchmark_repetitions;
+        }
+    }
+
+    if (!check_reference) {
+        ggml_backend_buffer_free(buffer);
+        ggml_free(ctx);
+        return 0.0;
+    }
+
     std::vector<float> actual(ggml_nelements(out));
     ggml_backend_tensor_get(out, actual.data(), 0, ggml_nbytes(out));
 
@@ -1489,6 +1513,8 @@ TEST(test_contiguous_turbo_attention_reference_equivalence) {
     ggml_backend_t cuda_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr);
     EXPECT_TRUE(cuda_backend != nullptr);
 
+    setenv("GGML_CUDA_FATTN_TURBO_SHARED", "1", 1);
+    ggml_cuda_fattn_shared_turbo_decode_launch_count_reset();
     for (const auto [cache_type, n_heads] : {
             std::pair<ggml_type, int>{ GGML_TYPE_TURBO3_0, 24 },
             { GGML_TYPE_TURBO4_0, 32 },
@@ -1498,8 +1524,60 @@ TEST(test_contiguous_turbo_attention_reference_equivalence) {
             ggml_type_name(cache_type), n_heads / 4, error);
         EXPECT_TRUE(error < 5e-4);
     }
+    EXPECT_TRUE(ggml_cuda_fattn_shared_turbo_decode_launch_count() == 2);
+
+    unsetenv("GGML_CUDA_FATTN_TURBO_SHARED");
+    ggml_cuda_fattn_shared_turbo_decode_launch_count_reset();
+    const double shallow_error = run_contiguous_turbo_attention_case(
+        cuda_backend, GGML_TYPE_TURBO3_0, 24, 4, 256, 2);
+    fprintf(stderr, " shallow-shared-launches=%llu ", ggml_cuda_fattn_shared_turbo_decode_launch_count());
+    EXPECT_TRUE(shallow_error < 5e-4);
+    EXPECT_TRUE(ggml_cuda_fattn_shared_turbo_decode_launch_count() == 1);
+
+    ggml_cuda_fattn_shared_turbo_decode_launch_count_reset();
+    const double legacy_error = run_contiguous_turbo_attention_case(cuda_backend, GGML_TYPE_TURBO3_0, 24, 4);
+    EXPECT_TRUE(legacy_error < 5e-4);
+    EXPECT_TRUE(ggml_cuda_fattn_shared_turbo_decode_launch_count() == 0);
+    unsetenv("GGML_CUDA_FATTN_TURBO_SHARED");
 
     ggml_backend_free(cuda_backend);
+}
+
+static int run_contiguous_turbo_attention_benchmark(int argc, char ** argv) {
+    if (argc != 9) {
+        fprintf(stderr,
+            "usage: %s --contiguous-turbo-bench <turbo3|turbo4> <depth> <heads> <kv-heads> <sequences> <reps> <-1|0|1>\n",
+            argv[0]);
+        return 1;
+    }
+    const ggml_type cache_type = strcmp(argv[2], "turbo3") == 0 ? GGML_TYPE_TURBO3_0 : GGML_TYPE_TURBO4_0;
+    const int depth = atoi(argv[3]);
+    const int n_heads = atoi(argv[4]);
+    const int n_heads_kv = atoi(argv[5]);
+    const int n_sequences = atoi(argv[6]);
+    const int repetitions = atoi(argv[7]);
+    const int use_shared = atoi(argv[8]);
+    EXPECT_TRUE((cache_type == GGML_TYPE_TURBO3_0 && strcmp(argv[2], "turbo3") == 0) ||
+        (cache_type == GGML_TYPE_TURBO4_0 && strcmp(argv[2], "turbo4") == 0));
+    EXPECT_TRUE(depth > 0 && n_heads > 0 && n_heads_kv > 0 && n_sequences > 0 && repetitions > 0);
+    if (use_shared < 0) {
+        unsetenv("GGML_CUDA_FATTN_TURBO_SHARED");
+    } else {
+        setenv("GGML_CUDA_FATTN_TURBO_SHARED", use_shared ? "1" : "0", 1);
+    }
+
+    ggml_backend_t cuda_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr);
+    EXPECT_TRUE(cuda_backend != nullptr);
+    double time_us = 0.0;
+    run_contiguous_turbo_attention_case(
+        cuda_backend, cache_type, n_heads, n_heads_kv, depth, n_sequences, repetitions, &time_us, false);
+    ggml_backend_free(cuda_backend);
+    unsetenv("GGML_CUDA_FATTN_TURBO_SHARED");
+    printf("mode,type,depth,heads,kv_heads,sequences,reps,us_per_op\n");
+    const char * mode = use_shared < 0 ? "production" : (use_shared ? "shared" : "legacy");
+    printf("%s,%s,%d,%d,%d,%d,%d,%.3f\n", mode, argv[2],
+        depth, n_heads, n_heads_kv, n_sequences, repetitions, time_us);
+    return 0;
 }
 
 struct paged_decode_result {
@@ -2246,6 +2324,9 @@ int main(int argc, char ** argv) {
     if (argc > 1 && strcmp(argv[1], "--contiguous-turbo-test") == 0) {
         RUN(test_contiguous_turbo_attention_reference_equivalence);
         return 0;
+    }
+    if (argc > 1 && strcmp(argv[1], "--contiguous-turbo-bench") == 0) {
+        return run_contiguous_turbo_attention_benchmark(argc, argv);
     }
     if (argc > 1 && strcmp(argv[1], "--paged-decode-bench") == 0) {
         return run_paged_attention_decode_benchmark(argc, argv);

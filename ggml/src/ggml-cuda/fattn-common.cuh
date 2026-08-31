@@ -101,6 +101,29 @@ static __device__ __forceinline__ void fattn_online_softmax_scales(
     value_scale = fattn_softmax_rescale(value, new_max);
 }
 
+struct fattn_decode_identity_score {
+    __device__ __forceinline__ float operator()(float value, int) const {
+        return value;
+    }
+};
+
+template <bool use_logit_softcap>
+struct fattn_decode_contiguous_score {
+    const half * mask;
+    float slope;
+    float logit_softcap;
+
+    __device__ __forceinline__ float operator()(float value, int token) const {
+        if constexpr (use_logit_softcap) {
+            value = logit_softcap * tanhf(value);
+        }
+        if (mask != nullptr) {
+            value += slope * __half2float(mask[token]);
+        }
+        return value;
+    }
+};
+
 struct ggml_cuda_flash_attn_ext_f16_extra_data {
     uintptr_t K;
     uintptr_t V;
@@ -857,6 +880,119 @@ constexpr __device__ dequantize_V_t get_dequantize_V() {
     } else {
         static_assert(type_V == -1, "bad type");
         return nullptr;
+    }
+}
+
+template <int D, int nwarps>
+struct fattn_decode_vec_shared {
+    float partial_max[nwarps];
+    float partial_sum[nwarps];
+    float partial_acc[nwarps][D];
+};
+
+template <int D, int nwarps, ggml_type type_K, ggml_type type_V, typename kv_address_t, typename score_t>
+static __device__ __forceinline__ void fattn_decode_vec_core(
+        const float * q, const kv_address_t & kv_address, const score_t & score, const float * sink,
+        int n_tokens, float scale, float * dst, fattn_decode_vec_shared<D, nwarps> & shared) {
+    static_assert(type_K == GGML_TYPE_TURBO3_0 || type_K == GGML_TYPE_TURBO4_0,
+        "shared decode requires a Turbo K cache");
+    static_assert(type_V == GGML_TYPE_TURBO3_0 || type_V == GGML_TYPE_TURBO4_0,
+        "shared decode requires a Turbo V cache");
+    static_assert(D % (2 * WARP_SIZE) == 0, "head dimension must map evenly to float2 query fragments");
+
+    constexpr vec_dot_KQ_t vec_dot_KQ = get_vec_dot_KQ<type_K, D, WARP_SIZE>();
+    constexpr dequantize_V_t dequantize_V = get_dequantize_V<type_V, float, 4>();
+    constexpr int q_fragments = D / (2 * WARP_SIZE);
+    constexpr int v_groups = D / (4 * WARP_SIZE);
+
+    const int warp = threadIdx.y;
+    const int lane = threadIdx.x;
+    const float2 * q_row = (const float2 *) q;
+    float2 q_reg[q_fragments];
+    float acc[D / WARP_SIZE] = {};
+
+#pragma unroll
+    for (int i = 0; i < q_fragments; ++i) {
+        q_reg[i] = q_row[lane * q_fragments + i];
+        q_reg[i].x *= scale;
+        q_reg[i].y *= scale;
+    }
+
+    float qk_max = -FLT_MAX;
+    float exp_sum = 0.0f;
+    for (int token = warp; token < n_tokens; token += nwarps) {
+        const fattn_kv_rows rows = kv_address.rows(token);
+        float qk = vec_dot_KQ(rows.k, q_reg, nullptr, nullptr);
+        for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+            qk += __shfl_down_sync(0xffffffffu, qk, offset);
+        }
+        qk = score(__shfl_sync(0xffffffffu, qk, 0), token);
+
+        float new_max;
+        float old_scale;
+        float weight;
+        fattn_online_softmax_scales(qk, qk_max, new_max, old_scale, weight);
+#pragma unroll
+        for (int group = 0; group < v_groups; ++group) {
+            float values[4];
+            dequantize_V(rows.v, values, lane * 4 + group * 4 * WARP_SIZE);
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                acc[group * 4 + i] = acc[group * 4 + i] * old_scale + weight * values[i];
+            }
+        }
+        exp_sum = exp_sum * old_scale + weight;
+        qk_max = new_max;
+    }
+
+    if (sink != nullptr && warp == 0) {
+        float new_max;
+        float old_scale;
+        float weight;
+        fattn_online_softmax_scales(*sink, qk_max, new_max, old_scale, weight);
+#pragma unroll
+        for (int i = 0; i < D / WARP_SIZE; ++i) {
+            acc[i] *= old_scale;
+        }
+        exp_sum = exp_sum * old_scale + weight;
+        qk_max = new_max;
+    }
+
+    if (lane == 0) {
+        shared.partial_max[warp] = qk_max;
+        shared.partial_sum[warp] = exp_sum;
+    }
+#pragma unroll
+    for (int i = 0; i < D / WARP_SIZE; ++i) {
+        const int dim = lane * 4 + (i / 4) * 4 * WARP_SIZE + i % 4;
+        shared.partial_acc[warp][dim] = acc[i];
+    }
+    __syncthreads();
+
+    if (warp == 0) {
+        float final_max = -FLT_MAX;
+        float final_sum = 0.0f;
+        float final_acc[D / WARP_SIZE] = {};
+#pragma unroll
+        for (int w = 0; w < nwarps; ++w) {
+            final_max = fmaxf(final_max, shared.partial_max[w]);
+        }
+#pragma unroll
+        for (int w = 0; w < nwarps; ++w) {
+            const float partial_scale = fattn_softmax_rescale(shared.partial_max[w], final_max);
+            final_sum += shared.partial_sum[w] * partial_scale;
+#pragma unroll
+            for (int i = 0; i < D / WARP_SIZE; ++i) {
+                const int dim = lane * 4 + (i / 4) * 4 * WARP_SIZE + i % 4;
+                final_acc[i] += shared.partial_acc[w][dim] * partial_scale;
+            }
+        }
+        const float inv_sum = 1.0f / (final_sum + 1e-6f);
+#pragma unroll
+        for (int i = 0; i < D / WARP_SIZE; ++i) {
+            const int dim = lane * 4 + (i / 4) * 4 * WARP_SIZE + i % 4;
+            dst[dim] = final_acc[i] * inv_sum;
+        }
     }
 }
 
