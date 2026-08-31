@@ -1475,6 +1475,32 @@ static bool paged_kv_type_supported(ggml_type type) {
     return type == GGML_TYPE_Q8_0 || type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0;
 }
 
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+static ggml_paged_attn_cuda_device_caps paged_attn_query_cuda_device_caps(
+        cudaStream_t stream, cudaStreamCaptureStatus * capture_status_out = nullptr) {
+    const auto & device_info = ggml_cuda_info().devices[ggml_cuda_get_device()];
+    const bool sm89_compiled = ggml_cuda_has_arch(GGML_CUDA_CC_ADA_LOVELACE);
+    bool graph_capture_safe = false;
+    if (capture_status_out != nullptr || (device_info.cc == GGML_CUDA_CC_ADA_LOVELACE && sm89_compiled)) {
+        cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
+        const cudaError_t capture_error = cudaStreamIsCapturing(stream, &capture_status);
+        graph_capture_safe = capture_error == cudaSuccess && capture_status != cudaStreamCaptureStatusInvalidated;
+        if (capture_status_out != nullptr) {
+            *capture_status_out = capture_status;
+        }
+    }
+    return {
+        device_info.cc,
+        device_info.nsm,
+        device_info.warp_size,
+        device_info.max_threads_per_block,
+        (int64_t) device_info.smpb,
+        sm89_compiled,
+        graph_capture_safe,
+    };
+}
+#endif
+
 void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * q = dst->src[0];
     const ggml_tensor * k_new = dst->src[1];
@@ -1548,17 +1574,11 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
         const int cc = device_info.cc;
         const bool force_float_q = getenv("GGML_CUDA_PAGED_Q8_FLOAT_Q") != nullptr;
         cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
-        const cudaError_t capture_error = cudaStreamIsCapturing(ctx.stream(), &capture_status);
-        const ggml_paged_attn_cuda_device_caps caps = {
-            device_info.cc,
-            device_info.nsm,
-            device_info.warp_size,
-            device_info.max_threads_per_block,
-            (int64_t) device_info.smpb,
-            capture_error == cudaSuccess && capture_status != cudaStreamCaptureStatusInvalidated,
-        };
+        const ggml_paged_attn_cuda_device_caps caps =
+            paged_attn_query_cuda_device_caps(ctx.stream(), &capture_status);
         ggml_paged_attn_cuda_variant variant = ggml_paged_attn_select_cuda_variant(
-            context_bucket, n_heads, n_heads_kv, batch_lens->ne[0], caps);
+            context_bucket, head_dim, n_heads, n_heads_kv, batch_lens->ne[0], q->ne[2],
+            k_cache->type, v_cache->type, caps);
         const char * force_warps = getenv("GGML_CUDA_PAGED_Q8_WARPS");
         const char * force_partitions = getenv("GGML_CUDA_PAGED_Q8_PARTITIONS");
         const char * force_q_heads = getenv("GGML_CUDA_PAGED_Q8_HEADS");
@@ -1787,7 +1807,11 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
     if (decode_turbo) {
         g_paged_turbo_decode_launch_count.fetch_add(1, std::memory_order_relaxed);
-        int turbo_warps = 32;
+        const ggml_paged_attn_cuda_device_caps caps = paged_attn_query_cuda_device_caps(ctx.stream());
+        const ggml_paged_attn_cuda_variant variant = ggml_paged_attn_select_cuda_variant(
+            context_bucket, head_dim, n_heads, n_heads_kv, batch_lens->ne[0], q->ne[2],
+            k_cache->type, v_cache->type, caps);
+        int turbo_warps = variant.n_warps;
         const char * turbo_warps_env = getenv("GGML_CUDA_PAGED_TURBO_WARPS");
         if (turbo_warps_env != nullptr) {
             turbo_warps = atoi(turbo_warps_env);

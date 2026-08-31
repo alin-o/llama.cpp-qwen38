@@ -1190,35 +1190,69 @@ TEST(test_paged_attention_head_mapping_and_dispatch_selection) {
         }
     }
 
-    const ggml_paged_attn_cuda_device_caps ada = { 890, 128, 32, 1024, 48 * 1024, true };
+    const ggml_paged_attn_cuda_device_caps ada = { 890, 128, 32, 1024, 48 * 1024, true, true };
     const ggml_paged_attn_cuda_variant shallow = ggml_paged_attn_select_cuda_variant(
-        GGML_PAGED_ATTN_CONTEXT_4K, 32, 4, 1, ada);
+        GGML_PAGED_ATTN_CONTEXT_4K, 256, 32, 4, 1, 1, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, ada);
     EXPECT_TRUE(shallow.n_warps == 32 && shallow.n_partitions == 1 && shallow.n_q_heads == 1);
     const ggml_paged_attn_cuda_variant long_single = ggml_paged_attn_select_cuda_variant(
-        GGML_PAGED_ATTN_CONTEXT_64K, 32, 4, 1, ada);
+        GGML_PAGED_ATTN_CONTEXT_64K, 256, 32, 4, 1, 1, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, ada);
     EXPECT_TRUE(long_single.n_warps == 8 && long_single.n_partitions == 8 && long_single.n_q_heads == 1);
     const ggml_paged_attn_cuda_variant long_batch = ggml_paged_attn_select_cuda_variant(
-        GGML_PAGED_ATTN_CONTEXT_64K, 32, 4, 2, ada);
+        GGML_PAGED_ATTN_CONTEXT_64K, 256, 32, 4, 2, 2, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, ada);
     EXPECT_TRUE(long_batch.n_warps == 8 && long_batch.n_partitions == 8 && long_batch.n_q_heads == 1);
     const ggml_paged_attn_cuda_variant long_batch4 = ggml_paged_attn_select_cuda_variant(
-        GGML_PAGED_ATTN_CONTEXT_16K, 32, 4, 4, ada);
+        GGML_PAGED_ATTN_CONTEXT_16K, 256, 32, 4, 4, 4, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, ada);
     EXPECT_TRUE(long_batch4.n_warps == 32 && long_batch4.n_partitions == 1 && long_batch4.n_q_heads == 1);
     const ggml_paged_attn_cuda_variant long_batch8 = ggml_paged_attn_select_cuda_variant(
-        GGML_PAGED_ATTN_CONTEXT_16K, 32, 4, 8, ada);
+        GGML_PAGED_ATTN_CONTEXT_16K, 256, 32, 4, 8, 8, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, ada);
     EXPECT_TRUE(long_batch8.n_warps == 32 && long_batch8.n_partitions == 1 && long_batch8.n_q_heads == 1);
     const ggml_paged_attn_cuda_variant long_batch6 = ggml_paged_attn_select_cuda_variant(
-        GGML_PAGED_ATTN_CONTEXT_16K, 24, 4, 4, ada);
+        GGML_PAGED_ATTN_CONTEXT_16K, 256, 24, 4, 4, 4, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, ada);
     EXPECT_TRUE(long_batch6.n_warps == 8 && long_batch6.n_partitions == 8 && long_batch6.n_q_heads == 2);
 
+    const ggml_paged_attn_cuda_variant turbo3 = ggml_paged_attn_select_cuda_variant(
+        GGML_PAGED_ATTN_CONTEXT_4K, 256, 32, 4, 1, 1, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0, ada);
+    EXPECT_TRUE(turbo3.n_warps == 16 && turbo3.n_partitions == 1 && turbo3.n_q_heads == 1);
+    const ggml_paged_attn_cuda_variant turbo4 = ggml_paged_attn_select_cuda_variant(
+        GGML_PAGED_ATTN_CONTEXT_16K, 256, 24, 4, 8, 8, GGML_TYPE_TURBO4_0, GGML_TYPE_TURBO4_0, ada);
+    EXPECT_TRUE(turbo4.n_warps == 8 && turbo4.n_partitions == 1 && turbo4.n_q_heads == 1);
+
+    for (const ggml_paged_attn_cuda_variant fallback : {
+            ggml_paged_attn_select_cuda_variant(
+                GGML_PAGED_ATTN_CONTEXT_32K, 256, 32, 4, 1, 1,
+                GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0, ada),
+            ggml_paged_attn_select_cuda_variant(
+                GGML_PAGED_ATTN_CONTEXT_4K, 128, 32, 4, 1, 1,
+                GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0, ada),
+            ggml_paged_attn_select_cuda_variant(
+                GGML_PAGED_ATTN_CONTEXT_4K, 256, 32, 4, 2, 2,
+                GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0, ada),
+            ggml_paged_attn_select_cuda_variant(
+                GGML_PAGED_ATTN_CONTEXT_4K, 256, 32, 4, 1, 2,
+                GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0, ada),
+            ggml_paged_attn_select_cuda_variant(
+                GGML_PAGED_ATTN_CONTEXT_4K, 256, 16, 4, 1, 1,
+                GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0, ada),
+            ggml_paged_attn_select_cuda_variant(
+                GGML_PAGED_ATTN_CONTEXT_4K, 256, 32, 4, 1, 1,
+                GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO4_0, ada),
+        }) {
+        EXPECT_TRUE(fallback.n_warps == 32 && fallback.n_partitions == 1 && fallback.n_q_heads == 1);
+    }
+
     for (const ggml_paged_attn_cuda_device_caps unsupported : {
-            ggml_paged_attn_cuda_device_caps{ 860, 128, 32, 1024, 48 * 1024, true },
-            ggml_paged_attn_cuda_device_caps{ 890, 128, 64, 1024, 48 * 1024, true },
-            ggml_paged_attn_cuda_device_caps{ 890, 128, 32, 512, 48 * 1024, true },
-            ggml_paged_attn_cuda_device_caps{ 890, 128, 32, 1024, 32 * 1024, true },
-            ggml_paged_attn_cuda_device_caps{ 890, 128, 32, 1024, 48 * 1024, false },
+            ggml_paged_attn_cuda_device_caps{ 860, 128, 32, 1024, 48 * 1024, true, true },
+            ggml_paged_attn_cuda_device_caps{ 900, 128, 32, 1024, 48 * 1024, true, true },
+            ggml_paged_attn_cuda_device_caps{ 1200, 128, 32, 1024, 48 * 1024, true, true },
+            ggml_paged_attn_cuda_device_caps{ 890, 128, 64, 1024, 48 * 1024, true, true },
+            ggml_paged_attn_cuda_device_caps{ 890, 128, 32, 512, 48 * 1024, true, true },
+            ggml_paged_attn_cuda_device_caps{ 890, 128, 32, 1024, 32 * 1024, true, true },
+            ggml_paged_attn_cuda_device_caps{ 890, 128, 32, 1024, 48 * 1024, false, true },
+            ggml_paged_attn_cuda_device_caps{ 890, 128, 32, 1024, 48 * 1024, true, false },
         }) {
         const ggml_paged_attn_cuda_variant fallback = ggml_paged_attn_select_cuda_variant(
-            GGML_PAGED_ATTN_CONTEXT_64K, 32, 4, 1, unsupported);
+            GGML_PAGED_ATTN_CONTEXT_16K, 256, 32, 4, 1, 1,
+            GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO3_0, unsupported);
         EXPECT_TRUE(fallback.n_warps == 32 && fallback.n_partitions == 1 && fallback.n_q_heads == 1);
     }
 }

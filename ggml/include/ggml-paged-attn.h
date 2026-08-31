@@ -51,6 +51,7 @@ struct ggml_paged_attn_cuda_device_caps {
     int32_t warp_size;
     int32_t max_threads_per_block;
     int64_t shared_mem_per_block;
+    bool    sm89_compiled;
     bool    graph_capture_safe;
 };
 
@@ -101,26 +102,42 @@ static inline bool ggml_paged_attn_current_row_owner(
 }
 
 static inline struct ggml_paged_attn_cuda_variant ggml_paged_attn_select_cuda_variant(
-        int context_bucket, int n_heads, int n_heads_kv, int n_sequences,
+        int context_bucket, int head_dim, int n_heads, int n_heads_kv, int n_sequences, int n_q_tokens,
+        enum ggml_type k_type, enum ggml_type v_type,
         struct ggml_paged_attn_cuda_device_caps caps) {
     struct ggml_paged_attn_cuda_variant result = { 32, 1, 1 };
     // The bucket policy below is benchmarked only for native Ada (SM 8.9). Keep the legacy kernel elsewhere.
     const bool supported_device = caps.cc == 890 && caps.n_sms > 0 && caps.warp_size == 32 &&
-        caps.max_threads_per_block >= 1024 && caps.shared_mem_per_block >= 44 * 1024 && caps.graph_capture_safe;
-    if (!supported_device || context_bucket == GGML_PAGED_ATTN_CONTEXT_4K ||
-            n_heads <= 0 || n_heads_kv <= 0 || n_sequences <= 0) {
+        caps.max_threads_per_block >= 1024 && caps.shared_mem_per_block >= 44 * 1024 &&
+        caps.sm89_compiled && caps.graph_capture_safe;
+    if (!supported_device || context_bucket < GGML_PAGED_ATTN_CONTEXT_4K ||
+            context_bucket > GGML_PAGED_ATTN_CONTEXT_LONG || head_dim != 256 ||
+            n_heads <= 0 || n_heads_kv <= 0 || n_heads % n_heads_kv != 0 ||
+            n_sequences <= 0 || n_q_tokens != n_sequences) {
         return result;
     }
 
     const int gqa_ratio = n_heads / n_heads_kv;
-    if (n_sequences >= 4 && gqa_ratio != 6) {
+    if (k_type == GGML_TYPE_Q8_0 && v_type == GGML_TYPE_Q8_0) {
+        if (context_bucket == GGML_PAGED_ATTN_CONTEXT_4K || (n_sequences >= 4 && gqa_ratio != 6)) {
+            return result;
+        }
+
+        result.n_warps = 8;
+        result.n_partitions = 8;
+        if (n_sequences >= 4 && (n_heads / 2) * n_sequences * result.n_partitions >= caps.n_sms) {
+            result.n_q_heads = 2;
+        }
         return result;
     }
 
-    result.n_warps = 8;
-    result.n_partitions = 8;
-    if (n_sequences >= 4 && (n_heads / 2) * n_sequences * result.n_partitions >= caps.n_sms) {
-        result.n_q_heads = 2;
+    const bool measured_turbo_shape = context_bucket <= GGML_PAGED_ATTN_CONTEXT_16K &&
+        (gqa_ratio == 6 || gqa_ratio == 8) &&
+        (n_sequences == 1 || n_sequences == 4 || n_sequences == 8);
+    if (measured_turbo_shape && k_type == GGML_TYPE_TURBO3_0 && v_type == GGML_TYPE_TURBO3_0) {
+        result.n_warps = 16;
+    } else if (measured_turbo_shape && k_type == GGML_TYPE_TURBO4_0 && v_type == GGML_TYPE_TURBO4_0) {
+        result.n_warps = 8;
     }
     return result;
 }
