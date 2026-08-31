@@ -1547,8 +1547,26 @@ static void check_paged_attention_decode_case(
     ggml_paged_attn_q8_fused_write_launch_count_reset();
     const paged_decode_result combined = run_paged_attention_decode_case(
         cuda_backend, n_heads, n_heads_kv, context_length, n_sequences, block_size);
-    EXPECT_TRUE(ggml_paged_attn_q8_combined_write_launch_count() > 0);
+    const unsigned long long combined_write_launches = ggml_paged_attn_q8_combined_write_launch_count();
+    EXPECT_TRUE(combined_write_launches == 1);
     EXPECT_TRUE(ggml_paged_attn_q8_fused_write_launch_count() == 0);
+    unsetenv("GGML_CUDA_PAGED_Q8_FUSED_WRITE");
+
+    setenv("GGML_CUDA_PAGED_Q8_WARPS", "8", 1);
+    setenv("GGML_CUDA_PAGED_Q8_PARTITIONS", "1", 1);
+    setenv("GGML_CUDA_PAGED_Q8_HEADS", "2", 1);
+    setenv("GGML_CUDA_PAGED_Q8_FUSED_WRITE", "1", 1);
+    ggml_paged_attn_q8_combined_write_launch_count_reset();
+    ggml_paged_attn_q8_fused_write_launch_count_reset();
+    const paged_decode_result fused = run_paged_attention_decode_case(
+        cuda_backend, n_heads, n_heads_kv, context_length, n_sequences, block_size);
+    const unsigned long long fused_combined_write_launches = ggml_paged_attn_q8_combined_write_launch_count();
+    const unsigned long long fused_write_launches = ggml_paged_attn_q8_fused_write_launch_count();
+    EXPECT_TRUE(fused_combined_write_launches == 0);
+    EXPECT_TRUE(fused_write_launches == 1);
+    unsetenv("GGML_CUDA_PAGED_Q8_WARPS");
+    unsetenv("GGML_CUDA_PAGED_Q8_PARTITIONS");
+    unsetenv("GGML_CUDA_PAGED_Q8_HEADS");
     unsetenv("GGML_CUDA_PAGED_Q8_FUSED_WRITE");
 
     setenv("GGML_CUDA_PAGED_Q8_FLOAT_Q", "1", 1);
@@ -1572,14 +1590,21 @@ static void check_paged_attention_decode_case(
     EXPECT_TRUE(packed_q.v_cache == reference.v_cache);
     EXPECT_TRUE(combined.k_cache == reference.k_cache);
     EXPECT_TRUE(combined.v_cache == reference.v_cache);
+    EXPECT_TRUE(fused.k_cache == combined.k_cache);
+    EXPECT_TRUE(fused.v_cache == combined.v_cache);
 
     const double combined_error = paged_decode_relative_squared_error(combined.output, reference.output);
+    const double fused_error = paged_decode_relative_squared_error(fused.output, combined.output);
     const double float_error = paged_decode_relative_squared_error(float_q.output, reference.output);
     const double packed_error = paged_decode_relative_squared_error(packed_q.output, reference.output);
     const double added_error = fmax(0.0, packed_error - float_error);
-    fprintf(stderr, " q8_1 error: combined=%g float=%g packed=%g added=%g ",
-        combined_error, float_error, packed_error, added_error);
+    fprintf(stderr,
+        " q8_1 error: combined=%g fused-vs-combined=%g float=%g packed=%g added=%g "
+        "write-launches:fallback=%llu/fused=%llu/fused-combined=%llu ",
+        combined_error, fused_error, float_error, packed_error, added_error,
+        combined_write_launches, fused_write_launches, fused_combined_write_launches);
     EXPECT_TRUE(combined_error < 5e-3);
+    EXPECT_TRUE(fused_error < 5e-3);
     EXPECT_TRUE(float_error < 5e-3);
     EXPECT_TRUE(packed_error < 5e-3);
     EXPECT_TRUE(added_error < 1e-4);
@@ -1669,12 +1694,22 @@ TEST(test_paged_attention_q8_graph_replay_restore_and_mixed_depth) {
     const paged_decode_result reference = run_paged_attention_decode_case(
         cpu_backend, 24, 4, 8192, 4, 16, &initial_lens, &restored_lens, 2, true);
 
+    setenv("GGML_CUDA_PAGED_Q8_WARPS", "8", 1);
+    setenv("GGML_CUDA_PAGED_Q8_HEADS", "2", 1);
+    setenv("GGML_CUDA_PAGED_Q8_FUSED_WRITE", "1", 1);
     ggml_paged_attn_q8_decode_launch_count_reset();
+    ggml_paged_attn_q8_combined_write_launch_count_reset();
+    ggml_paged_attn_q8_fused_write_launch_count_reset();
     const paged_decode_result replayed = run_paged_attention_decode_case(
         cuda_backend, 24, 4, 8192, 4, 16, &initial_lens, &restored_lens, 4, true);
     const unsigned long long launches = ggml_paged_attn_q8_decode_launch_count();
-    fprintf(stderr, " mixed-depth same-bucket graph: host launches=%llu replayed=2 remap=1 ", launches);
+    const unsigned long long fused_launches = ggml_paged_attn_q8_fused_write_launch_count();
+    const unsigned long long combined_launches = ggml_paged_attn_q8_combined_write_launch_count();
+    fprintf(stderr, " mixed-depth same-bucket graph: host=%llu fused=%llu combined=%llu replayed=2 remap=1 ",
+        launches, fused_launches, combined_launches);
     EXPECT_TRUE(launches == 2);
+    EXPECT_TRUE(fused_launches == launches);
+    EXPECT_TRUE(combined_launches == 0);
     EXPECT_TRUE(replayed.k_cache == reference.k_cache);
     EXPECT_TRUE(replayed.v_cache == reference.v_cache);
     EXPECT_TRUE(paged_decode_relative_squared_error(replayed.output, reference.output) < 5e-3);
@@ -1685,29 +1720,43 @@ TEST(test_paged_attention_q8_graph_replay_restore_and_mixed_depth) {
     ggml_backend_t transition_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr);
     EXPECT_TRUE(transition_backend != nullptr);
     ggml_paged_attn_q8_decode_launch_count_reset();
+    ggml_paged_attn_q8_combined_write_launch_count_reset();
+    ggml_paged_attn_q8_fused_write_launch_count_reset();
     paged_decode_resources transition_resources[2];
     int transition_index = 0;
     unsigned long long previous_launches = 0;
+    unsigned long long previous_fused_launches = 0;
     for (int context_length : { 4096, 65536 }) {
         const paged_decode_result transitioned = run_paged_attention_decode_case(
             transition_backend, 24, 4, context_length, 1, 16, nullptr, nullptr, 3, false,
             &transition_resources[transition_index++]);
         EXPECT_TRUE(!transitioned.output.empty());
         const unsigned long long transition_launches = ggml_paged_attn_q8_decode_launch_count();
-        fprintf(stderr, " bucket-transition depth=%d host launches=%llu replayed=1 ",
-            context_length, transition_launches - previous_launches);
+        const unsigned long long transition_fused_launches = ggml_paged_attn_q8_fused_write_launch_count();
+        fprintf(stderr, " bucket-transition depth=%d host=%llu fused=%llu combined=%llu replayed=1 ",
+            context_length, transition_launches - previous_launches,
+            transition_fused_launches - previous_fused_launches,
+            ggml_paged_attn_q8_combined_write_launch_count());
         EXPECT_TRUE(transition_launches - previous_launches == 2);
+        EXPECT_TRUE(transition_fused_launches - previous_fused_launches == 2);
+        EXPECT_TRUE(ggml_paged_attn_q8_combined_write_launch_count() == 0);
         previous_launches = transition_launches;
+        previous_fused_launches = transition_fused_launches;
     }
     EXPECT_TRUE(ggml_backend_graph_compute(transition_backend, transition_resources[0].graph) == GGML_STATUS_SUCCESS);
     EXPECT_TRUE(ggml_backend_graph_compute(transition_backend, transition_resources[1].graph) == GGML_STATUS_SUCCESS);
     EXPECT_TRUE(ggml_paged_attn_q8_decode_launch_count() == previous_launches);
+    EXPECT_TRUE(ggml_paged_attn_q8_fused_write_launch_count() == previous_fused_launches);
+    EXPECT_TRUE(ggml_paged_attn_q8_combined_write_launch_count() == 0);
     fprintf(stderr, " bucket-transition cached variants replayed=2 ");
     for (paged_decode_resources & resources : transition_resources) {
         ggml_backend_buffer_free(resources.buffer);
         ggml_free(resources.ctx);
     }
     ggml_backend_free(transition_backend);
+    unsetenv("GGML_CUDA_PAGED_Q8_WARPS");
+    unsetenv("GGML_CUDA_PAGED_Q8_HEADS");
+    unsetenv("GGML_CUDA_PAGED_Q8_FUSED_WRITE");
 }
 
 TEST(test_paged_attention_cuda_runtime_coverage) {
@@ -1836,7 +1885,6 @@ int main(int argc, char ** argv) {
 #if defined(GGML_USE_CUDA)
     if (argc > 1 && strcmp(argv[1], "--paged-graph-test") == 0) {
         unsetenv("GGML_CUDA_DISABLE_GRAPHS");
-        setenv("GGML_CUDA_PAGED_Q8_FUSED_WRITE", "1", 1);
         RUN(test_paged_attention_q8_graph_replay_restore_and_mixed_depth);
         return 0;
     }
