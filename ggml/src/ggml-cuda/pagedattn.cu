@@ -1896,7 +1896,9 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
 
     if (use_tiled_prefill) {
         const ggml_paged_attn_cuda_device_caps caps = paged_attn_query_cuda_device_caps(ctx.stream());
-        bool cache_row_offsets = ggml_paged_attn_select_cuda_prefill_row_cache(head_dim, caps);
+        bool cache_row_offsets = ggml_paged_attn_select_cuda_prefill_row_cache(
+            context_bucket, head_dim, n_heads, n_heads_kv, batch_lens->ne[0], q->ne[2],
+            k_cache->type, v_cache->type, caps);
         if (const char * env = getenv("GGML_CUDA_PAGED_PREFILL_ROW_CACHE")) {
             cache_row_offsets = atoi(env) != 0;
         }

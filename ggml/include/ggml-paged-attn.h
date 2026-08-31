@@ -56,12 +56,22 @@ struct ggml_paged_attn_cuda_device_caps {
 };
 
 static inline bool ggml_paged_attn_select_cuda_prefill_row_cache(
-        int head_dim, struct ggml_paged_attn_cuda_device_caps caps) {
-    // The shared row-address cache is benchmarked only for native Ada (SM 8.9).
+        int context_bucket, int head_dim, int n_heads, int n_heads_kv, int n_sequences, int n_q_tokens,
+        enum ggml_type k_type, enum ggml_type v_type,
+        struct ggml_paged_attn_cuda_device_caps caps) {
+    // The shared row-address cache is benchmarked only for this native Ada (SM 8.9) prefill bucket.
     const bool supported_device = caps.cc == 890 && caps.n_sms > 0 && caps.warp_size == 32 &&
         caps.max_threads_per_block >= 1024 && caps.shared_mem_per_block >= 44 * 1024 &&
         caps.sm89_compiled && caps.graph_capture_safe;
-    return supported_device && head_dim == 256;
+    if (!supported_device || context_bucket != GGML_PAGED_ATTN_CONTEXT_4K || head_dim != 256 ||
+            n_heads <= 0 || n_heads_kv <= 0 || n_heads % n_heads_kv != 0 ||
+            n_heads / n_heads_kv != 8 || n_sequences != 1 || n_q_tokens != 1023) {
+        return false;
+    }
+
+    return (k_type == GGML_TYPE_Q8_0 && v_type == GGML_TYPE_Q8_0) ||
+        (k_type == GGML_TYPE_TURBO3_0 && v_type == GGML_TYPE_TURBO3_0) ||
+        (k_type == GGML_TYPE_TURBO4_0 && v_type == GGML_TYPE_TURBO4_0);
 }
 
 static inline int ggml_paged_attn_context_bucket(int max_context_len) {
