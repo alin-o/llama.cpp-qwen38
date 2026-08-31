@@ -1368,11 +1368,13 @@ static paged_decode_result run_paged_attention_decode_case(
                 context_lens_data = *replay_context_lens;
             }
             for (int seq = 0; seq < n_sequences; ++seq) {
-                if (remap_before_last_compute && max_blocks > 1) {
-                    std::swap(block_table_data[(size_t) seq * max_blocks],
-                        block_table_data[(size_t) seq * max_blocks + 1]);
-                }
                 const int logical_pos = context_lens_data[seq] - 1;
+                if (remap_before_last_compute && max_blocks > 1) {
+                    const int logical_block = logical_pos / block_size;
+                    const int replacement_block = logical_block == 0 ? 1 : 0;
+                    std::swap(block_table_data[(size_t) seq * max_blocks + logical_block],
+                        block_table_data[(size_t) seq * max_blocks + replacement_block]);
+                }
                 const int physical_block = block_table_data[(size_t) seq * max_blocks + logical_pos / block_size];
                 for (int head = 0; head < n_heads_kv; ++head) {
                     write_rows_data[seq * n_heads_kv + head] = physical_block * n_heads_kv * block_size +
@@ -1717,6 +1719,21 @@ TEST(test_paged_attention_q8_graph_replay_restore_and_mixed_depth) {
     ggml_backend_free(cuda_backend);
     ggml_backend_free(cpu_backend);
 
+    std::vector<paged_decode_result> transition_references;
+    ggml_backend_t reference_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr);
+    EXPECT_TRUE(reference_backend != nullptr);
+    setenv("GGML_CUDA_PAGED_Q8_FUSED_WRITE", "0", 1);
+    ggml_paged_attn_q8_combined_write_launch_count_reset();
+    ggml_paged_attn_q8_fused_write_launch_count_reset();
+    for (int context_length : { 4096, 65536 }) {
+        transition_references.push_back(run_paged_attention_decode_case(
+            reference_backend, 24, 4, context_length, 1, 16));
+    }
+    EXPECT_TRUE(ggml_paged_attn_q8_combined_write_launch_count() == transition_references.size());
+    EXPECT_TRUE(ggml_paged_attn_q8_fused_write_launch_count() == 0);
+    ggml_backend_free(reference_backend);
+    setenv("GGML_CUDA_PAGED_Q8_FUSED_WRITE", "1", 1);
+
     ggml_backend_t transition_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr);
     EXPECT_TRUE(transition_backend != nullptr);
     ggml_paged_attn_q8_decode_launch_count_reset();
@@ -1727,10 +1744,14 @@ TEST(test_paged_attention_q8_graph_replay_restore_and_mixed_depth) {
     unsigned long long previous_launches = 0;
     unsigned long long previous_fused_launches = 0;
     for (int context_length : { 4096, 65536 }) {
+        const int reference_index = transition_index;
         const paged_decode_result transitioned = run_paged_attention_decode_case(
             transition_backend, 24, 4, context_length, 1, 16, nullptr, nullptr, 3, false,
             &transition_resources[transition_index++]);
-        EXPECT_TRUE(!transitioned.output.empty());
+        EXPECT_TRUE(transitioned.k_cache == transition_references[reference_index].k_cache);
+        EXPECT_TRUE(transitioned.v_cache == transition_references[reference_index].v_cache);
+        EXPECT_TRUE(paged_decode_relative_squared_error(
+            transitioned.output, transition_references[reference_index].output) < 5e-3);
         const unsigned long long transition_launches = ggml_paged_attn_q8_decode_launch_count();
         const unsigned long long transition_fused_launches = ggml_paged_attn_q8_fused_write_launch_count();
         fprintf(stderr, " bucket-transition depth=%d host=%llu fused=%llu combined=%llu replayed=1 ",
