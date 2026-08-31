@@ -1322,7 +1322,7 @@ static void common_fit_paged_kv_blocks(common_params & params, const llama_model
     ggml_backend_dev_memory(dev, &free_vram, &total_vram);
 
     const uint32_t n_heads_kv = llama_model_n_head_kv(model);
-    const uint32_t n_layers   = llama_model_n_layer(model);
+    const uint32_t n_layers   = llama_model_n_layer_attn(model);
     const uint32_t head_dim   = llama_model_n_embd_head_v(model);
     const uint32_t block_size = params.block_size;
 

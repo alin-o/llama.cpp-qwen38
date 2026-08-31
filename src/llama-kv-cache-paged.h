@@ -21,6 +21,14 @@ class llama_kv_cache_paged : public llama_memory_i {
                          uint32_t n_ubatch,
                          uint32_t n_seq_max);
 
+    llama_kv_cache_paged(uint32_t head_dim,
+                         uint32_t n_head_kv,
+                         uint32_t block_size,
+                         uint32_t n_layers,
+                         uint32_t n_ubatch,
+                         uint32_t n_seq_max,
+                         std::vector<uint32_t> attention_layers);
+
     void init(ggml_backend_t backend_gpu,
               ggml_backend_t backend_cpu,
               enum ggml_type type_k,
@@ -50,6 +58,9 @@ class llama_kv_cache_paged : public llama_memory_i {
 
     struct ggml_tensor * get_k_tensor(int layer_idx) const;
     struct ggml_tensor * get_v_tensor(int layer_idx) const;
+    int32_t get_physical_layer(int layer_idx) const;
+    uint32_t get_n_attention_layers() const;
+    size_t get_bytes_per_block() const;
 
     bool get_can_shift() const override { return false; }
 
@@ -117,6 +128,8 @@ class llama_kv_cache_paged : public llama_memory_i {
     const uint32_t n_layers;
     const uint32_t n_ubatch;
     const uint32_t n_seq_max;
+    const std::vector<int32_t>  layer_to_physical;
+    const std::vector<uint32_t> physical_to_layer;
     uint32_t       num_gpu_blocks;
     uint32_t       num_cpu_blocks;
     uint32_t       block_bytes_k;

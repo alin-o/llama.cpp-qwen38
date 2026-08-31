@@ -4,6 +4,31 @@
 #include "llama-impl.h"
 #include "llama-model.h"
 
+#include <stdexcept>
+
+static std::vector<uint32_t> hybrid_paged_attention_layers(
+        const llama_model & model,
+        uint32_t n_layers,
+        const llama_memory_hybrid_paged::layer_filter_cb & filter_attn,
+        const llama_memory_hybrid_paged::layer_filter_cb & filter_recr) {
+    if (n_layers != model.hparams.n_layer()) {
+        throw std::runtime_error("paged KV hybrid layer count does not match the model");
+    }
+
+    std::vector<uint32_t> result;
+    for (uint32_t il = 0; il < n_layers; ++il) {
+        const bool is_attn = filter_attn == nullptr ? !model.hparams.is_recr(il) : filter_attn(il);
+        const bool is_recr = filter_recr == nullptr ?  model.hparams.is_recr(il) : filter_recr(il);
+        if (is_attn == is_recr) {
+            throw std::runtime_error(format("paged KV hybrid layer %u must be exactly one of attention or recurrent", il));
+        }
+        if (is_attn) {
+            result.push_back(il);
+        }
+    }
+    return result;
+}
+
 llama_memory_hybrid_paged::llama_memory_hybrid_paged(
         const llama_model & model,
         uint32_t head_dim,
@@ -24,8 +49,11 @@ llama_memory_hybrid_paged::llama_memory_hybrid_paged(
         uint32_t rs_size,
         uint32_t n_rs_seq,
         bool offload,
+        const layer_filter_cb & filter_attn,
         const layer_filter_cb & filter_recr) :
-    mem_attn(new llama_kv_cache_paged(head_dim, n_heads_kv, block_size, n_layers, n_ubatch, n_seq_max)),
+    mem_attn(new llama_kv_cache_paged(
+        head_dim, n_heads_kv, block_size, n_layers, n_ubatch, n_seq_max,
+        hybrid_paged_attention_layers(model, n_layers, filter_attn, filter_recr))),
     mem_recr(new llama_memory_recurrent(
         model, type_r, type_s, offload, rs_size, n_seq_max, n_rs_seq,
         filter_recr == nullptr ? [&](int32_t il) { return model.hparams.is_recr(il); } : filter_recr)) {

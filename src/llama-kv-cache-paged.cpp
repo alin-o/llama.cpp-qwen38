@@ -11,6 +11,29 @@ static ggml_type paged_storage_type(ggml_type type) {
     return type == GGML_TYPE_F16 ? GGML_TYPE_Q8_0 : type;
 }
 
+static std::vector<uint32_t> dense_attention_layers(uint32_t n_layers) {
+    std::vector<uint32_t> result(n_layers);
+    for (uint32_t il = 0; il < n_layers; ++il) {
+        result[il] = il;
+    }
+    return result;
+}
+
+static std::vector<int32_t> make_layer_to_physical(
+        uint32_t n_layers, const std::vector<uint32_t> & attention_layers) {
+    std::vector<int32_t> result(n_layers, -1);
+    uint32_t previous = 0;
+    for (uint32_t physical = 0; physical < attention_layers.size(); ++physical) {
+        const uint32_t logical = attention_layers[physical];
+        if (logical >= n_layers || (physical > 0 && logical <= previous)) {
+            throw std::runtime_error("paged KV attention layers must be unique, ordered, and in range");
+        }
+        result[logical] = physical;
+        previous = logical;
+    }
+    return result;
+}
+
 
 // llama_kv_cache_paged
 //
@@ -20,7 +43,16 @@ llama_kv_cache_paged::llama_kv_cache_paged(uint32_t head_dim,
                                            uint32_t block_size,
                                            uint32_t n_layers,
                                            uint32_t n_ubatch,
-                                           uint32_t n_seq_max) :
+                                           uint32_t n_seq_max) : llama_kv_cache_paged(
+        head_dim, n_heads_kv, block_size, n_layers, n_ubatch, n_seq_max, dense_attention_layers(n_layers)) {}
+
+llama_kv_cache_paged::llama_kv_cache_paged(uint32_t head_dim,
+                                           uint32_t n_heads_kv,
+                                           uint32_t block_size,
+                                           uint32_t n_layers,
+                                           uint32_t n_ubatch,
+                                           uint32_t n_seq_max,
+                                           std::vector<uint32_t> attention_layers) :
     kv_type_k(GGML_TYPE_Q8_0),
     kv_type_v(GGML_TYPE_Q8_0),
     head_dim(head_dim),
@@ -29,6 +61,8 @@ llama_kv_cache_paged::llama_kv_cache_paged(uint32_t head_dim,
     n_layers(n_layers),
     n_ubatch(n_ubatch),
     n_seq_max(n_seq_max),
+    layer_to_physical(make_layer_to_physical(n_layers, attention_layers)),
+    physical_to_layer(std::move(attention_layers)),
     num_gpu_blocks(0),
     num_cpu_blocks(0),
     gpu_backend(nullptr),
@@ -73,8 +107,9 @@ void llama_kv_cache_paged::init(ggml_backend_t backend_gpu,
     GGML_ASSERT(n_cpu_blocks && "n_cpu_blocks need to be greater than 0.");
 
 
-    LLAMA_LOG_INFO("%s: initializing paged KV cache. n_gpu_blocks=%d, n_cpu_blocks=%d, block_size=%d, K=%s, V=%s, watermark=%0.2f\n", __func__,
-                   n_gpu_blocks, n_cpu_blocks, block_size, ggml_type_name(type_k), ggml_type_name(type_v), watermark);
+    LLAMA_LOG_INFO("%s: initializing paged KV cache. n_gpu_blocks=%d, n_cpu_blocks=%d, block_size=%d, n_layers=%d, n_attention_layers=%zu, K=%s, V=%s, watermark=%0.2f\n", __func__,
+                   n_gpu_blocks, n_cpu_blocks, block_size, n_layers, physical_to_layer.size(),
+                   ggml_type_name(type_k), ggml_type_name(type_v), watermark);
     num_gpu_blocks = n_gpu_blocks;
     num_cpu_blocks = n_cpu_blocks;
     kv_type_k      = type_k;
@@ -84,33 +119,38 @@ void llama_kv_cache_paged::init(ggml_backend_t backend_gpu,
     block_bytes_k  = block_size * n_heads_kv * ggml_row_size(kv_type_k, head_dim);
     block_bytes_v  = block_size * n_heads_kv * ggml_row_size(kv_type_v, head_dim);
 
-    ggml_init_params gpu_params = {
-        /*.mem_size   =*/ ggml_tensor_overhead() * 2 * n_layers,
-        /*.mem_buffer =*/ nullptr,
-        /*.no_alloc   =*/ true,
-    };
-    ggml_context * ctx_gpu = ggml_init(gpu_params);
-    for (uint32_t il = 0; il < n_layers; ++il) {
-        k_gpu_layers.push_back(ggml_new_tensor_4d(ctx_gpu, type_k, head_dim, block_size, n_heads_kv, n_gpu_blocks));
-        v_gpu_layers.push_back(ggml_new_tensor_4d(ctx_gpu, type_v, head_dim, block_size, n_heads_kv, n_gpu_blocks));
-    }
-    ggml_backend_buffer_t buf_gpu = ggml_backend_alloc_ctx_tensors(ctx_gpu, backend_gpu);
-    GGML_ASSERT(buf_gpu && "Failed to allocate GPU KV cache buffer");
-    ggml_backend_buffer_clear(buf_gpu, 0);
+    if (!physical_to_layer.empty()) {
+        ggml_init_params gpu_params = {
+            /*.mem_size   =*/ ggml_tensor_overhead() * 2 * physical_to_layer.size(),
+            /*.mem_buffer =*/ nullptr,
+            /*.no_alloc   =*/ true,
+        };
+        ggml_context * ctx_gpu = ggml_init(gpu_params);
+        for (uint32_t physical = 0; physical < physical_to_layer.size(); ++physical) {
+            k_gpu_layers.push_back(ggml_new_tensor_4d(ctx_gpu, type_k, head_dim, block_size, n_heads_kv, n_gpu_blocks));
+            v_gpu_layers.push_back(ggml_new_tensor_4d(ctx_gpu, type_v, head_dim, block_size, n_heads_kv, n_gpu_blocks));
+        }
+        ggml_backend_buffer_t buf_gpu = ggml_backend_alloc_ctx_tensors(ctx_gpu, backend_gpu);
+        GGML_ASSERT(buf_gpu && "Failed to allocate GPU KV cache buffer");
+        ggml_backend_buffer_clear(buf_gpu, 0);
 
-    ggml_init_params cpu_params = {
-        /*.mem_size   =*/ ggml_tensor_overhead() * 2 * n_layers,
-        /*.mem_buffer =*/ nullptr,
-        /*.no_alloc   =*/ true,
-    };
-    ggml_context * ctx_cpu = ggml_init(cpu_params);
-    for (uint32_t il = 0; il < n_layers; ++il) {
-        k_cpu_layers.push_back(ggml_new_tensor_4d(ctx_cpu, type_k, head_dim, block_size, n_heads_kv, n_cpu_blocks));
-        v_cpu_layers.push_back(ggml_new_tensor_4d(ctx_cpu, type_v, head_dim, block_size, n_heads_kv, n_cpu_blocks));
+        ggml_init_params cpu_params = {
+            /*.mem_size   =*/ ggml_tensor_overhead() * 2 * physical_to_layer.size(),
+            /*.mem_buffer =*/ nullptr,
+            /*.no_alloc   =*/ true,
+        };
+        ggml_context * ctx_cpu = ggml_init(cpu_params);
+        for (uint32_t physical = 0; physical < physical_to_layer.size(); ++physical) {
+            k_cpu_layers.push_back(ggml_new_tensor_4d(ctx_cpu, type_k, head_dim, block_size, n_heads_kv, n_cpu_blocks));
+            v_cpu_layers.push_back(ggml_new_tensor_4d(ctx_cpu, type_v, head_dim, block_size, n_heads_kv, n_cpu_blocks));
+        }
+        ggml_backend_buffer_t buf_cpu = ggml_backend_alloc_ctx_tensors(ctx_cpu, backend_cpu);
+        GGML_ASSERT(buf_cpu && "Failed to allocate CPU KV cache buffer");
+        ggml_backend_buffer_clear(buf_cpu, 0);
     }
-    ggml_backend_buffer_t buf_cpu = ggml_backend_alloc_ctx_tensors(ctx_cpu, backend_cpu);
-    GGML_ASSERT(buf_cpu && "Failed to allocate CPU KV cache buffer");
-    ggml_backend_buffer_clear(buf_cpu, 0);
+
+    LLAMA_LOG_INFO("%s: paged KV payload per block: GPU/CPU=%zu bytes (%zu bytes/token)\n", __func__,
+                   get_bytes_per_block(), get_bytes_per_block() / block_size);
 
     block_manager.init(n_gpu_blocks, n_cpu_blocks, watermark);
     initialized = true;
@@ -237,22 +277,22 @@ void llama_kv_cache_paged::do_block_copy(const llama_block_ids & src_ids,
     const auto & dst_k_layers = to_gpu ? k_gpu_layers : k_cpu_layers;
     const auto & dst_v_layers = to_gpu ? v_gpu_layers : v_cpu_layers;
 
-    GGML_ASSERT(src_k_layers.size() == n_layers && src_v_layers.size() == n_layers && "src layer count mismatch.");
-    GGML_ASSERT(dst_k_layers.size() == n_layers && dst_v_layers.size() == n_layers && "dst layer count mismatch.");
+    GGML_ASSERT(src_k_layers.size() == physical_to_layer.size() && src_v_layers.size() == physical_to_layer.size() && "src layer count mismatch.");
+    GGML_ASSERT(dst_k_layers.size() == physical_to_layer.size() && dst_v_layers.size() == physical_to_layer.size() && "dst layer count mismatch.");
 
     std::vector<uint8_t> staging(std::max(block_bytes_k, block_bytes_v));
 
-    for (uint32_t il = 0; il < n_layers; ++il) {
+    for (uint32_t physical = 0; physical < physical_to_layer.size(); ++physical) {
         for (uint32_t i = 0; i < num_blocks; ++i) {
             const uint32_t src_global = src_ids[i];
             const uint32_t dst_global = new_ids[i];
             const uint32_t src_local  = to_gpu ? src_global - num_gpu_blocks : src_global;
             const uint32_t dst_local  = to_gpu ? dst_global : dst_global - num_gpu_blocks;
 
-            ggml_backend_tensor_get(src_k_layers[il], staging.data(), (size_t) src_local * block_bytes_k, block_bytes_k);
-            ggml_backend_tensor_set(dst_k_layers[il], staging.data(), (size_t) dst_local * block_bytes_k, block_bytes_k);
-            ggml_backend_tensor_get(src_v_layers[il], staging.data(), (size_t) src_local * block_bytes_v, block_bytes_v);
-            ggml_backend_tensor_set(dst_v_layers[il], staging.data(), (size_t) dst_local * block_bytes_v, block_bytes_v);
+            ggml_backend_tensor_get(src_k_layers[physical], staging.data(), (size_t) src_local * block_bytes_k, block_bytes_k);
+            ggml_backend_tensor_set(dst_k_layers[physical], staging.data(), (size_t) dst_local * block_bytes_k, block_bytes_k);
+            ggml_backend_tensor_get(src_v_layers[physical], staging.data(), (size_t) src_local * block_bytes_v, block_bytes_v);
+            ggml_backend_tensor_set(dst_v_layers[physical], staging.data(), (size_t) dst_local * block_bytes_v, block_bytes_v);
         }
     }
 }
@@ -381,11 +421,28 @@ llama_memory_context_ptr llama_kv_cache_paged::init_update(llama_context * /*lct
 }
 
 struct ggml_tensor * llama_kv_cache_paged::get_k_tensor(int layer_idx) const {
-    return k_gpu_layers[layer_idx];
+    const int32_t physical = get_physical_layer(layer_idx);
+    return physical < 0 ? nullptr : k_gpu_layers[physical];
 }
 
 struct ggml_tensor * llama_kv_cache_paged::get_v_tensor(int layer_idx) const {
-    return v_gpu_layers[layer_idx];
+    const int32_t physical = get_physical_layer(layer_idx);
+    return physical < 0 ? nullptr : v_gpu_layers[physical];
+}
+
+int32_t llama_kv_cache_paged::get_physical_layer(int layer_idx) const {
+    if (layer_idx < 0 || (uint32_t) layer_idx >= n_layers) {
+        throw std::out_of_range("paged KV layer index out of range");
+    }
+    return layer_to_physical[layer_idx];
+}
+
+uint32_t llama_kv_cache_paged::get_n_attention_layers() const {
+    return (uint32_t) physical_to_layer.size();
+}
+
+size_t llama_kv_cache_paged::get_bytes_per_block() const {
+    return ((size_t) block_bytes_k + block_bytes_v) * physical_to_layer.size();
 }
 
 void llama_kv_cache_paged::clear(bool data) {
@@ -394,7 +451,7 @@ void llama_kv_cache_paged::clear(bool data) {
     }
     if (initialized) {
         block_manager.restore({});
-        if (data) {
+        if (data && !physical_to_layer.empty()) {
             for (ggml_tensor * tensor : { k_gpu_layers.front(), v_gpu_layers.front(), k_cpu_layers.front(), v_cpu_layers.front() }) {
                 ggml_backend_buffer_clear(tensor->buffer, 0);
             }
@@ -439,8 +496,8 @@ llama_pos llama_kv_cache_paged::seq_pos_max(llama_seq_id seq_id) const {
 
 std::map<ggml_backend_buffer_type_t, size_t> llama_kv_cache_paged::memory_breakdown() const {
     std::map<ggml_backend_buffer_type_t, size_t> breakdown;
-    for (uint32_t il = 0; il < n_layers; ++il) {
-        for (ggml_tensor * tensor : { k_gpu_layers[il], v_gpu_layers[il], k_cpu_layers[il], v_cpu_layers[il] }) {
+    for (uint32_t physical = 0; physical < physical_to_layer.size(); ++physical) {
+        for (ggml_tensor * tensor : { k_gpu_layers[physical], v_gpu_layers[physical], k_cpu_layers[physical], v_cpu_layers[physical] }) {
             breakdown[ggml_backend_buffer_get_type(tensor->buffer)] += ggml_nbytes(tensor);
         }
     }
@@ -458,12 +515,18 @@ void llama_kv_cache_paged::set_seq_max_pos(llama_seq_id seq_id, llama_pos new_ma
 void llama_kv_cache_paged::state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) const {
     GGML_UNUSED(flags);
 
-    const uint32_t magic = 0x504b5633;
+    const bool dense_mapping = physical_to_layer.size() == n_layers;
+    const uint32_t magic = dense_mapping ? 0x504b5633 : 0x504b5634;
     io.write(&magic, sizeof(magic));
     io.write(&head_dim, sizeof(head_dim));
     io.write(&n_heads_kv, sizeof(n_heads_kv));
     io.write(&block_size, sizeof(block_size));
     io.write(&n_layers, sizeof(n_layers));
+    if (!dense_mapping) {
+        const uint32_t n_attention_layers = get_n_attention_layers();
+        io.write(&n_attention_layers, sizeof(n_attention_layers));
+        io.write(physical_to_layer.data(), n_attention_layers * sizeof(uint32_t));
+    }
     io.write(&num_gpu_blocks, sizeof(num_gpu_blocks));
     io.write(&num_cpu_blocks, sizeof(num_cpu_blocks));
     const int32_t type_k = kv_type_k;
@@ -539,9 +602,9 @@ void llama_kv_cache_paged::state_write(llama_io_write_i & io, llama_seq_id seq_i
         io.write(&block_id, sizeof(block_id));
         const bool is_gpu = block_manager.is_gpu(block_id);
         const uint32_t local_id = is_gpu ? block_id : block_id - num_gpu_blocks;
-        for (uint32_t il = 0; il < n_layers; ++il) {
-            ggml_tensor * k = is_gpu ? k_gpu_layers[il] : k_cpu_layers[il];
-            ggml_tensor * v = is_gpu ? v_gpu_layers[il] : v_cpu_layers[il];
+        for (uint32_t physical = 0; physical < physical_to_layer.size(); ++physical) {
+            ggml_tensor * k = is_gpu ? k_gpu_layers[physical] : k_cpu_layers[physical];
+            ggml_tensor * v = is_gpu ? v_gpu_layers[physical] : v_cpu_layers[physical];
             io.write_tensor(k, (size_t) local_id * block_bytes_k, block_bytes_k);
             io.write_tensor(v, (size_t) local_id * block_bytes_v, block_bytes_v);
         }
@@ -578,11 +641,24 @@ void llama_kv_cache_paged::state_read(llama_io_read_i & io, llama_seq_id seq_id,
     io.read(&n_heads_kv_ref, sizeof(n_heads_kv_ref));
     io.read(&block_size_ref, sizeof(block_size_ref));
     io.read(&n_layers_ref, sizeof(n_layers_ref));
+    std::vector<uint32_t> attention_layers_ref;
+    if (magic == 0x504b5634) {
+        uint32_t n_attention_layers_ref;
+        io.read(&n_attention_layers_ref, sizeof(n_attention_layers_ref));
+        if (n_attention_layers_ref > n_layers_ref) {
+            throw std::runtime_error("invalid paged KV attention layer count");
+        }
+        attention_layers_ref.resize(n_attention_layers_ref);
+        io.read(attention_layers_ref.data(), attention_layers_ref.size() * sizeof(uint32_t));
+    }
     io.read(&n_gpu_blocks_ref, sizeof(n_gpu_blocks_ref));
     io.read(&n_cpu_blocks_ref, sizeof(n_cpu_blocks_ref));
     io.read(&type_k_ref, sizeof(type_k_ref));
     io.read(&type_v_ref, sizeof(type_v_ref));
-    if (magic != 0x504b5633 || head_dim_ref != head_dim || n_heads_kv_ref != n_heads_kv || block_size_ref != block_size ||
+    const bool mapping_matches = magic == 0x504b5633 ? physical_to_layer.size() == n_layers
+                                                     : attention_layers_ref == physical_to_layer;
+    if ((magic != 0x504b5633 && magic != 0x504b5634) || !mapping_matches ||
+        head_dim_ref != head_dim || n_heads_kv_ref != n_heads_kv || block_size_ref != block_size ||
         n_layers_ref != n_layers || n_gpu_blocks_ref != num_gpu_blocks || n_cpu_blocks_ref != num_cpu_blocks ||
         type_k_ref != kv_type_k || type_v_ref != kv_type_v) {
         throw std::runtime_error("incompatible paged KV state");
@@ -669,13 +745,13 @@ void llama_kv_cache_paged::state_read(llama_io_read_i & io, llama_seq_id seq_id,
             throw std::runtime_error("invalid paged KV block data id");
         }
         expected_blocks.erase(expected);
-        saved.k.resize(n_layers);
-        saved.v.resize(n_layers);
-        for (uint32_t il = 0; il < n_layers; ++il) {
-            saved.k[il].resize(block_bytes_k);
-            saved.v[il].resize(block_bytes_v);
-            io.read(saved.k[il].data(), block_bytes_k);
-            io.read(saved.v[il].data(), block_bytes_v);
+        saved.k.resize(physical_to_layer.size());
+        saved.v.resize(physical_to_layer.size());
+        for (uint32_t physical = 0; physical < physical_to_layer.size(); ++physical) {
+            saved.k[physical].resize(block_bytes_k);
+            saved.v[physical].resize(block_bytes_v);
+            io.read(saved.k[physical].data(), block_bytes_k);
+            io.read(saved.v[physical].data(), block_bytes_v);
         }
         data.push_back(std::move(saved));
     }
@@ -770,11 +846,11 @@ void llama_kv_cache_paged::state_read(llama_io_read_i & io, llama_seq_id seq_id,
         const uint32_t destination_id = seq_id == -1 ? saved.id : block_remap.at(saved.id);
         const bool is_gpu = block_manager.is_gpu(destination_id);
         const uint32_t local_id = is_gpu ? destination_id : destination_id - num_gpu_blocks;
-        for (uint32_t il = 0; il < n_layers; ++il) {
-            ggml_tensor * k = is_gpu ? k_gpu_layers[il] : k_cpu_layers[il];
-            ggml_tensor * v = is_gpu ? v_gpu_layers[il] : v_cpu_layers[il];
-            ggml_backend_tensor_set(k, saved.k[il].data(), (size_t) local_id * block_bytes_k, block_bytes_k);
-            ggml_backend_tensor_set(v, saved.v[il].data(), (size_t) local_id * block_bytes_v, block_bytes_v);
+        for (uint32_t physical = 0; physical < physical_to_layer.size(); ++physical) {
+            ggml_tensor * k = is_gpu ? k_gpu_layers[physical] : k_cpu_layers[physical];
+            ggml_tensor * v = is_gpu ? v_gpu_layers[physical] : v_cpu_layers[physical];
+            ggml_backend_tensor_set(k, saved.k[physical].data(), (size_t) local_id * block_bytes_k, block_bytes_k);
+            ggml_backend_tensor_set(v, saved.v[physical].data(), (size_t) local_id * block_bytes_v, block_bytes_v);
         }
     }
 }

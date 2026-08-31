@@ -2410,6 +2410,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                             std::max((uint32_t) 1, cparams.n_seq_max),
                             cparams.n_rs_seq,
                             cparams.offload_kqv,
+                            std::move(filter_attn),
                             std::move(filter_recr));
                     } else if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
                         res = new llama_memory_hybrid_iswa(
@@ -2671,6 +2672,14 @@ int32_t llama_model_n_layer(const llama_model * model) {
 
 int32_t llama_model_n_layer_nextn(const llama_model * model) {
     return model->hparams.n_layer_nextn;
+}
+
+int32_t llama_model_n_layer_attn(const llama_model * model) {
+    int32_t result = 0;
+    for (uint32_t il = 0; il < model->hparams.n_layer(); ++il) {
+        result += !model->hparams.is_recr(il);
+    }
+    return result;
 }
 
 int32_t llama_model_n_head(const llama_model * model) {

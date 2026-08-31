@@ -1086,7 +1086,10 @@ llm_graph_input_attn_kv_paged::llm_graph_input_attn_kv_paged(
 }
 
 bool llm_graph_can_reuse_paged_tensor(const ggml_tensor * old_tensor, const ggml_tensor * new_tensor) {
-    if (!old_tensor || !new_tensor || old_tensor->type != new_tensor->type ||
+    if (!old_tensor || !new_tensor) {
+        return old_tensor == new_tensor;
+    }
+    if (old_tensor->type != new_tensor->type ||
         old_tensor->buffer != new_tensor->buffer || old_tensor->data != new_tensor->data) {
         return false;
     }

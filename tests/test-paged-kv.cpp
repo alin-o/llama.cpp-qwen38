@@ -111,6 +111,8 @@ TEST(test_paged_graph_tensor_compatibility) {
     EXPECT_FALSE(llm_graph_can_reuse_paged_tensor(captured, current));
     current->nb[1] += 4;
     EXPECT_FALSE(llm_graph_can_reuse_paged_tensor(captured, current));
+    EXPECT_TRUE(llm_graph_can_reuse_paged_tensor(nullptr, nullptr));
+    EXPECT_FALSE(llm_graph_can_reuse_paged_tensor(captured, nullptr));
     ggml_free(ctx);
 }
 
@@ -118,14 +120,14 @@ TEST(test_paged_graph_reuse_accepts_mapping_remap) {
     ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
     EXPECT_TRUE(backend != nullptr);
 
-    constexpr uint32_t n_layers = 1;
+    constexpr uint32_t n_layers = 4;
     constexpr uint32_t n_heads_kv = 2;
     constexpr uint32_t head_dim = 32;
     constexpr uint32_t block_size = 16;
     constexpr uint32_t n_ubatch = 4;
     constexpr uint32_t n_seq_max = 1;
 
-    llama_kv_cache_paged cache(head_dim, n_heads_kv, block_size, n_layers, n_ubatch, n_seq_max);
+    llama_kv_cache_paged cache(head_dim, n_heads_kv, block_size, n_layers, n_ubatch, n_seq_max, { 1, 3 });
     cache.init(backend, backend, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, 4, 2, 0.0f);
     llama_ubatch ubatch = {};
     ubatch.n_tokens = 1;
@@ -155,6 +157,10 @@ TEST(test_paged_graph_reuse_accepts_mapping_remap) {
     llama_cparams cparams = {};
     cparams.block_size = block_size;
     llm_graph_input_attn_kv_paged input(hparams, cparams, &captured_ctx);
+    EXPECT_TRUE(input.paged_k[0] == nullptr && input.paged_v[0] == nullptr);
+    EXPECT_TRUE(input.paged_k[1] != nullptr && input.paged_v[1] != nullptr);
+    EXPECT_TRUE(input.paged_k[2] == nullptr && input.paged_v[2] == nullptr);
+    EXPECT_TRUE(input.paged_k[3] != nullptr && input.paged_v[3] != nullptr);
     ggml_init_params ggml_params = { 16 * ggml_tensor_overhead() + 4096, nullptr, false };
     ggml_context * ggml_ctx = ggml_init(ggml_params);
     EXPECT_TRUE(ggml_ctx != nullptr);
@@ -558,6 +564,132 @@ TEST(test_paged_storage_types_are_native) {
         const ggml_type expected = type == GGML_TYPE_F16 ? GGML_TYPE_Q8_0 : type;
         EXPECT_EQ(kv.get_k_tensor(0)->type, expected);
         EXPECT_EQ(kv.get_v_tensor(0)->type, expected);
+    }
+
+    ggml_backend_free(backend);
+}
+
+TEST(test_paged_hybrid_layer_mapping_and_payload) {
+    ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    EXPECT_TRUE(backend != nullptr);
+
+    constexpr uint32_t head_dim = 128;
+    constexpr uint32_t n_heads_kv = 4;
+    constexpr uint32_t block_size = 16;
+    constexpr uint32_t n_layers = 6;
+    constexpr uint32_t n_gpu_blocks = 3;
+    constexpr uint32_t n_cpu_blocks = 2;
+    const std::vector<uint32_t> attention_layers = { 0, 2, 5 };
+
+    for (const ggml_type type : { GGML_TYPE_Q8_0, GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO4_0 }) {
+        llama_kv_cache_paged kv(
+            head_dim, n_heads_kv, block_size, n_layers, 32, 8, attention_layers);
+        kv.init(backend, backend, type, type, n_gpu_blocks, n_cpu_blocks, 0.0f);
+
+        EXPECT_EQ(kv.get_n_attention_layers(), attention_layers.size());
+        EXPECT_EQ(kv.get_physical_layer(0), 0);
+        EXPECT_EQ(kv.get_physical_layer(1), -1);
+        EXPECT_EQ(kv.get_physical_layer(2), 1);
+        EXPECT_EQ(kv.get_physical_layer(5), 2);
+        EXPECT_TRUE(kv.get_k_tensor(1) == nullptr && kv.get_v_tensor(1) == nullptr);
+        EXPECT_TRUE(kv.get_k_tensor(3) == nullptr && kv.get_v_tensor(4) == nullptr);
+        EXPECT_TRUE(kv.get_k_tensor(0) != kv.get_k_tensor(2));
+        EXPECT_TRUE(kv.get_k_tensor(2) != kv.get_k_tensor(5));
+
+        const size_t layer_block_bytes = block_size * n_heads_kv *
+            (ggml_row_size(type, head_dim) + ggml_row_size(type, head_dim));
+        const size_t expected_block_bytes = attention_layers.size() * layer_block_bytes;
+        EXPECT_EQ(kv.get_bytes_per_block(), expected_block_bytes);
+        size_t measured_bytes = 0;
+        for (const auto & item : kv.memory_breakdown()) {
+            measured_bytes += item.second;
+        }
+        EXPECT_EQ(measured_bytes, expected_block_bytes * (n_gpu_blocks + n_cpu_blocks));
+    }
+
+    llama_kv_cache_paged recurrent_only(head_dim, n_heads_kv, block_size, n_layers, 32, 8, {});
+    recurrent_only.init(backend, backend, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, 2, 1, 0.0f);
+    EXPECT_EQ(recurrent_only.get_n_attention_layers(), 0u);
+    EXPECT_EQ(recurrent_only.get_bytes_per_block(), (size_t) 0);
+    EXPECT_TRUE(recurrent_only.memory_breakdown().empty());
+    for (uint32_t il = 0; il < n_layers; ++il) {
+        EXPECT_TRUE(recurrent_only.get_k_tensor(il) == nullptr);
+        EXPECT_TRUE(recurrent_only.get_v_tensor(il) == nullptr);
+    }
+    recurrent_only.clear(true);
+
+    bool failed = false;
+    try {
+        llama_kv_cache_paged invalid(head_dim, n_heads_kv, block_size, n_layers, 32, 8, { 2, 1 });
+    } catch (const std::runtime_error &) {
+        failed = true;
+    }
+    EXPECT_TRUE(failed);
+    failed = false;
+    try {
+        llama_kv_cache_paged invalid(head_dim, n_heads_kv, block_size, n_layers, 32, 8, { 0, n_layers });
+    } catch (const std::runtime_error &) {
+        failed = true;
+    }
+    EXPECT_TRUE(failed);
+
+    ggml_backend_free(backend);
+}
+
+TEST(test_paged_hybrid_offload_checkpoint_and_mapping_validation) {
+    ggml_backend_t backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+    EXPECT_TRUE(backend != nullptr);
+
+    llama_kv_cache_paged kv(128, 2, 16, 5, 32, 8, { 1, 4 });
+    kv.init(backend, backend, GGML_TYPE_Q8_0, GGML_TYPE_TURBO4_0, 4, 2, 0.0f);
+    llama_sequence_group group;
+    group.request_id = 3;
+    group.n_prompt = 16;
+    EXPECT_TRUE(kv.allocate(0, group));
+    kv.set_seq_min_pos(group.request_id, 0);
+    kv.set_seq_max_pos(group.request_id, 15);
+
+    for (uint32_t il : { 1u, 4u }) {
+        ggml_tensor * k = kv.get_k_tensor(il);
+        ggml_tensor * v = kv.get_v_tensor(il);
+        const size_t k_block_bytes = ggml_nbytes(k) / 4;
+        const size_t v_block_bytes = ggml_nbytes(v) / 4;
+        std::vector<uint8_t> k_data(k_block_bytes, 0x20 + il);
+        std::vector<uint8_t> v_data(v_block_bytes, 0x60 + il);
+        ggml_backend_tensor_set(k, k_data.data(), group.block_table[0] * k_block_bytes, k_block_bytes);
+        ggml_backend_tensor_set(v, v_data.data(), group.block_table[0] * v_block_bytes, v_block_bytes);
+    }
+
+    EXPECT_TRUE(kv.swap_out(group));
+    EXPECT_TRUE(kv.swap_in(group));
+    const uint32_t checkpoint_block = group.block_table[0];
+    memory_io io;
+    kv.state_write(io, group.request_id);
+
+    llama_kv_cache_paged wrong_mapping(128, 2, 16, 5, 32, 8, { 0, 4 });
+    wrong_mapping.init(backend, backend, GGML_TYPE_Q8_0, GGML_TYPE_TURBO4_0, 4, 2, 0.0f);
+    bool failed = false;
+    try {
+        wrong_mapping.state_read(io, group.request_id);
+    } catch (const std::runtime_error &) {
+        failed = true;
+    }
+    EXPECT_TRUE(failed);
+
+    io.offset = 0;
+    kv.clear(true);
+    kv.state_read(io);
+    for (uint32_t il : { 1u, 4u }) {
+        ggml_tensor * k = kv.get_k_tensor(il);
+        ggml_tensor * v = kv.get_v_tensor(il);
+        const size_t k_block_bytes = ggml_nbytes(k) / 4;
+        const size_t v_block_bytes = ggml_nbytes(v) / 4;
+        std::vector<uint8_t> k_data(k_block_bytes);
+        std::vector<uint8_t> v_data(v_block_bytes);
+        ggml_backend_tensor_get(k, k_data.data(), checkpoint_block * k_block_bytes, k_block_bytes);
+        ggml_backend_tensor_get(v, v_data.data(), checkpoint_block * v_block_bytes, v_block_bytes);
+        EXPECT_TRUE(k_data == std::vector<uint8_t>(k_block_bytes, 0x20 + il));
+        EXPECT_TRUE(v_data == std::vector<uint8_t>(v_block_bytes, 0x60 + il));
     }
 
     ggml_backend_free(backend);
@@ -2002,6 +2134,8 @@ int main(int argc, char ** argv) {
     RUN(test_paged_sequence_state_preserves_other_sequences);
     RUN(test_paged_state_round_trip_after_swap);
     RUN(test_paged_storage_types_are_native);
+    RUN(test_paged_hybrid_layer_mapping_and_payload);
+    RUN(test_paged_hybrid_offload_checkpoint_and_mapping_validation);
 
     RUN(test_scheduler_state_restores_block_ownership);
     RUN(test_scheduler_resumes_fresh_checkpoint);

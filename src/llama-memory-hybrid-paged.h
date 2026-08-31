@@ -31,6 +31,7 @@ public:
         uint32_t rs_size,
         uint32_t n_rs_seq,
         bool offload,
+        const layer_filter_cb & filter_attn = nullptr,
         const layer_filter_cb & filter_recr = nullptr);
 
     llama_memory_context_ptr init_batch(llama_batch_allocr & balloc, uint32_t n_ubatch, bool embd_all) override;
