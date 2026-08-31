@@ -1023,6 +1023,34 @@ TEST(test_paged_attention_head_mapping_and_dispatch_selection) {
             EXPECT_TRUE(owners == 1);
         }
     }
+    for (const auto [n_heads, n_heads_kv] : { std::pair<int, int>{ 24, 4 }, { 32, 4 } }) {
+        for (int n_partitions : { 1, 2, 4, 8 }) {
+            for (int n_q_heads : { 1, 2, 4 }) {
+                if ((n_heads / n_heads_kv) % n_q_heads != 0) {
+                    continue;
+                }
+                std::vector<int> owners(n_heads_kv, 0);
+                for (int partition = 0; partition < n_partitions; ++partition) {
+                    for (int q_head = 0; q_head < n_heads; q_head += n_q_heads) {
+                        if (ggml_paged_attn_current_row_owner(
+                                q_head, n_heads, n_heads_kv, partition, n_partitions, 65)) {
+                            ++owners[ggml_paged_attn_kv_head(q_head, n_heads, n_heads_kv)];
+                        }
+                    }
+                }
+                for (int count : owners) {
+                    EXPECT_TRUE(count == 1);
+                }
+                const int tail = ggml_paged_attn_tail_partition(65, n_partitions);
+                for (int partition = 0; partition < n_partitions; ++partition) {
+                    if (partition != tail) {
+                        EXPECT_FALSE(ggml_paged_attn_current_row_owner(
+                            0, n_heads, n_heads_kv, partition, n_partitions, 65));
+                    }
+                }
+            }
+        }
+    }
 
     const ggml_paged_attn_cuda_device_caps ada = { 890, 128, 32, 1024, 48 * 1024, true };
     const ggml_paged_attn_cuda_variant shallow = ggml_paged_attn_select_cuda_variant(
@@ -1514,11 +1542,24 @@ static void check_paged_attention_decode_case(
     const paged_decode_result reference = run_paged_attention_decode_case(
         cpu_backend, n_heads, n_heads_kv, context_length, n_sequences, block_size);
 
+    setenv("GGML_CUDA_PAGED_Q8_FUSED_WRITE", "0", 1);
+    ggml_paged_attn_q8_combined_write_launch_count_reset();
+    ggml_paged_attn_q8_fused_write_launch_count_reset();
+    const paged_decode_result combined = run_paged_attention_decode_case(
+        cuda_backend, n_heads, n_heads_kv, context_length, n_sequences, block_size);
+    EXPECT_TRUE(ggml_paged_attn_q8_combined_write_launch_count() > 0);
+    EXPECT_TRUE(ggml_paged_attn_q8_fused_write_launch_count() == 0);
+    unsetenv("GGML_CUDA_PAGED_Q8_FUSED_WRITE");
+
     setenv("GGML_CUDA_PAGED_Q8_FLOAT_Q", "1", 1);
     ggml_paged_attn_q8_decode_launch_count_reset();
+    ggml_paged_attn_q8_combined_write_launch_count_reset();
+    ggml_paged_attn_q8_fused_write_launch_count_reset();
     const paged_decode_result float_q = run_paged_attention_decode_case(
         cuda_backend, n_heads, n_heads_kv, context_length, n_sequences, block_size);
     EXPECT_TRUE(ggml_paged_attn_q8_decode_launch_count() > 0);
+    EXPECT_TRUE(ggml_paged_attn_q8_combined_write_launch_count() > 0);
+    EXPECT_TRUE(ggml_paged_attn_q8_fused_write_launch_count() == 0);
     unsetenv("GGML_CUDA_PAGED_Q8_FLOAT_Q");
 
     ggml_paged_attn_q8_decode_launch_count_reset();
@@ -1529,11 +1570,16 @@ static void check_paged_attention_decode_case(
     EXPECT_TRUE(float_q.v_cache == reference.v_cache);
     EXPECT_TRUE(packed_q.k_cache == reference.k_cache);
     EXPECT_TRUE(packed_q.v_cache == reference.v_cache);
+    EXPECT_TRUE(combined.k_cache == reference.k_cache);
+    EXPECT_TRUE(combined.v_cache == reference.v_cache);
 
+    const double combined_error = paged_decode_relative_squared_error(combined.output, reference.output);
     const double float_error = paged_decode_relative_squared_error(float_q.output, reference.output);
     const double packed_error = paged_decode_relative_squared_error(packed_q.output, reference.output);
     const double added_error = fmax(0.0, packed_error - float_error);
-    fprintf(stderr, " q8_1 error: float=%g packed=%g added=%g ", float_error, packed_error, added_error);
+    fprintf(stderr, " q8_1 error: combined=%g float=%g packed=%g added=%g ",
+        combined_error, float_error, packed_error, added_error);
+    EXPECT_TRUE(combined_error < 5e-3);
     EXPECT_TRUE(float_error < 5e-3);
     EXPECT_TRUE(packed_error < 5e-3);
     EXPECT_TRUE(added_error < 1e-4);
@@ -1551,11 +1597,17 @@ static void check_paged_attention_decode_variant(
     setenv("GGML_CUDA_PAGED_Q8_WARPS", warps.c_str(), 1);
     setenv("GGML_CUDA_PAGED_Q8_PARTITIONS", partitions.c_str(), 1);
     setenv("GGML_CUDA_PAGED_Q8_HEADS", q_heads.c_str(), 1);
+    setenv("GGML_CUDA_PAGED_Q8_FUSED_WRITE", "1", 1);
+    ggml_paged_attn_q8_combined_write_launch_count_reset();
+    ggml_paged_attn_q8_fused_write_launch_count_reset();
     const paged_decode_result actual = run_paged_attention_decode_case(
         cuda_backend, n_heads, n_heads_kv, context_length, n_sequences, block_size);
     unsetenv("GGML_CUDA_PAGED_Q8_WARPS");
     unsetenv("GGML_CUDA_PAGED_Q8_PARTITIONS");
     unsetenv("GGML_CUDA_PAGED_Q8_HEADS");
+    unsetenv("GGML_CUDA_PAGED_Q8_FUSED_WRITE");
+    EXPECT_TRUE((ggml_paged_attn_q8_fused_write_launch_count() > 0) == (n_q_heads > 1));
+    EXPECT_TRUE((ggml_paged_attn_q8_combined_write_launch_count() > 0) == (n_q_heads == 1));
     EXPECT_TRUE(actual.k_cache == reference.k_cache);
     EXPECT_TRUE(actual.v_cache == reference.v_cache);
     EXPECT_TRUE(paged_decode_relative_squared_error(actual.output, reference.output) < 5e-3);
@@ -1587,14 +1639,16 @@ TEST(test_paged_attention_q8_partition_and_group_candidates) {
         check_paged_attention_decode_variant(
             cpu_backend, cuda_backend, 24, 4, 65, 1, 16, 8, n_partitions, 1);
     }
-    for (int n_partitions : { 2, 4, 8 }) {
+    for (int n_partitions : { 1, 2, 4, 8 }) {
         check_paged_attention_decode_variant(
             cpu_backend, cuda_backend, 24, 4, 65, 3, 16, 8, n_partitions, 2);
         check_paged_attention_decode_variant(
             cpu_backend, cuda_backend, 32, 4, 97, 2, 32, 8, n_partitions, 2);
     }
-    check_paged_attention_decode_variant(
-        cpu_backend, cuda_backend, 32, 4, 97, 2, 32, 16, 4, 4);
+    for (int n_partitions : { 1, 2, 4, 8 }) {
+        check_paged_attention_decode_variant(
+            cpu_backend, cuda_backend, 32, 4, 97, 2, 32, 16, n_partitions, 4);
+    }
     setenv("GGML_CUDA_PAGED_Q8_CP_ASYNC", "1", 1);
     check_paged_attention_decode_variant(
         cpu_backend, cuda_backend, 24, 4, 97, 4, 16, 8, 8, 2);
@@ -1782,6 +1836,7 @@ int main(int argc, char ** argv) {
 #if defined(GGML_USE_CUDA)
     if (argc > 1 && strcmp(argv[1], "--paged-graph-test") == 0) {
         unsetenv("GGML_CUDA_DISABLE_GRAPHS");
+        setenv("GGML_CUDA_PAGED_Q8_FUSED_WRITE", "1", 1);
         RUN(test_paged_attention_q8_graph_replay_restore_and_mixed_depth);
         return 0;
     }

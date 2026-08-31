@@ -12,6 +12,8 @@
 
 static std::atomic<unsigned long long> g_paged_prefill_launch_count{ 0 };
 static std::atomic<unsigned long long> g_paged_q8_decode_launch_count{ 0 };
+static std::atomic<unsigned long long> g_paged_q8_combined_write_launch_count{ 0 };
+static std::atomic<unsigned long long> g_paged_q8_fused_write_launch_count{ 0 };
 
 extern "C" unsigned long long ggml_paged_attn_tiled_prefill_launch_count(void) {
     return g_paged_prefill_launch_count.load(std::memory_order_relaxed);
@@ -27,6 +29,22 @@ extern "C" unsigned long long ggml_paged_attn_q8_decode_launch_count(void) {
 
 extern "C" void ggml_paged_attn_q8_decode_launch_count_reset(void) {
     g_paged_q8_decode_launch_count.store(0, std::memory_order_relaxed);
+}
+
+extern "C" unsigned long long ggml_paged_attn_q8_combined_write_launch_count(void) {
+    return g_paged_q8_combined_write_launch_count.load(std::memory_order_relaxed);
+}
+
+extern "C" void ggml_paged_attn_q8_combined_write_launch_count_reset(void) {
+    g_paged_q8_combined_write_launch_count.store(0, std::memory_order_relaxed);
+}
+
+extern "C" unsigned long long ggml_paged_attn_q8_fused_write_launch_count(void) {
+    return g_paged_q8_fused_write_launch_count.load(std::memory_order_relaxed);
+}
+
+extern "C" void ggml_paged_attn_q8_fused_write_launch_count_reset(void) {
+    g_paged_q8_fused_write_launch_count.store(0, std::memory_order_relaxed);
 }
 
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
@@ -107,6 +125,18 @@ __global__ void paged_q8_cache_write_kernel(
     block_q8_0 * v_dst = (block_q8_0 *) ((char *) v_cache + (size_t) dst_row * v_row_stride) + block;
     quantize_f32_q8_0_block(k_src, k_dst);
     quantize_f32_q8_0_block(v_src, v_dst);
+}
+
+static void paged_launch_q8_cache_write(
+        cudaStream_t stream, const float * k_new, const float * v_new, const int32_t * write_rows,
+        block_q8_0 * k_cache, block_q8_0 * v_cache, int head_dim, int64_t n_rows,
+        size_t k_row_stride, size_t v_row_stride) {
+    const int64_t n_blocks = n_rows * head_dim / QK8_0;
+    constexpr int block_size_write = 256;
+    paged_q8_cache_write_kernel<<<
+        (n_blocks + block_size_write - 1) / block_size_write, block_size_write, 0, stream>>>(
+        k_new, v_new, write_rows, k_cache, v_cache, head_dim, n_rows, k_row_stride, v_row_stride);
+    CUDA_CHECK(cudaGetLastError());
 }
 
 static __device__ __forceinline__ void paged_store_half4(half * dst, float4 value) {
@@ -365,11 +395,48 @@ static __device__ __forceinline__ void paged_q8_v_load4(
     dequantize_V_q8_0<float, 4>(v_row, values, dim);
 }
 
+template <int HEAD_DIM>
+static __device__ __forceinline__ void paged_q8_quantize_current_rows(
+        const float * k_new, const float * v_new, int src_row,
+        block_q8_0 * current_k, block_q8_0 * current_v, int tid, int n_threads) {
+    constexpr int ROW_BLOCKS = HEAD_DIM / QK8_0;
+    for (int block = tid; block < ROW_BLOCKS; block += n_threads) {
+        const size_t offset = (size_t) src_row * HEAD_DIM + block * QK8_0;
+        quantize_f32_q8_0_block(k_new + offset, current_k + block);
+        quantize_f32_q8_0_block(v_new + offset, current_v + block);
+    }
+}
+
+template <int HEAD_DIM>
+static __device__ __forceinline__ void paged_q8_persist_current_rows(
+        const block_q8_0 * current_k, const block_q8_0 * current_v, const int * write_rows,
+        int src_row, char * k_cache, char * v_cache, size_t k_row_stride, size_t v_row_stride,
+        int tid, int n_threads) {
+    constexpr int ROW_BLOCKS = HEAD_DIM / QK8_0;
+    const int dst_row = write_rows[src_row];
+    block_q8_0 * k_dst = (block_q8_0 *) (k_cache + (size_t) dst_row * k_row_stride);
+    block_q8_0 * v_dst = (block_q8_0 *) (v_cache + (size_t) dst_row * v_row_stride);
+    for (int block = tid; block < ROW_BLOCKS; block += n_threads) {
+        k_dst[block] = current_k[block];
+        v_dst[block] = current_v[block];
+    }
+}
+
+template <int HEAD_DIM, bool ENABLED>
+struct paged_q8_current_rows {
+};
+
+template <int HEAD_DIM>
+struct paged_q8_current_rows<HEAD_DIM, true> {
+    block_q8_0 k[HEAD_DIM / QK8_0];
+    block_q8_0 v[HEAD_DIM / QK8_0];
+};
+
 // Warps process disjoint context positions, then warp 0 merges their online-softmax partials.
-template <int HEAD_DIM, int N_WARPS, bool PACKED_QV>
+template <int HEAD_DIM, int N_WARPS, bool PACKED_QV, bool FUSE_CURRENT>
 __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode_q8_parallel_kernel(
-        const float * q, const char * k_cache, const char * v_cache,
-        const int * block_table, const int * context_lens, const int * batch_offsets,
+        const float * q, const float * k_new, const float * v_new, char * k_cache, char * v_cache,
+        const int * block_table, const int * write_rows, const int * context_lens, const int * batch_offsets,
         size_t k_stride_token, size_t k_stride_head, size_t k_stride_block,
         size_t v_stride_token, size_t v_stride_head, size_t v_stride_block,
         int n_heads, int n_heads_kv, int block_size, int max_blocks, float scale, float * out) {
@@ -378,6 +445,7 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
     __shared__ float partial_acc[N_WARPS][HEAD_DIM];
     __shared__ int q_i32[HEAD_DIM / sizeof(int)];
     __shared__ float2 q_ds[HEAD_DIM / QK8_1];
+    __shared__ paged_q8_current_rows<HEAD_DIM, FUSE_CURRENT> current;
     const int warp = threadIdx.y;
     const int lane = threadIdx.x;
     const int head = blockIdx.x;
@@ -385,6 +453,7 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
     const int kv_head = ggml_paged_attn_kv_head(head, n_heads, n_heads_kv);
     const int batch_start = batch_offsets[seq];
     const int limit = context_lens[seq];
+    const int current_src_row = batch_start * n_heads_kv + kv_head;
     const size_t q_base = (size_t) batch_start * n_heads * HEAD_DIM + (size_t) head * HEAD_DIM;
     float qv[HEAD_DIM / WARP_SIZE];
     float acc[HEAD_DIM / WARP_SIZE] = {};
@@ -404,9 +473,23 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
         }
     }
 
+    if constexpr (FUSE_CURRENT) {
+        const int tid = warp * WARP_SIZE + lane;
+        paged_q8_quantize_current_rows<HEAD_DIM>(
+            k_new, v_new, current_src_row, current.k, current.v, tid, N_WARPS * WARP_SIZE);
+        __syncthreads();
+        if (ggml_paged_attn_current_row_owner(head, n_heads, n_heads_kv, 0, 1, limit)) {
+            paged_q8_persist_current_rows<HEAD_DIM>(
+                current.k, current.v, write_rows, current_src_row, k_cache, v_cache,
+                k_stride_token, v_stride_token, tid, N_WARPS * WARP_SIZE);
+        }
+        __syncthreads();
+    }
+
     float qk_max = -FLT_MAX;
     float exp_sum = 0.0f;
-    for (int token = warp; token < limit; token += N_WARPS) {
+    const int cache_limit = FUSE_CURRENT ? limit - 1 : limit;
+    for (int token = warp; token < cache_limit; token += N_WARPS) {
         const int physical_block = block_table[seq * max_blocks + token / block_size];
         const int token_in_block = token % block_size;
         const char * k_row = k_cache + (size_t) physical_block * k_stride_block +
@@ -451,6 +534,49 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
         }
         exp_sum = exp_sum * old_scale + weight;
         qk_max = new_max;
+    }
+
+    if constexpr (FUSE_CURRENT) {
+        if (warp == (limit - 1) % N_WARPS) {
+            const char * k_row = (const char *) current.k;
+            const char * v_row = (const char *) current.v;
+            float qk = 0.0f;
+            if constexpr (PACKED_QV) {
+                qk = paged_q8_k_dot<HEAD_DIM>(k_row, q_i32, q_ds);
+            } else {
+#pragma unroll
+                for (int i = 0; i < HEAD_DIM / WARP_SIZE; ++i) {
+                    qk += qv[i] * paged_cache_value(k_row, lane + i * WARP_SIZE, GGML_TYPE_Q8_0);
+                }
+            }
+            for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+                qk += __shfl_down_sync(0xffffffffu, qk, offset);
+            }
+            qk = __shfl_sync(0xffffffffu, qk, 0) * (PACKED_QV ? 1.0f : scale);
+            float new_max;
+            float old_scale;
+            float weight;
+            paged_online_softmax_scales(qk, qk_max, new_max, old_scale, weight);
+            if constexpr (PACKED_QV) {
+#pragma unroll
+                for (int group = 0; group < HEAD_DIM / (4 * WARP_SIZE); ++group) {
+                    float values[4];
+                    paged_q8_v_load4(v_row, lane * 4 + group * 4 * WARP_SIZE, values);
+#pragma unroll
+                    for (int i = 0; i < 4; ++i) {
+                        acc[group * 4 + i] = acc[group * 4 + i] * old_scale + weight * values[i];
+                    }
+                }
+            } else {
+#pragma unroll
+                for (int i = 0; i < HEAD_DIM / WARP_SIZE; ++i) {
+                    acc[i] = acc[i] * old_scale +
+                        weight * paged_cache_value(v_row, lane + i * WARP_SIZE, GGML_TYPE_Q8_0);
+                }
+            }
+            exp_sum = exp_sum * old_scale + weight;
+            qk_max = new_max;
+        }
     }
 
     if (lane == 0) {
@@ -498,10 +624,10 @@ static __device__ __forceinline__ size_t paged_partial_offset(
     return (((size_t) seq * n_heads + head) * n_partitions + partition) * (HEAD_DIM + 2);
 }
 
-template <int HEAD_DIM, int N_WARPS, int N_PARTITIONS, bool PACKED_QV>
+template <int HEAD_DIM, int N_WARPS, int N_PARTITIONS, bool PACKED_QV, bool FUSE_CURRENT>
 __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode_q8_partial_kernel(
-        const float * q, const char * k_cache, const char * v_cache,
-        const int * block_table, const int * context_lens, const int * batch_offsets,
+        const float * q, const float * k_new, const float * v_new, char * k_cache, char * v_cache,
+        const int * block_table, const int * write_rows, const int * context_lens, const int * batch_offsets,
         size_t k_stride_token, size_t k_stride_head, size_t k_stride_block,
         size_t v_stride_token, size_t v_stride_head, size_t v_stride_block,
         int n_heads, int n_heads_kv, int block_size, int max_blocks, float scale, float * partials) {
@@ -510,6 +636,7 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
     __shared__ float warp_acc[N_WARPS][HEAD_DIM];
     __shared__ int q_i32[HEAD_DIM / sizeof(int)];
     __shared__ float2 q_ds[HEAD_DIM / QK8_1];
+    __shared__ paged_q8_current_rows<HEAD_DIM, FUSE_CURRENT> current;
     const int warp = threadIdx.y;
     const int lane = threadIdx.x;
     const int head = blockIdx.x;
@@ -520,6 +647,8 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
     const int partition_size = (limit + N_PARTITIONS - 1) / N_PARTITIONS;
     const int token_begin = partition * partition_size;
     const int token_limit = token_begin + partition_size < limit ? token_begin + partition_size : limit;
+    const bool is_tail_partition = partition == ggml_paged_attn_tail_partition(limit, N_PARTITIONS);
+    const int current_src_row = batch_offsets[seq] * n_heads_kv + kv_head;
     const size_t q_base = (size_t) batch_offsets[seq] * n_heads * HEAD_DIM + (size_t) head * HEAD_DIM;
     float qv[HEAD_DIM / WARP_SIZE];
     float acc[HEAD_DIM / WARP_SIZE] = {};
@@ -540,9 +669,26 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
         }
     }
 
+    if constexpr (FUSE_CURRENT) {
+        if (is_tail_partition) {
+            const int tid = warp * WARP_SIZE + lane;
+            paged_q8_quantize_current_rows<HEAD_DIM>(
+                k_new, v_new, current_src_row, current.k, current.v, tid, N_WARPS * WARP_SIZE);
+            __syncthreads();
+            if (ggml_paged_attn_current_row_owner(
+                    head, n_heads, n_heads_kv, partition, N_PARTITIONS, limit)) {
+                paged_q8_persist_current_rows<HEAD_DIM>(
+                    current.k, current.v, write_rows, current_src_row, k_cache, v_cache,
+                    k_stride_token, v_stride_token, tid, N_WARPS * WARP_SIZE);
+            }
+            __syncthreads();
+        }
+    }
+
     float qk_max = -FLT_MAX;
     float exp_sum = 0.0f;
-    for (int token = token_begin + warp; token < token_limit; token += N_WARPS) {
+    const int cache_token_limit = FUSE_CURRENT && is_tail_partition ? token_limit - 1 : token_limit;
+    for (int token = token_begin + warp; token < cache_token_limit; token += N_WARPS) {
         const int physical_block = block_table[seq * max_blocks + token / block_size];
         const int token_in_block = token % block_size;
         const char * k_row = k_cache + (size_t) physical_block * k_stride_block +
@@ -587,6 +733,50 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
         qk_max = new_max;
     }
 
+    if constexpr (FUSE_CURRENT) {
+        const int current_warp = (limit - 1 - token_begin) % N_WARPS;
+        if (is_tail_partition && warp == current_warp) {
+            const char * k_row = (const char *) current.k;
+            const char * v_row = (const char *) current.v;
+            float qk = 0.0f;
+            if constexpr (PACKED_QV) {
+                qk = paged_q8_k_dot<HEAD_DIM>(k_row, q_i32, q_ds);
+            } else {
+#pragma unroll
+                for (int i = 0; i < HEAD_DIM / WARP_SIZE; ++i) {
+                    qk += qv[i] * paged_cache_value(k_row, lane + i * WARP_SIZE, GGML_TYPE_Q8_0);
+                }
+            }
+            for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+                qk += __shfl_down_sync(0xffffffffu, qk, offset);
+            }
+            qk = __shfl_sync(0xffffffffu, qk, 0) * (PACKED_QV ? 1.0f : scale);
+            float new_max;
+            float old_scale;
+            float weight;
+            paged_online_softmax_scales(qk, qk_max, new_max, old_scale, weight);
+            if constexpr (PACKED_QV) {
+#pragma unroll
+                for (int group = 0; group < HEAD_DIM / (4 * WARP_SIZE); ++group) {
+                    float values[4];
+                    paged_q8_v_load4(v_row, lane * 4 + group * 4 * WARP_SIZE, values);
+#pragma unroll
+                    for (int i = 0; i < 4; ++i) {
+                        acc[group * 4 + i] = acc[group * 4 + i] * old_scale + weight * values[i];
+                    }
+                }
+            } else {
+#pragma unroll
+                for (int i = 0; i < HEAD_DIM / WARP_SIZE; ++i) {
+                    acc[i] = acc[i] * old_scale +
+                        weight * paged_cache_value(v_row, lane + i * WARP_SIZE, GGML_TYPE_Q8_0);
+                }
+            }
+            exp_sum = exp_sum * old_scale + weight;
+            qk_max = new_max;
+        }
+    }
+
     if (lane == 0) {
         warp_max[warp] = qk_max;
         warp_sum[warp] = exp_sum;
@@ -629,10 +819,11 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
     }
 }
 
-template <int HEAD_DIM, int N_WARPS, int N_PARTITIONS, int N_Q_HEADS, int TILE_TOKENS, bool USE_CP_ASYNC>
+template <int HEAD_DIM, int N_WARPS, int N_PARTITIONS, int N_Q_HEADS, int TILE_TOKENS,
+          bool USE_CP_ASYNC, bool FUSE_CURRENT>
 __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode_q8_grouped_partial_kernel(
-        const float * q, const char * k_cache, const char * v_cache,
-        const int * block_table, const int * context_lens, const int * batch_offsets,
+        const float * q, const float * k_new, const float * v_new, char * k_cache, char * v_cache,
+        const int * block_table, const int * write_rows, const int * context_lens, const int * batch_offsets,
         size_t k_stride_token, size_t k_stride_head, size_t k_stride_block,
         size_t v_stride_token, size_t v_stride_head, size_t v_stride_block,
         int n_heads, int n_heads_kv, int block_size, int max_blocks, float scale, float * partials) {
@@ -655,12 +846,14 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
     __shared__ float warp_max[N_Q_HEADS][CONTEXT_WARPS];
     __shared__ float warp_sum[N_Q_HEADS][CONTEXT_WARPS];
     __shared__ float warp_acc[N_Q_HEADS][CONTEXT_WARPS][HEAD_DIM];
+    __shared__ paged_q8_current_rows<HEAD_DIM, FUSE_CURRENT> current;
     const int lane = threadIdx.x;
     const int warp = threadIdx.y;
     const int tid = warp * WARP_SIZE + lane;
     const int head_in_group = warp / CONTEXT_WARPS;
     const int context_warp = warp % CONTEXT_WARPS;
     const int head = blockIdx.x * N_Q_HEADS + head_in_group;
+    const int group_head = blockIdx.x * N_Q_HEADS;
     const int seq = blockIdx.y;
     const int partition = blockIdx.z;
     const int kv_head = ggml_paged_attn_kv_head(head, n_heads, n_heads_kv);
@@ -668,6 +861,9 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
     const int partition_size = (limit + N_PARTITIONS - 1) / N_PARTITIONS;
     const int token_begin = partition * partition_size;
     const int token_limit = token_begin + partition_size < limit ? token_begin + partition_size : limit;
+    const bool is_tail_partition = partition == ggml_paged_attn_tail_partition(limit, N_PARTITIONS);
+    const int current_src_row = batch_offsets[seq] * n_heads_kv + kv_head;
+    const int cache_token_limit = FUSE_CURRENT && is_tail_partition ? token_limit - 1 : token_limit;
     const size_t q_base = (size_t) batch_offsets[seq] * n_heads * HEAD_DIM + (size_t) head * HEAD_DIM;
     float acc[HEAD_DIM / WARP_SIZE] = {};
 
@@ -681,12 +877,27 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
     }
     __syncthreads();
 
+    if constexpr (FUSE_CURRENT) {
+        if (is_tail_partition) {
+            paged_q8_quantize_current_rows<HEAD_DIM>(
+                k_new, v_new, current_src_row, current.k, current.v, tid, N_WARPS * WARP_SIZE);
+            __syncthreads();
+            if (ggml_paged_attn_current_row_owner(
+                    group_head, n_heads, n_heads_kv, partition, N_PARTITIONS, limit)) {
+                paged_q8_persist_current_rows<HEAD_DIM>(
+                    current.k, current.v, write_rows, current_src_row, k_cache, v_cache,
+                    k_stride_token, v_stride_token, tid, N_WARPS * WARP_SIZE);
+            }
+            __syncthreads();
+        }
+    }
+
     float qk_max = -FLT_MAX;
     float exp_sum = 0.0f;
     if constexpr (USE_CP_ASYNC) {
         if (tid < TILE_TOKENS) {
             const int token = token_begin + tid;
-            if (token < token_limit) {
+            if (token < cache_token_limit) {
                 physical_blocks[0][tid] = block_table[seq * max_blocks + token / block_size];
                 tokens_in_block[0][tid] = token % block_size;
             }
@@ -696,7 +907,7 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
             const int tile_token = (item / ROW_CHUNKS) % TILE_TOKENS;
             const int chunk = item % ROW_CHUNKS;
             const bool load_v = item >= TILE_TOKENS * ROW_CHUNKS;
-            if (token_begin + tile_token < token_limit) {
+            if (token_begin + tile_token < cache_token_limit) {
                 const char * cache = load_v ? v_cache : k_cache;
                 const size_t stride_block = load_v ? v_stride_block : k_stride_block;
                 const size_t stride_head = load_v ? v_stride_head : k_stride_head;
@@ -710,13 +921,13 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
         cp_async_wait_all();
         __syncthreads();
     }
-    for (int token_start = token_begin; token_start < token_limit; token_start += TILE_TOKENS) {
+    for (int token_start = token_begin; token_start < cache_token_limit; token_start += TILE_TOKENS) {
         const int tile_index = (token_start - token_begin) / TILE_TOKENS;
         const int buffer = tile_index % N_BUFFERS;
         if constexpr (!USE_CP_ASYNC) {
             if (tid < TILE_TOKENS) {
                 const int token = token_start + tid;
-                if (token < token_limit) {
+                if (token < cache_token_limit) {
                     physical_blocks[buffer][tid] = block_table[seq * max_blocks + token / block_size];
                     tokens_in_block[buffer][tid] = token % block_size;
                 }
@@ -726,7 +937,7 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
             for (int item = tid; item < TILE_TOKENS * ROW_WORDS; item += N_WARPS * WARP_SIZE) {
                 const int tile_token = item / ROW_WORDS;
                 const int word = item % ROW_WORDS;
-                if (token_start + tile_token < token_limit) {
+                if (token_start + tile_token < cache_token_limit) {
                     const char * k_row = k_cache + (size_t) physical_blocks[buffer][tile_token] * k_stride_block +
                         (size_t) kv_head * k_stride_head + (size_t) tokens_in_block[buffer][tile_token] * k_stride_token;
                     const char * v_row = v_cache + (size_t) physical_blocks[buffer][tile_token] * v_stride_block +
@@ -736,12 +947,12 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
                 }
             }
             __syncthreads();
-        } else if (token_start + TILE_TOKENS < token_limit) {
+        } else if (token_start + TILE_TOKENS < cache_token_limit) {
             const int next_buffer = (tile_index + 1) % N_BUFFERS;
             const int next_start = token_start + TILE_TOKENS;
             if (tid < TILE_TOKENS) {
                 const int token = next_start + tid;
-                if (token < token_limit) {
+                if (token < cache_token_limit) {
                     physical_blocks[next_buffer][tid] = block_table[seq * max_blocks + token / block_size];
                     tokens_in_block[next_buffer][tid] = token % block_size;
                 }
@@ -751,7 +962,7 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
                 const int tile_token = (item / ROW_CHUNKS) % TILE_TOKENS;
                 const int chunk = item % ROW_CHUNKS;
                 const bool load_v = item >= TILE_TOKENS * ROW_CHUNKS;
-                if (next_start + tile_token < token_limit) {
+                if (next_start + tile_token < cache_token_limit) {
                     const char * cache = load_v ? v_cache : k_cache;
                     const size_t stride_block = load_v ? v_stride_block : k_stride_block;
                     const size_t stride_head = load_v ? v_stride_head : k_stride_head;
@@ -769,7 +980,7 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
 #pragma unroll
         for (int i = 0; i < TILE_TOKENS / CONTEXT_WARPS; ++i) {
             const int tile_token = context_warp + i * CONTEXT_WARPS;
-            if (token_start + tile_token < token_limit) {
+            if (token_start + tile_token < cache_token_limit) {
                 const char * k_row = (const char *) k_tile[buffer][tile_token];
                 const char * v_row = (const char *) v_tile[buffer][tile_token];
                 float qk = paged_q8_k_dot<HEAD_DIM>(k_row, q_i32[head_in_group], q_ds[head_in_group]);
@@ -798,6 +1009,33 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
             cp_async_wait_all();
         }
         __syncthreads();
+    }
+
+    if constexpr (FUSE_CURRENT) {
+        if (is_tail_partition && context_warp == 0) {
+            const char * k_row = (const char *) current.k;
+            const char * v_row = (const char *) current.v;
+            float qk = paged_q8_k_dot<HEAD_DIM>(k_row, q_i32[head_in_group], q_ds[head_in_group]);
+            for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+                qk += __shfl_down_sync(0xffffffffu, qk, offset);
+            }
+            qk = __shfl_sync(0xffffffffu, qk, 0);
+            float new_max;
+            float old_scale;
+            float weight;
+            paged_online_softmax_scales(qk, qk_max, new_max, old_scale, weight);
+#pragma unroll
+            for (int group = 0; group < HEAD_DIM / (4 * WARP_SIZE); ++group) {
+                float values[4];
+                paged_q8_v_load4(v_row, lane * 4 + group * 4 * WARP_SIZE, values);
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    acc[group * 4 + j] = acc[group * 4 + j] * old_scale + weight * values[j];
+                }
+            }
+            exp_sum = exp_sum * old_scale + weight;
+            qk_max = new_max;
+        }
     }
 
     if (lane == 0) {
@@ -1243,21 +1481,27 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
         ggml_nelements(write_rows) == n_write_rows &&
         k_cache->nb[1] == ggml_row_size(GGML_TYPE_Q8_0, head_dim) &&
         v_cache->nb[1] == ggml_row_size(GGML_TYPE_Q8_0, head_dim);
-    if (combined_q8_write) {
-        const int64_t n_blocks = n_write_rows * head_dim / QK8_0;
-        constexpr int block_size_write = 256;
-        paged_q8_cache_write_kernel<<<
-            (n_blocks + block_size_write - 1) / block_size_write, block_size_write, 0, ctx.stream()>>>(
+    bool decode_q8 = false;
+    bool fuse_current_q8 = false;
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+    decode_q8 = k_cache->type == GGML_TYPE_Q8_0 && v_cache->type == GGML_TYPE_Q8_0 &&
+        head_dim == 256 && q->type == GGML_TYPE_F32 && ggml_is_contiguous(q) &&
+        ggml_cuda_is_aligned(q, sizeof(float4)) && q->ne[2] == batch_lens->ne[0] && q->ne[3] == 1;
+    // The candidate remains opt-in because matched 27B decode did not beat the combined-write fallback.
+    const char * fused_write_env = getenv("GGML_CUDA_PAGED_Q8_FUSED_WRITE");
+    fuse_current_q8 = combined_q8_write && decode_q8 && k_new->ne[2] == batch_lens->ne[0] && k_new->ne[3] == 1 &&
+        fused_write_env != nullptr && atoi(fused_write_env) != 0;
+#endif
+    if (combined_q8_write && !fuse_current_q8) {
+        g_paged_q8_combined_write_launch_count.fetch_add(1, std::memory_order_relaxed);
+        paged_launch_q8_cache_write(
+            ctx.stream(),
             (const float *) k_new->data, (const float *) v_new->data, (const int32_t *) write_rows->data,
             (block_q8_0 *) k_cache->data, (block_q8_0 *) v_cache->data, head_dim, n_write_rows,
             k_cache->nb[1], v_cache->nb[1]);
-        CUDA_CHECK(cudaGetLastError());
     }
 
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
-    const bool decode_q8 = k_cache->type == GGML_TYPE_Q8_0 && v_cache->type == GGML_TYPE_Q8_0 &&
-        head_dim == 256 && q->type == GGML_TYPE_F32 && ggml_is_contiguous(q) &&
-        ggml_cuda_is_aligned(q, sizeof(float4)) && q->ne[2] == batch_lens->ne[0] && q->ne[3] == 1;
     if (decode_q8) {
         g_paged_q8_decode_launch_count.fetch_add(1, std::memory_order_relaxed);
         const auto & device_info = ggml_cuda_info().devices[ggml_cuda_get_device()];
@@ -1300,6 +1544,18 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
                 __func__, variant.n_warps, variant.n_partitions, variant.n_q_heads);
             variant = { 32, 1, 1 };
         }
+        if (fuse_current_q8 && variant.n_q_heads == 1) {
+            fuse_current_q8 = false;
+            g_paged_q8_combined_write_launch_count.fetch_add(1, std::memory_order_relaxed);
+            paged_launch_q8_cache_write(
+                ctx.stream(),
+                (const float *) k_new->data, (const float *) v_new->data, (const int32_t *) write_rows->data,
+                (block_q8_0 *) k_cache->data, (block_q8_0 *) v_cache->data, head_dim, n_write_rows,
+                k_cache->nb[1], v_cache->nb[1]);
+        }
+        if (fuse_current_q8) {
+            g_paged_q8_fused_write_launch_count.fetch_add(1, std::memory_order_relaxed);
+        }
 
         bool l2_window_active = false;
         const char * l2_window_env = getenv("GGML_CUDA_PAGED_Q8_L2_WINDOW");
@@ -1325,41 +1581,51 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
             }
         }
 
-#define LAUNCH_Q8_LEGACY(N_WARPS, PACKED_QV) \
-        paged_attention_decode_q8_parallel_kernel<256, N_WARPS, PACKED_QV> \
+#define LAUNCH_Q8_LEGACY(N_WARPS, PACKED_QV, FUSE_CURRENT) \
+        paged_attention_decode_q8_parallel_kernel<256, N_WARPS, PACKED_QV, FUSE_CURRENT> \
             <<<dim3(n_heads, batch_lens->ne[0]), dim3(WARP_SIZE, N_WARPS), 0, ctx.stream()>>>( \
-            (const float *) q->data, (const char *) k_cache->data, (const char *) v_cache->data, \
-            (const int *) block_table->data, (const int *) context_lens->data, (const int *) batch_offsets->data, \
+            (const float *) q->data, (const float *) k_new->data, (const float *) v_new->data, \
+            (char *) k_cache->data, (char *) v_cache->data, (const int *) block_table->data, \
+            (const int *) write_rows->data, (const int *) context_lens->data, (const int *) batch_offsets->data, \
             k_cache->nb[1], k_cache->nb[2], k_cache->nb[3], v_cache->nb[1], v_cache->nb[2], v_cache->nb[3], \
             n_heads, n_heads_kv, block_size, max_blocks, op_params_f[0], (float *) dst->data)
 
         if (variant.n_partitions == 1 && variant.n_q_heads == 1) {
-#define DISPATCH_Q8_LEGACY(PACKED_QV) \
+#define DISPATCH_Q8_LEGACY(PACKED_QV, FUSE_CURRENT) \
             switch (variant.n_warps) { \
-                case 4:  LAUNCH_Q8_LEGACY(4,  PACKED_QV); break; \
-                case 8:  LAUNCH_Q8_LEGACY(8,  PACKED_QV); break; \
-                case 16: LAUNCH_Q8_LEGACY(16, PACKED_QV); break; \
-                default: LAUNCH_Q8_LEGACY(32, PACKED_QV); break; \
+                case 4:  LAUNCH_Q8_LEGACY(4,  PACKED_QV, FUSE_CURRENT); break; \
+                case 8:  LAUNCH_Q8_LEGACY(8,  PACKED_QV, FUSE_CURRENT); break; \
+                case 16: LAUNCH_Q8_LEGACY(16, PACKED_QV, FUSE_CURRENT); break; \
+                default: LAUNCH_Q8_LEGACY(32, PACKED_QV, FUSE_CURRENT); break; \
             }
             if (!force_float_q && cc >= GGML_CUDA_CC_DP4A) {
-                DISPATCH_Q8_LEGACY(true);
+                if (fuse_current_q8) {
+                    DISPATCH_Q8_LEGACY(true, true);
+                } else {
+                    DISPATCH_Q8_LEGACY(true, false);
+                }
             } else {
-                DISPATCH_Q8_LEGACY(false);
+                if (fuse_current_q8) {
+                    DISPATCH_Q8_LEGACY(false, true);
+                } else {
+                    DISPATCH_Q8_LEGACY(false, false);
+                }
             }
 #undef DISPATCH_Q8_LEGACY
         } else {
             const size_t partial_count = (size_t) batch_lens->ne[0] * n_heads *
                 variant.n_partitions * (256 + 2);
             ggml_cuda_pool_alloc<float> partials(ctx.pool(), partial_count);
-#define LAUNCH_Q8_PARTIAL(N_WARPS, N_PARTITIONS, PACKED_QV) \
-            paged_attention_decode_q8_partial_kernel<256, N_WARPS, N_PARTITIONS, PACKED_QV> \
+#define LAUNCH_Q8_PARTIAL(N_WARPS, N_PARTITIONS, PACKED_QV, FUSE_CURRENT) \
+            paged_attention_decode_q8_partial_kernel<256, N_WARPS, N_PARTITIONS, PACKED_QV, FUSE_CURRENT> \
                 <<<dim3(n_heads, batch_lens->ne[0], N_PARTITIONS), dim3(WARP_SIZE, N_WARPS), 0, ctx.stream()>>>( \
-                (const float *) q->data, (const char *) k_cache->data, (const char *) v_cache->data, \
-                (const int *) block_table->data, (const int *) context_lens->data, \
+                (const float *) q->data, (const float *) k_new->data, (const float *) v_new->data, \
+                (char *) k_cache->data, (char *) v_cache->data, (const int *) block_table->data, \
+                (const int *) write_rows->data, (const int *) context_lens->data, \
                 (const int *) batch_offsets->data, k_cache->nb[1], k_cache->nb[2], k_cache->nb[3], \
                 v_cache->nb[1], v_cache->nb[2], v_cache->nb[3], n_heads, n_heads_kv, block_size, max_blocks, \
                 op_params_f[0], partials.ptr)
-#define CONFIGURE_Q8_GROUPED(N_WARPS, N_PARTITIONS, N_Q_HEADS, USE_CP_ASYNC) \
+#define CONFIGURE_Q8_GROUPED(N_WARPS, N_PARTITIONS, N_Q_HEADS, USE_CP_ASYNC, FUSE_CURRENT) \
             do { \
                 const char * carveout_kib_env = getenv("GGML_CUDA_PAGED_Q8_CARVEOUT_KIB"); \
                 if (carveout_kib_env != nullptr && atoi(carveout_kib_env) > 0 && \
@@ -1372,17 +1638,19 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
                         (int) (((int64_t) carveout_kib * 1024 * 100 + shared_mem_per_sm - 1) / shared_mem_per_sm))); \
                     CUDA_CHECK(cudaFuncSetAttribute( \
                         paged_attention_decode_q8_grouped_partial_kernel< \
-                            256, N_WARPS, N_PARTITIONS, N_Q_HEADS, 32, USE_CP_ASYNC>, \
+                            256, N_WARPS, N_PARTITIONS, N_Q_HEADS, 32, USE_CP_ASYNC, FUSE_CURRENT>, \
                         cudaFuncAttributePreferredSharedMemoryCarveout, carveout_percent)); \
                 } \
             } while (0)
-#define LAUNCH_Q8_GROUPED(N_WARPS, N_PARTITIONS, N_Q_HEADS, USE_CP_ASYNC) \
-            CONFIGURE_Q8_GROUPED(N_WARPS, N_PARTITIONS, N_Q_HEADS, USE_CP_ASYNC); \
-            paged_attention_decode_q8_grouped_partial_kernel<256, N_WARPS, N_PARTITIONS, N_Q_HEADS, 32, USE_CP_ASYNC> \
+#define LAUNCH_Q8_GROUPED(N_WARPS, N_PARTITIONS, N_Q_HEADS, USE_CP_ASYNC, FUSE_CURRENT) \
+            CONFIGURE_Q8_GROUPED(N_WARPS, N_PARTITIONS, N_Q_HEADS, USE_CP_ASYNC, FUSE_CURRENT); \
+            paged_attention_decode_q8_grouped_partial_kernel< \
+                256, N_WARPS, N_PARTITIONS, N_Q_HEADS, 32, USE_CP_ASYNC, FUSE_CURRENT> \
                 <<<dim3(n_heads / N_Q_HEADS, batch_lens->ne[0], N_PARTITIONS), \
                     dim3(WARP_SIZE, N_WARPS), 0, ctx.stream()>>>( \
-                (const float *) q->data, (const char *) k_cache->data, (const char *) v_cache->data, \
-                (const int *) block_table->data, (const int *) context_lens->data, \
+                (const float *) q->data, (const float *) k_new->data, (const float *) v_new->data, \
+                (char *) k_cache->data, (char *) v_cache->data, (const int *) block_table->data, \
+                (const int *) write_rows->data, (const int *) context_lens->data, \
                 (const int *) batch_offsets->data, k_cache->nb[1], k_cache->nb[2], k_cache->nb[3], \
                 v_cache->nb[1], v_cache->nb[2], v_cache->nb[3], n_heads, n_heads_kv, block_size, max_blocks, \
                 op_params_f[0], partials.ptr)
@@ -1390,12 +1658,12 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
             paged_attention_decode_reduce_kernel<256, N_PARTITIONS> \
                 <<<dim3(n_heads, batch_lens->ne[0]), dim3(256), 0, ctx.stream()>>>( \
                 partials.ptr, (const int *) batch_offsets->data, n_heads, (float *) dst->data)
-#define DISPATCH_Q8_PARTITIONS(LAUNCH_BODY) \
+#define DISPATCH_Q8_PARTITIONS(LAUNCH_BODY, FUSE_CURRENT) \
             switch (variant.n_partitions) { \
-                case 1: { LAUNCH_BODY(1); LAUNCH_Q8_REDUCE(1); } break; \
-                case 2: { LAUNCH_BODY(2); LAUNCH_Q8_REDUCE(2); } break; \
-                case 4: { LAUNCH_BODY(4); LAUNCH_Q8_REDUCE(4); } break; \
-                default: { LAUNCH_BODY(8); LAUNCH_Q8_REDUCE(8); } break; \
+                case 1: { LAUNCH_BODY(1, FUSE_CURRENT); LAUNCH_Q8_REDUCE(1); } break; \
+                case 2: { LAUNCH_BODY(2, FUSE_CURRENT); LAUNCH_Q8_REDUCE(2); } break; \
+                case 4: { LAUNCH_BODY(4, FUSE_CURRENT); LAUNCH_Q8_REDUCE(4); } break; \
+                default: { LAUNCH_BODY(8, FUSE_CURRENT); LAUNCH_Q8_REDUCE(8); } break; \
             }
 
             if (variant.n_q_heads == 2) {
@@ -1403,29 +1671,59 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
                 const bool use_cp_async = cp_async_available(cc) &&
                     (cp_async_env == nullptr || atoi(cp_async_env) != 0);
                 if (use_cp_async) {
-#define LAUNCH_GROUP_2_ASYNC(N_PARTITIONS) LAUNCH_Q8_GROUPED(8, N_PARTITIONS, 2, true)
-                    DISPATCH_Q8_PARTITIONS(LAUNCH_GROUP_2_ASYNC);
+#define LAUNCH_GROUP_2_ASYNC(N_PARTITIONS, FUSE_CURRENT) \
+                    LAUNCH_Q8_GROUPED(8, N_PARTITIONS, 2, true, FUSE_CURRENT)
+                    if (fuse_current_q8) {
+                        DISPATCH_Q8_PARTITIONS(LAUNCH_GROUP_2_ASYNC, true);
+                    } else {
+                        DISPATCH_Q8_PARTITIONS(LAUNCH_GROUP_2_ASYNC, false);
+                    }
 #undef LAUNCH_GROUP_2_ASYNC
                 } else {
-#define LAUNCH_GROUP_2(N_PARTITIONS) LAUNCH_Q8_GROUPED(8, N_PARTITIONS, 2, false)
-                    DISPATCH_Q8_PARTITIONS(LAUNCH_GROUP_2);
+#define LAUNCH_GROUP_2(N_PARTITIONS, FUSE_CURRENT) \
+                    LAUNCH_Q8_GROUPED(8, N_PARTITIONS, 2, false, FUSE_CURRENT)
+                    if (fuse_current_q8) {
+                        DISPATCH_Q8_PARTITIONS(LAUNCH_GROUP_2, true);
+                    } else {
+                        DISPATCH_Q8_PARTITIONS(LAUNCH_GROUP_2, false);
+                    }
 #undef LAUNCH_GROUP_2
                 }
             } else if (variant.n_q_heads == 4) {
-#define LAUNCH_GROUP_4(N_PARTITIONS) LAUNCH_Q8_GROUPED(16, N_PARTITIONS, 4, false)
-                DISPATCH_Q8_PARTITIONS(LAUNCH_GROUP_4);
+#define LAUNCH_GROUP_4(N_PARTITIONS, FUSE_CURRENT) \
+                LAUNCH_Q8_GROUPED(16, N_PARTITIONS, 4, false, FUSE_CURRENT)
+                if (fuse_current_q8) {
+                    DISPATCH_Q8_PARTITIONS(LAUNCH_GROUP_4, true);
+                } else {
+                    DISPATCH_Q8_PARTITIONS(LAUNCH_GROUP_4, false);
+                }
 #undef LAUNCH_GROUP_4
             } else if (variant.n_warps == 4) {
-#define LAUNCH_SINGLE_4(N_PARTITIONS) LAUNCH_Q8_PARTIAL(4, N_PARTITIONS, true)
-                DISPATCH_Q8_PARTITIONS(LAUNCH_SINGLE_4);
+#define LAUNCH_SINGLE_4(N_PARTITIONS, FUSE_CURRENT) \
+                LAUNCH_Q8_PARTIAL(4, N_PARTITIONS, true, FUSE_CURRENT)
+                if (fuse_current_q8) {
+                    DISPATCH_Q8_PARTITIONS(LAUNCH_SINGLE_4, true);
+                } else {
+                    DISPATCH_Q8_PARTITIONS(LAUNCH_SINGLE_4, false);
+                }
 #undef LAUNCH_SINGLE_4
             } else if (variant.n_warps == 16) {
-#define LAUNCH_SINGLE_16(N_PARTITIONS) LAUNCH_Q8_PARTIAL(16, N_PARTITIONS, true)
-                DISPATCH_Q8_PARTITIONS(LAUNCH_SINGLE_16);
+#define LAUNCH_SINGLE_16(N_PARTITIONS, FUSE_CURRENT) \
+                LAUNCH_Q8_PARTIAL(16, N_PARTITIONS, true, FUSE_CURRENT)
+                if (fuse_current_q8) {
+                    DISPATCH_Q8_PARTITIONS(LAUNCH_SINGLE_16, true);
+                } else {
+                    DISPATCH_Q8_PARTITIONS(LAUNCH_SINGLE_16, false);
+                }
 #undef LAUNCH_SINGLE_16
             } else {
-#define LAUNCH_SINGLE_8(N_PARTITIONS) LAUNCH_Q8_PARTIAL(8, N_PARTITIONS, true)
-                DISPATCH_Q8_PARTITIONS(LAUNCH_SINGLE_8);
+#define LAUNCH_SINGLE_8(N_PARTITIONS, FUSE_CURRENT) \
+                LAUNCH_Q8_PARTIAL(8, N_PARTITIONS, true, FUSE_CURRENT)
+                if (fuse_current_q8) {
+                    DISPATCH_Q8_PARTITIONS(LAUNCH_SINGLE_8, true);
+                } else {
+                    DISPATCH_Q8_PARTITIONS(LAUNCH_SINGLE_8, false);
+                }
 #undef LAUNCH_SINGLE_8
             }
 #undef DISPATCH_Q8_PARTITIONS

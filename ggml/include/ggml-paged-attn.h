@@ -78,12 +78,26 @@ static inline int ggml_paged_attn_bucket_upper_bound(int bucket) {
     return bounds[bucket];
 }
 
+#if defined(__CUDACC__)
+static __host__ __device__ inline int ggml_paged_attn_tail_partition(int context_len, int n_partitions) {
+#else
 static inline int ggml_paged_attn_tail_partition(int context_len, int n_partitions) {
+#endif
     int tokens_per_partition{};
     for (int covered = 0; covered < context_len; covered += n_partitions) {
         ++tokens_per_partition;
     }
     return context_len > 0 ? (context_len - 1) / tokens_per_partition : 0;
+}
+
+#if defined(__CUDACC__)
+static __host__ __device__ inline bool ggml_paged_attn_current_row_owner(
+#else
+static inline bool ggml_paged_attn_current_row_owner(
+#endif
+        int q_head, int n_heads, int n_heads_kv, int partition, int n_partitions, int context_len) {
+    const int gqa_ratio = n_heads / n_heads_kv;
+    return q_head % gqa_ratio == 0 && partition == ggml_paged_attn_tail_partition(context_len, n_partitions);
 }
 
 static inline struct ggml_paged_attn_cuda_variant ggml_paged_attn_select_cuda_variant(
@@ -119,6 +133,10 @@ unsigned long long ggml_paged_attn_tiled_prefill_launch_count(void);
 void ggml_paged_attn_tiled_prefill_launch_count_reset(void);
 unsigned long long ggml_paged_attn_q8_decode_launch_count(void);
 void ggml_paged_attn_q8_decode_launch_count_reset(void);
+unsigned long long ggml_paged_attn_q8_combined_write_launch_count(void);
+void ggml_paged_attn_q8_combined_write_launch_count_reset(void);
+unsigned long long ggml_paged_attn_q8_fused_write_launch_count(void);
+void ggml_paged_attn_q8_fused_write_launch_count_reset(void);
 #ifdef __cplusplus
 }
 #endif
