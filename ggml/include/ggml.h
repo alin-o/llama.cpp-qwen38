@@ -2964,7 +2964,8 @@ extern "C" {
                                                   float                 scale,
                                                   int                   block_size,
                                                   int                   max_blocks,
-                                                  int                   context_bucket);
+                                                  int                   context_bucket,
+                                                  bool                  fuse_turbo_wht);
 
 #ifdef  __cplusplus
 }

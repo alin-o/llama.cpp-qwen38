@@ -161,6 +161,34 @@ static inline struct ggml_paged_attn_cuda_variant ggml_paged_attn_select_cuda_va
     return result;
 }
 
+static inline bool ggml_paged_attn_turbo_fused_wht_supported(
+        int context_bucket, int head_dim, int n_heads, int n_heads_kv, int n_sequences, int n_q_tokens,
+        enum ggml_type k_type, enum ggml_type v_type) {
+    if (context_bucket < GGML_PAGED_ATTN_CONTEXT_4K ||
+            context_bucket > GGML_PAGED_ATTN_CONTEXT_16K || head_dim != 256 ||
+            n_heads <= 0 || n_heads_kv <= 0 || n_heads % n_heads_kv != 0 ||
+            n_sequences <= 0 || n_q_tokens != n_sequences) {
+        return false;
+    }
+
+    const int gqa_ratio = n_heads / n_heads_kv;
+    const bool same_turbo =
+        (k_type == GGML_TYPE_TURBO3_0 && v_type == GGML_TYPE_TURBO3_0) ||
+        (k_type == GGML_TYPE_TURBO4_0 && v_type == GGML_TYPE_TURBO4_0);
+    return same_turbo && (gqa_ratio == 6 || gqa_ratio == 8);
+}
+
+static inline bool ggml_paged_attn_cuda_turbo_token_vec_supported(
+        int context_bucket, int head_dim, int n_heads, int n_heads_kv, int n_sequences, int n_q_tokens,
+        enum ggml_type k_type, enum ggml_type v_type,
+        struct ggml_paged_attn_cuda_device_caps caps) {
+    const bool supported_device = caps.cc == 890 && caps.n_sms > 0 && caps.warp_size == 32 &&
+        caps.max_threads_per_block >= 128 && caps.shared_mem_per_block >= 8 * 1024 &&
+        caps.sm89_compiled && caps.graph_capture_safe;
+    return supported_device && ggml_paged_attn_turbo_fused_wht_supported(
+        context_bucket, head_dim, n_heads, n_heads_kv, n_sequences, n_q_tokens, k_type, v_type);
+}
+
 #if defined(GGML_USE_CUDA)
 #ifdef __cplusplus
 extern "C" {
@@ -171,6 +199,10 @@ unsigned long long ggml_paged_attn_q8_decode_launch_count(void);
 void ggml_paged_attn_q8_decode_launch_count_reset(void);
 unsigned long long ggml_paged_attn_turbo_decode_launch_count(void);
 void ggml_paged_attn_turbo_decode_launch_count_reset(void);
+unsigned long long ggml_paged_attn_turbo_token_vec_launch_count(void);
+void ggml_paged_attn_turbo_token_vec_launch_count_reset(void);
+unsigned long long ggml_paged_attn_turbo_combined_write_launch_count(void);
+void ggml_paged_attn_turbo_combined_write_launch_count_reset(void);
 unsigned long long ggml_paged_attn_q8_combined_write_launch_count(void);
 void ggml_paged_attn_q8_combined_write_launch_count_reset(void);
 unsigned long long ggml_paged_attn_q8_fused_write_launch_count(void);

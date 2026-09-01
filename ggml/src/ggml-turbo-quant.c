@@ -36,9 +36,12 @@ static int turbo3_nearest(float x) {
     return 7;
 }
 
-static void turbo3_wht(float * x) {
+void ggml_turbo_wht_f32(float * x, int direction) {
+    assert(direction == 0 || direction == 1);
+    const float * signs_in  = direction == 0 ? turbo3_signs_1 : turbo3_signs_2;
+    const float * signs_out = direction == 0 ? turbo3_signs_2 : turbo3_signs_1;
     for (int i = 0; i < QK_TURBO3_GROUP; ++i) {
-        x[i] *= turbo3_signs_1[i];
+        x[i] *= signs_in[i];
     }
     for (int h = 1; h < QK_TURBO3_GROUP; h *= 2) {
         for (int i = 0; i < QK_TURBO3_GROUP; i += 2*h) {
@@ -51,7 +54,7 @@ static void turbo3_wht(float * x) {
         }
     }
     for (int i = 0; i < QK_TURBO3_GROUP; ++i) {
-        x[i] *= 0.08838834764831845f * turbo3_signs_2[i];
+        x[i] *= 0.08838834764831845f * signs_out[i];
     }
 }
 
@@ -74,7 +77,7 @@ void quantize_row_turbo3_0_ref(
         for (int j = 0; j < QK_TURBO3_GROUP; ++j) {
             values[j] *= inv_norm;
         }
-        turbo3_wht(values);
+        ggml_turbo_wht_f32(values, 0);
 
         block_turbo3_0 * block = &y[g];
         memset(block->qs, 0, sizeof(block->qs));
@@ -173,7 +176,7 @@ void quantize_row_turbo4_0_ref(
         for (int j = 0; j < QK_TURBO4_GROUP; ++j) {
             values[j] *= inv_norm;
         }
-        turbo3_wht(values);
+        ggml_turbo_wht_f32(values, 0);
 
         block_turbo4_0 * block = &y[g];
         memset(block->qs, 0, sizeof(block->qs));

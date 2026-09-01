@@ -2718,6 +2718,9 @@ ggml_tensor * llm_graph_context::build_attn_mha_paged(
     ggml_tensor * v_flat = ggml_reshape_2d(ctx0, v_cache, v_cache->ne[0], n_rows_v);
     ggml_tensor * k_rows = ggml_reshape_2d(ctx0, k_cur, k_cur->ne[0], k_cur->ne[1] * k_cur->ne[2]);
     ggml_tensor * v_rows = ggml_reshape_2d(ctx0, v_cur, v_cur->ne[0], v_cur->ne[1] * v_cur->ne[2]);
+    const bool fuse_turbo_wht = ggml_paged_attn_turbo_fused_wht_supported(
+        context_bucket, q->ne[0], q->ne[1], k_cur->ne[1], batch_lens->ne[0], q->ne[2],
+        k_cache->type, v_cache->type);
     const char * combined_write_env = getenv("LLAMA_PAGED_Q8_COMBINED_WRITE");
     const bool combined_q8_write = (combined_write_env == nullptr || strcmp(combined_write_env, "0") != 0) &&
         k_cache->type == GGML_TYPE_Q8_0 && v_cache->type == GGML_TYPE_Q8_0 &&
@@ -2727,21 +2730,27 @@ ggml_tensor * llm_graph_context::build_attn_mha_paged(
         ggml_is_contiguous(v_cur) && ggml_is_contiguous(k_cache) && ggml_is_contiguous(v_cache) &&
         write_rows->type == GGML_TYPE_I32 && ggml_is_contiguous(write_rows) &&
         ggml_nelements(write_rows) == k_rows->ne[1];
-    if (!combined_q8_write) {
+    const bool combined_turbo_write = fuse_turbo_wht &&
+        k_cur->type == GGML_TYPE_F32 && v_cur->type == GGML_TYPE_F32 && ggml_are_same_shape(k_cur, v_cur) &&
+        ggml_are_same_shape(k_cache, v_cache) && ggml_is_contiguous(k_cur) && ggml_is_contiguous(v_cur) &&
+        ggml_is_contiguous(k_cache) && ggml_is_contiguous(v_cache) &&
+        write_rows->type == GGML_TYPE_I32 && ggml_is_contiguous(write_rows) &&
+        ggml_nelements(write_rows) == k_rows->ne[1];
+    if (!combined_q8_write && !combined_turbo_write) {
         k_cache = ggml_reshape_4d(ctx0, ggml_set_rows(ctx0, k_flat, k_rows, write_rows),
                                    k_cache->ne[0], k_cache->ne[1], k_cache->ne[2], k_cache->ne[3]);
         v_cache = ggml_reshape_4d(ctx0, ggml_set_rows(ctx0, v_flat, v_rows, write_rows),
                                    v_cache->ne[0], v_cache->ne[1], v_cache->ne[2], v_cache->ne[3]);
     }
 
-    if (k_cache->type == GGML_TYPE_TURBO3_0 || k_cache->type == GGML_TYPE_TURBO4_0) {
+    if (!fuse_turbo_wht && (k_cache->type == GGML_TYPE_TURBO3_0 || k_cache->type == GGML_TYPE_TURBO4_0)) {
         q = ggml_turbo_wht(ctx0, q, 0);
     }
     ggml_tensor * cur = ggml_paged_attn(ctx0,
                                         q, k_cur, v_cur, k_cache, v_cache,
                                         block_table, write_rows, context_lens, batch_offsets, batch_lens,
-                                        kq_scale, block_size, max_blocks, context_bucket);
-    if (v_cache->type == GGML_TYPE_TURBO3_0 || v_cache->type == GGML_TYPE_TURBO4_0) {
+                                        kq_scale, block_size, max_blocks, context_bucket, fuse_turbo_wht);
+    if (!fuse_turbo_wht && (v_cache->type == GGML_TYPE_TURBO3_0 || v_cache->type == GGML_TYPE_TURBO4_0)) {
         cur = ggml_turbo_wht(ctx0, cur, 1);
     }
 

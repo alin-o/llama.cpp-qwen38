@@ -2,6 +2,7 @@
 
 #include "ggml-cpu.h"
 #include "ggml-impl.h"
+#include "ggml-quants.h"
 #include "binary-ops.h"
 #include "simd-gemm.h"
 #include "ggml.h"
@@ -12049,6 +12050,7 @@ void ggml_compute_forward_paged_attn(const ggml_compute_params * params, ggml_te
     const float   scale       = op_params_f[0];
     const int     block_size  = ((const int32_t *) (op_params_f + 1))[0];
     const int     max_blocks  = ((const int32_t *) (op_params_f + 2))[0];
+    const bool    fuse_turbo_wht = ((const int32_t *) (op_params_f + 1))[3];
 
     const int head_dim   = q->ne[0];
     const int n_heads    = q->ne[1];
@@ -12067,15 +12069,18 @@ void ggml_compute_forward_paged_attn(const ggml_compute_params * params, ggml_te
         k_write_source = k_write_source->src[0];
     }
     const bool separate_write_scheduled = k_write_source->op == GGML_OP_SET_ROWS;
-    const bool combined_q8_write = !separate_write_scheduled &&
-        k_cache->type == GGML_TYPE_Q8_0 && v_cache->type == GGML_TYPE_Q8_0 &&
+    const bool same_q8 = k_cache->type == GGML_TYPE_Q8_0 && v_cache->type == GGML_TYPE_Q8_0;
+    const bool same_turbo = fuse_turbo_wht &&
+        ((k_cache->type == GGML_TYPE_TURBO3_0 && v_cache->type == GGML_TYPE_TURBO3_0) ||
+         (k_cache->type == GGML_TYPE_TURBO4_0 && v_cache->type == GGML_TYPE_TURBO4_0));
+    const bool combined_write = !separate_write_scheduled && (same_q8 || same_turbo) &&
         k_new->type == GGML_TYPE_F32 && v_new->type == GGML_TYPE_F32 && ggml_is_contiguous(k_new) &&
         ggml_is_contiguous(v_new) && ggml_are_same_shape(k_new, v_new) && ggml_are_same_shape(k_cache, v_cache) &&
         k_new->ne[0] == head_dim && k_cache->ne[0] == head_dim && ggml_is_contiguous(k_cache) &&
         ggml_is_contiguous(v_cache) &&
         write_rows->type == GGML_TYPE_I32 && ggml_is_contiguous(write_rows) &&
         ggml_nelements(write_rows) == n_write_rows;
-    if (combined_q8_write) {
+    if (combined_write) {
         std::vector<float> k_new_host(ggml_nelements(k_new));
         std::vector<float> v_new_host(ggml_nelements(v_new));
         std::vector<int32_t> write_rows_host(ggml_nelements(write_rows));
@@ -12116,6 +12121,13 @@ void ggml_compute_forward_paged_attn(const ggml_compute_params * params, ggml_te
     ggml_backend_tensor_get(batch_offsets, batch_offsets_host.data(), 0, ggml_nbytes(batch_offsets));
     ggml_backend_tensor_get(batch_lens,    batch_lens_host.data(),    0, ggml_nbytes(batch_lens));
 
+    if (fuse_turbo_wht) {
+        GGML_ASSERT(head_dim % QK_TURBO3_GROUP == 0);
+        for (size_t offset = 0; offset < q_host.size(); offset += QK_TURBO3_GROUP) {
+            ggml_turbo_wht_f32(q_host.data() + offset, 0);
+        }
+    }
+
     const float *   q_data             = q_host.data();
     const int32_t * block_table_data   = block_table_host.data();
     const int32_t * ctx_lens_data      = ctx_lens_host.data();
@@ -12129,6 +12141,14 @@ void ggml_compute_forward_paged_attn(const ggml_compute_params * params, ggml_te
     const size_t v_row_bytes = ggml_row_size(v_cache->type, head_dim);
     std::vector<uint8_t> staging_k(k_row_bytes);
     std::vector<uint8_t> staging_v(v_row_bytes);
+    std::vector<uint8_t> k_cache_host;
+    std::vector<uint8_t> v_cache_host;
+    if (fuse_turbo_wht) {
+        k_cache_host.resize(ggml_nbytes(k_cache));
+        v_cache_host.resize(ggml_nbytes(v_cache));
+        ggml_backend_tensor_get(k_cache, k_cache_host.data(), 0, k_cache_host.size());
+        ggml_backend_tensor_get(v_cache, v_cache_host.data(), 0, v_cache_host.size());
+    }
     std::vector<float> dequant_k(head_dim);
     std::vector<float> dequant_v(head_dim);
 
@@ -12166,8 +12186,13 @@ void ggml_compute_forward_paged_attn(const ggml_compute_params * params, ggml_te
                         const size_t v_byte_offset = (size_t) physical_block * v_cache->nb[3] + (size_t) kv_h * v_cache->nb[2] +
                             (size_t) token_in_block * v_cache->nb[1];
 
-                        ggml_backend_tensor_get(k_cache, staging_k.data(), k_byte_offset, k_row_bytes);
-                        ggml_backend_tensor_get(v_cache, staging_v.data(), v_byte_offset, v_row_bytes);
+                        if (fuse_turbo_wht) {
+                            memcpy(staging_k.data(), k_cache_host.data() + k_byte_offset, k_row_bytes);
+                            memcpy(staging_v.data(), v_cache_host.data() + v_byte_offset, v_row_bytes);
+                        } else {
+                            ggml_backend_tensor_get(k_cache, staging_k.data(), k_byte_offset, k_row_bytes);
+                            ggml_backend_tensor_get(v_cache, staging_v.data(), v_byte_offset, v_row_bytes);
+                        }
                         k_traits->to_float(staging_k.data(), dequant_k.data(), head_dim);
                         v_traits->to_float(staging_v.data(), dequant_v.data(), head_dim);
 
@@ -12194,6 +12219,11 @@ void ggml_compute_forward_paged_attn(const ggml_compute_params * params, ggml_te
                 const size_t out_idx = (size_t) token_batch_idx * n_heads * head_dim + (size_t) h_id * head_dim;
                 for (int d_id = 0; d_id < head_dim; ++d_id) {
                     out_data[out_idx + d_id] = acc[d_id] / (exp_sum + 1e-6f);
+                }
+                if (fuse_turbo_wht) {
+                    for (int d_id = 0; d_id < head_dim; d_id += QK_TURBO3_GROUP) {
+                        ggml_turbo_wht_f32(out_data + out_idx + d_id, 1);
+                    }
                 }
             }
         }

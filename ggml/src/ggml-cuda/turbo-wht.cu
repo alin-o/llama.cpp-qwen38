@@ -39,6 +39,20 @@ static __global__ void turbo3_wht_f32(
     dst[group*QK_TURBO3_GROUP + lane] = values[lane]*0.08838834764831845f*sign;
 }
 
+void ggml_cuda_turbo_wht_f32(
+        cudaStream_t stream, const float * src, float * dst, int64_t n_elements, int direction) {
+    GGML_ASSERT(n_elements % QK_TURBO3_GROUP == 0);
+    GGML_ASSERT(direction == 0 || direction == 1);
+    const int64_t n_groups = n_elements/QK_TURBO3_GROUP;
+    const dim3 blocks(n_groups);
+    const dim3 threads(QK_TURBO3_GROUP);
+    if (direction == 0) {
+        turbo3_wht_f32<0><<<blocks, threads, 0, stream>>>(src, dst, n_groups);
+    } else {
+        turbo3_wht_f32<1><<<blocks, threads, 0, stream>>>(src, dst, n_groups);
+    }
+}
+
 void ggml_cuda_turbo_wht(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * src = dst->src[0];
     GGML_ASSERT(src->type == GGML_TYPE_F32);
@@ -49,14 +63,6 @@ void ggml_cuda_turbo_wht(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 
     int direction = 0;
     memcpy(&direction, dst->op_params, sizeof(direction));
-    const int64_t n_groups = ggml_nelements(src)/QK_TURBO3_GROUP;
-    const dim3 blocks(n_groups);
-    const dim3 threads(QK_TURBO3_GROUP);
-    if (direction == 0) {
-        turbo3_wht_f32<0><<<blocks, threads, 0, ctx.stream()>>>(
-                (const float *) src->data, (float *) dst->data, n_groups);
-    } else {
-        turbo3_wht_f32<1><<<blocks, threads, 0, ctx.stream()>>>(
-                (const float *) src->data, (float *) dst->data, n_groups);
-    }
+    ggml_cuda_turbo_wht_f32(
+        ctx.stream(), (const float *) src->data, (float *) dst->data, ggml_nelements(src), direction);
 }
