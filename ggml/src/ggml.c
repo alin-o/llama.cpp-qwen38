@@ -5488,6 +5488,14 @@ void ggml_flash_attn_ext_set_prec(
     ggml_set_op_params_i32(a, 3, prec_i32); // scale is on first pos, max_bias on second
 }
 
+void ggml_flash_attn_ext_set_token_sequential(
+        struct ggml_tensor * a,
+        bool                 token_sequential) {
+    GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT);
+
+    ggml_set_op_params_i32(a, 4, token_sequential);
+}
+
 enum ggml_prec ggml_flash_attn_ext_get_prec(
         const struct ggml_tensor * a) {
     GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT);
@@ -8102,7 +8110,8 @@ struct ggml_tensor * ggml_paged_attn(
     int                   block_size,
     int                   max_blocks,
     int                   context_bucket,
-    bool                  fuse_turbo_wht) {
+    bool                  fuse_turbo_wht,
+    bool                  token_sequential) {
 
     struct ggml_tensor * result = ggml_new_tensor(ctx, q->type, ggml_n_dims(q), q->ne);
     result->op = GGML_OP_PAGED_ATTN;
@@ -8125,6 +8134,7 @@ struct ggml_tensor * ggml_paged_attn(
     op_params_i[1] = max_blocks;
     op_params_i[2] = context_bucket;
     op_params_i[3] = fuse_turbo_wht;
+    op_params_i[4] = token_sequential;
 
     return result;
 }

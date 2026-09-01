@@ -213,6 +213,15 @@ static __device__ __forceinline__ float block_reduce_sum_full(float value, float
     return smem[0];
 }
 
+static __device__ __forceinline__ int paged_query_sequence(
+        int query, const int * batch_offsets, const int * batch_lens, int n_sequences) {
+    int sequence = 0;
+    while (sequence + 1 < n_sequences && query >= batch_offsets[sequence] + batch_lens[sequence]) {
+        ++sequence;
+    }
+    return sequence;
+}
+
 __global__ void paged_attention_decode_kernel(
         const float * q,
         const char * k_cache,
@@ -465,10 +474,11 @@ struct paged_q8_current_rows<HEAD_DIM, true> {
 template <int HEAD_DIM, int N_WARPS, bool PACKED_QV, bool FUSE_CURRENT>
 __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode_q8_parallel_kernel(
         const float * q, const float * k_new, const float * v_new, char * k_cache, char * v_cache,
-        const int * block_table, const int * write_rows, const int * context_lens, const int * batch_offsets,
+        const int * block_table, const int * write_rows, const int * context_lens,
+        const int * batch_offsets, const int * batch_lens,
         size_t k_stride_token, size_t k_stride_head, size_t k_stride_block,
         size_t v_stride_token, size_t v_stride_head, size_t v_stride_block,
-        int n_heads, int n_heads_kv, int block_size, int max_blocks, float scale, float * out) {
+        int n_heads, int n_heads_kv, int n_sequences, int block_size, int max_blocks, float scale, float * out) {
     __shared__ float partial_max[N_WARPS];
     __shared__ float partial_sum[N_WARPS];
     __shared__ float partial_acc[N_WARPS][HEAD_DIM];
@@ -478,12 +488,12 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
     const int warp = threadIdx.y;
     const int lane = threadIdx.x;
     const int head = blockIdx.x;
-    const int seq = blockIdx.y;
+    const int query = blockIdx.y;
+    const int seq = paged_query_sequence(query, batch_offsets, batch_lens, n_sequences);
     const int kv_head = ggml_paged_attn_kv_head(head, n_heads, n_heads_kv);
-    const int batch_start = batch_offsets[seq];
-    const int limit = context_lens[seq];
-    const int current_src_row = batch_start * n_heads_kv + kv_head;
-    const size_t q_base = (size_t) batch_start * n_heads * HEAD_DIM + (size_t) head * HEAD_DIM;
+    const int limit = context_lens[seq] - batch_lens[seq] + query - batch_offsets[seq] + 1;
+    const int current_src_row = query * n_heads_kv + kv_head;
+    const size_t q_base = (size_t) query * n_heads * HEAD_DIM + (size_t) head * HEAD_DIM;
     float qv[HEAD_DIM / WARP_SIZE];
     float acc[HEAD_DIM / WARP_SIZE] = {};
     if constexpr (PACKED_QV) {
@@ -656,10 +666,11 @@ static __device__ __forceinline__ size_t paged_partial_offset(
 template <int HEAD_DIM, int N_WARPS, int N_PARTITIONS, bool PACKED_QV, bool FUSE_CURRENT>
 __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode_q8_partial_kernel(
         const float * q, const float * k_new, const float * v_new, char * k_cache, char * v_cache,
-        const int * block_table, const int * write_rows, const int * context_lens, const int * batch_offsets,
+        const int * block_table, const int * write_rows, const int * context_lens,
+        const int * batch_offsets, const int * batch_lens,
         size_t k_stride_token, size_t k_stride_head, size_t k_stride_block,
         size_t v_stride_token, size_t v_stride_head, size_t v_stride_block,
-        int n_heads, int n_heads_kv, int block_size, int max_blocks, float scale, float * partials) {
+        int n_heads, int n_heads_kv, int n_sequences, int block_size, int max_blocks, float scale, float * partials) {
     __shared__ float warp_max[N_WARPS];
     __shared__ float warp_sum[N_WARPS];
     __shared__ float warp_acc[N_WARPS][HEAD_DIM];
@@ -669,16 +680,17 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
     const int warp = threadIdx.y;
     const int lane = threadIdx.x;
     const int head = blockIdx.x;
-    const int seq = blockIdx.y;
+    const int query = blockIdx.y;
+    const int seq = paged_query_sequence(query, batch_offsets, batch_lens, n_sequences);
     const int partition = blockIdx.z;
     const int kv_head = ggml_paged_attn_kv_head(head, n_heads, n_heads_kv);
-    const int limit = context_lens[seq];
+    const int limit = context_lens[seq] - batch_lens[seq] + query - batch_offsets[seq] + 1;
     const int partition_size = (limit + N_PARTITIONS - 1) / N_PARTITIONS;
     const int token_begin = partition * partition_size;
     const int token_limit = token_begin + partition_size < limit ? token_begin + partition_size : limit;
     const bool is_tail_partition = partition == ggml_paged_attn_tail_partition(limit, N_PARTITIONS);
-    const int current_src_row = batch_offsets[seq] * n_heads_kv + kv_head;
-    const size_t q_base = (size_t) batch_offsets[seq] * n_heads * HEAD_DIM + (size_t) head * HEAD_DIM;
+    const int current_src_row = query * n_heads_kv + kv_head;
+    const size_t q_base = (size_t) query * n_heads * HEAD_DIM + (size_t) head * HEAD_DIM;
     float qv[HEAD_DIM / WARP_SIZE];
     float acc[HEAD_DIM / WARP_SIZE] = {};
 
@@ -835,7 +847,7 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
                 final_acc[i] += warp_acc[w][dim] * partial_scale;
             }
         }
-        float * partial = partials + paged_partial_offset<HEAD_DIM>(seq, head, partition, n_heads, N_PARTITIONS);
+        float * partial = partials + paged_partial_offset<HEAD_DIM>(query, head, partition, n_heads, N_PARTITIONS);
         if (lane == 0) {
             partial[0] = final_max;
             partial[1] = final_sum;
@@ -852,10 +864,11 @@ template <int HEAD_DIM, int N_WARPS, int N_PARTITIONS, int N_Q_HEADS, int TILE_T
           bool USE_CP_ASYNC, bool FUSE_CURRENT>
 __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode_q8_grouped_partial_kernel(
         const float * q, const float * k_new, const float * v_new, char * k_cache, char * v_cache,
-        const int * block_table, const int * write_rows, const int * context_lens, const int * batch_offsets,
+        const int * block_table, const int * write_rows, const int * context_lens,
+        const int * batch_offsets, const int * batch_lens,
         size_t k_stride_token, size_t k_stride_head, size_t k_stride_block,
         size_t v_stride_token, size_t v_stride_head, size_t v_stride_block,
-        int n_heads, int n_heads_kv, int block_size, int max_blocks, float scale, float * partials) {
+        int n_heads, int n_heads_kv, int n_sequences, int block_size, int max_blocks, float scale, float * partials) {
     constexpr int ROW_BLOCKS = HEAD_DIM / QK8_0;
     constexpr int ROW_WORDS = sizeof(block_q8_0) * ROW_BLOCKS / sizeof(int);
     constexpr int ROW_BYTES = ROW_WORDS * sizeof(int);
@@ -883,17 +896,18 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
     const int context_warp = warp % CONTEXT_WARPS;
     const int head = blockIdx.x * N_Q_HEADS + head_in_group;
     const int group_head = blockIdx.x * N_Q_HEADS;
-    const int seq = blockIdx.y;
+    const int query = blockIdx.y;
+    const int seq = paged_query_sequence(query, batch_offsets, batch_lens, n_sequences);
     const int partition = blockIdx.z;
     const int kv_head = ggml_paged_attn_kv_head(head, n_heads, n_heads_kv);
-    const int limit = context_lens[seq];
+    const int limit = context_lens[seq] - batch_lens[seq] + query - batch_offsets[seq] + 1;
     const int partition_size = (limit + N_PARTITIONS - 1) / N_PARTITIONS;
     const int token_begin = partition * partition_size;
     const int token_limit = token_begin + partition_size < limit ? token_begin + partition_size : limit;
     const bool is_tail_partition = partition == ggml_paged_attn_tail_partition(limit, N_PARTITIONS);
-    const int current_src_row = batch_offsets[seq] * n_heads_kv + kv_head;
+    const int current_src_row = query * n_heads_kv + kv_head;
     const int cache_token_limit = FUSE_CURRENT && is_tail_partition ? token_limit - 1 : token_limit;
-    const size_t q_base = (size_t) batch_offsets[seq] * n_heads * HEAD_DIM + (size_t) head * HEAD_DIM;
+    const size_t q_base = (size_t) query * n_heads * HEAD_DIM + (size_t) head * HEAD_DIM;
     float acc[HEAD_DIM / WARP_SIZE] = {};
 
     if (context_warp == 0) {
@@ -1097,7 +1111,7 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
                 final_acc[i] += warp_acc[head_in_group][w][dim] * partial_scale;
             }
         }
-        float * partial = partials + paged_partial_offset<HEAD_DIM>(seq, head, partition, n_heads, N_PARTITIONS);
+        float * partial = partials + paged_partial_offset<HEAD_DIM>(query, head, partition, n_heads, N_PARTITIONS);
         if (lane == 0) {
             partial[0] = final_max;
             partial[1] = final_sum;
@@ -1154,15 +1168,15 @@ static __device__ __forceinline__ void paged_turbo_wht_256(
 
 template <int HEAD_DIM, int N_PARTITIONS, bool FUSE_TURBO_WHT = false>
 __global__ void paged_attention_decode_reduce_kernel(
-        const float * partials, const int * batch_offsets, int n_heads, float * out) {
+        const float * partials, int n_heads, float * out) {
     __shared__ float values[HEAD_DIM];
     const int head = blockIdx.x;
-    const int seq = blockIdx.y;
+    const int query = blockIdx.y;
     const int dim = threadIdx.x;
     float final_max = -FLT_MAX;
 #pragma unroll
     for (int partition = 0; partition < N_PARTITIONS; ++partition) {
-        const float * partial = partials + paged_partial_offset<HEAD_DIM>(seq, head, partition, n_heads, N_PARTITIONS);
+        const float * partial = partials + paged_partial_offset<HEAD_DIM>(query, head, partition, n_heads, N_PARTITIONS);
         final_max = fmaxf(final_max, partial[0]);
     }
 
@@ -1170,12 +1184,12 @@ __global__ void paged_attention_decode_reduce_kernel(
     float final_acc = 0.0f;
 #pragma unroll
     for (int partition = 0; partition < N_PARTITIONS; ++partition) {
-        const float * partial = partials + paged_partial_offset<HEAD_DIM>(seq, head, partition, n_heads, N_PARTITIONS);
+        const float * partial = partials + paged_partial_offset<HEAD_DIM>(query, head, partition, n_heads, N_PARTITIONS);
         const float partial_scale = partial[0] == final_max ? 1.0f : __expf(partial[0] - final_max);
         final_sum += partial[1] * partial_scale;
         final_acc += partial[2 + dim] * partial_scale;
     }
-    const size_t out_base = ((size_t) batch_offsets[seq] * n_heads + head) * HEAD_DIM;
+    const size_t out_base = ((size_t) query * n_heads + head) * HEAD_DIM;
     if constexpr (FUSE_TURBO_WHT) {
         values[dim] = final_acc / (final_sum + 1e-6f);
         __syncthreads();
@@ -1193,16 +1207,17 @@ __global__ void paged_attention_decode_reduce_kernel(
 template <int HEAD_DIM, int N_WARPS, ggml_type TYPE_K, ggml_type TYPE_V>
 __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode_turbo_vec_kernel(
         const float * q, const char * k_cache, const char * v_cache,
-        const int * block_table, const int * context_lens, const int * batch_offsets,
+        const int * block_table, const int * context_lens, const int * batch_offsets, const int * batch_lens,
         size_t k_stride_token, size_t k_stride_head, size_t k_stride_block,
         size_t v_stride_token, size_t v_stride_head, size_t v_stride_block,
-        int n_heads, int n_heads_kv, int block_size, int max_blocks, float scale, float * out) {
+        int n_heads, int n_heads_kv, int n_sequences, int block_size, int max_blocks, float scale, float * out) {
     __shared__ fattn_decode_vec_shared<HEAD_DIM, N_WARPS> shared;
     const int head = blockIdx.x;
-    const int seq = blockIdx.y;
+    const int query = blockIdx.y;
+    const int seq = paged_query_sequence(query, batch_offsets, batch_lens, n_sequences);
     const int kv_head = ggml_paged_attn_kv_head(head, n_heads, n_heads_kv);
-    const int limit = context_lens[seq];
-    const size_t q_base = (size_t) batch_offsets[seq] * n_heads * HEAD_DIM + (size_t) head * HEAD_DIM;
+    const int limit = context_lens[seq] - batch_lens[seq] + query - batch_offsets[seq] + 1;
+    const size_t q_base = (size_t) query * n_heads * HEAD_DIM + (size_t) head * HEAD_DIM;
     const fattn_paged_kv_address kv_address = {
         k_cache + (size_t) kv_head * k_stride_head,
         v_cache + (size_t) kv_head * v_stride_head,
@@ -1216,10 +1231,10 @@ __global__ __launch_bounds__(WARP_SIZE * N_WARPS, 1) void paged_attention_decode
 template <int HEAD_DIM, int N_PARTITIONS, ggml_type TYPE_K, ggml_type TYPE_V, bool FUSE_TURBO_WHT>
 __global__ __launch_bounds__(128, 1) void paged_attention_decode_turbo_token_vec_kernel(
         const float * q, const char * k_cache, const char * v_cache,
-        const int * block_table, const int * context_lens, const int * batch_offsets,
+        const int * block_table, const int * context_lens, const int * batch_offsets, const int * batch_lens,
         size_t k_stride_token, size_t k_stride_head, size_t k_stride_block,
         size_t v_stride_token, size_t v_stride_head, size_t v_stride_block,
-        int n_heads, int n_heads_kv, int block_size, int max_blocks, float scale,
+        int n_heads, int n_heads_kv, int n_sequences, int block_size, int max_blocks, float scale,
         float * partials) {
     static_assert(HEAD_DIM == 256, "paged Turbo token vec supports head dimension 256");
     static_assert(TYPE_K == TYPE_V, "paged Turbo token vec requires matching K/V formats");
@@ -1239,15 +1254,16 @@ __global__ __launch_bounds__(128, 1) void paged_attention_decode_turbo_token_vec
     __shared__ float q_values[HEAD_DIM];
 
     const int head = blockIdx.x;
-    const int seq = blockIdx.y;
+    const int query = blockIdx.y;
+    const int seq = paged_query_sequence(query, batch_offsets, batch_lens, n_sequences);
     const int partition = blockIdx.z;
     const int warp = threadIdx.y;
     const int lane = threadIdx.x;
     const int kq_lane = lane & (KQ_THREADS - 1);
     const int tid = warp * WARP_SIZE + lane;
     const int kv_head = ggml_paged_attn_kv_head(head, n_heads, n_heads_kv);
-    const int limit = context_lens[seq];
-    const size_t q_base = (size_t) batch_offsets[seq] * n_heads * HEAD_DIM + (size_t) head * HEAD_DIM;
+    const int limit = context_lens[seq] - batch_lens[seq] + query - batch_offsets[seq] + 1;
+    const size_t q_base = (size_t) query * n_heads * HEAD_DIM + (size_t) head * HEAD_DIM;
     const fattn_paged_kv_address kv_address = {
         k_cache + (size_t) kv_head * k_stride_head,
         v_cache + (size_t) kv_head * v_stride_head,
@@ -1360,7 +1376,7 @@ __global__ __launch_bounds__(128, 1) void paged_attention_decode_turbo_token_vec
         }
 
         float * partial = partials + paged_partial_offset<HEAD_DIM>(
-            seq, head, partition, n_heads, N_PARTITIONS);
+            query, head, partition, n_heads, N_PARTITIONS);
         if (lane == 0) {
             partial[0] = final_max;
             partial[1] = final_sum;
@@ -1774,6 +1790,7 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
     const int max_blocks = ((const int32_t *) (op_params_f + 2))[0];
     const int context_bucket = ((const int32_t *) (op_params_f + 1))[2];
     const bool fuse_turbo_wht = ((const int32_t *) (op_params_f + 1))[3];
+    const bool token_sequential = ((const int32_t *) (op_params_f + 1))[4];
     const int head_dim = q->ne[0];
     const int n_heads = q->ne[1];
     const int n_heads_kv = k_new->ne[1];
@@ -1805,13 +1822,15 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
     decode_q8 = k_cache->type == GGML_TYPE_Q8_0 && v_cache->type == GGML_TYPE_Q8_0 &&
         head_dim == 256 && q->type == GGML_TYPE_F32 && ggml_is_contiguous(q) &&
-        ggml_cuda_is_aligned(q, sizeof(float4)) && q->ne[2] == batch_lens->ne[0] && q->ne[3] == 1;
+        ggml_cuda_is_aligned(q, sizeof(float4)) && q->ne[2] >= batch_lens->ne[0] &&
+        q->ne[2] <= 4 * batch_lens->ne[0] && q->ne[3] == 1;
     const char * turbo_vec_env = getenv("GGML_CUDA_PAGED_TURBO_VEC");
     decode_turbo = (turbo_vec_env == nullptr || atoi(turbo_vec_env) != 0) &&
         (k_cache->type == GGML_TYPE_TURBO3_0 || k_cache->type == GGML_TYPE_TURBO4_0) &&
         (v_cache->type == GGML_TYPE_TURBO3_0 || v_cache->type == GGML_TYPE_TURBO4_0) &&
         head_dim == 256 && q->type == GGML_TYPE_F32 && ggml_is_contiguous(q) &&
-        ggml_cuda_is_aligned(q, sizeof(float2)) && q->ne[2] == batch_lens->ne[0] && q->ne[3] == 1;
+        ggml_cuda_is_aligned(q, sizeof(float2)) && q->ne[2] >= batch_lens->ne[0] &&
+        q->ne[2] <= 4 * batch_lens->ne[0] && q->ne[3] == 1;
     combined_turbo_write = fuse_turbo_wht && !separate_write_scheduled &&
         ((k_cache->type == GGML_TYPE_TURBO3_0 && v_cache->type == GGML_TYPE_TURBO3_0) ||
          (k_cache->type == GGML_TYPE_TURBO4_0 && v_cache->type == GGML_TYPE_TURBO4_0)) &&
@@ -1857,7 +1876,7 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
         const ggml_paged_attn_cuda_device_caps caps =
             paged_attn_query_cuda_device_caps(ctx.stream(), &capture_status);
         ggml_paged_attn_cuda_variant variant = ggml_paged_attn_select_cuda_variant(
-            context_bucket, head_dim, n_heads, n_heads_kv, batch_lens->ne[0], q->ne[2],
+            context_bucket, head_dim, n_heads, n_heads_kv, batch_lens->ne[0], batch_lens->ne[0],
             k_cache->type, v_cache->type, caps);
         const char * force_warps = getenv("GGML_CUDA_PAGED_Q8_WARPS");
         const char * force_partitions = getenv("GGML_CUDA_PAGED_Q8_PARTITIONS");
@@ -1923,12 +1942,13 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
 
 #define LAUNCH_Q8_LEGACY(N_WARPS, PACKED_QV, FUSE_CURRENT) \
         paged_attention_decode_q8_parallel_kernel<256, N_WARPS, PACKED_QV, FUSE_CURRENT> \
-            <<<dim3(n_heads, batch_lens->ne[0]), dim3(WARP_SIZE, N_WARPS), 0, ctx.stream()>>>( \
+            <<<dim3(n_heads, q->ne[2]), dim3(WARP_SIZE, N_WARPS), 0, ctx.stream()>>>( \
             (const float *) q->data, (const float *) k_new->data, (const float *) v_new->data, \
             (char *) k_cache->data, (char *) v_cache->data, (const int *) block_table->data, \
             (const int *) write_rows->data, (const int *) context_lens->data, (const int *) batch_offsets->data, \
+            (const int *) batch_lens->data, \
             k_cache->nb[1], k_cache->nb[2], k_cache->nb[3], v_cache->nb[1], v_cache->nb[2], v_cache->nb[3], \
-            n_heads, n_heads_kv, block_size, max_blocks, op_params_f[0], (float *) dst->data)
+            n_heads, n_heads_kv, batch_lens->ne[0], block_size, max_blocks, op_params_f[0], (float *) dst->data)
 
         if (variant.n_partitions == 1 && variant.n_q_heads == 1) {
 #define DISPATCH_Q8_LEGACY(PACKED_QV, FUSE_CURRENT) \
@@ -1953,18 +1973,19 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
             }
 #undef DISPATCH_Q8_LEGACY
         } else {
-            const size_t partial_count = (size_t) batch_lens->ne[0] * n_heads *
+            const size_t partial_count = (size_t) q->ne[2] * n_heads *
                 variant.n_partitions * (256 + 2);
             ggml_cuda_pool_alloc<float> partials(ctx.pool(), partial_count);
 #define LAUNCH_Q8_PARTIAL(N_WARPS, N_PARTITIONS, PACKED_QV, FUSE_CURRENT) \
             paged_attention_decode_q8_partial_kernel<256, N_WARPS, N_PARTITIONS, PACKED_QV, FUSE_CURRENT> \
-                <<<dim3(n_heads, batch_lens->ne[0], N_PARTITIONS), dim3(WARP_SIZE, N_WARPS), 0, ctx.stream()>>>( \
+                <<<dim3(n_heads, q->ne[2], N_PARTITIONS), dim3(WARP_SIZE, N_WARPS), 0, ctx.stream()>>>( \
                 (const float *) q->data, (const float *) k_new->data, (const float *) v_new->data, \
                 (char *) k_cache->data, (char *) v_cache->data, (const int *) block_table->data, \
                 (const int *) write_rows->data, (const int *) context_lens->data, \
-                (const int *) batch_offsets->data, k_cache->nb[1], k_cache->nb[2], k_cache->nb[3], \
-                v_cache->nb[1], v_cache->nb[2], v_cache->nb[3], n_heads, n_heads_kv, block_size, max_blocks, \
-                op_params_f[0], partials.ptr)
+                (const int *) batch_offsets->data, (const int *) batch_lens->data, \
+                k_cache->nb[1], k_cache->nb[2], k_cache->nb[3], \
+                v_cache->nb[1], v_cache->nb[2], v_cache->nb[3], n_heads, n_heads_kv, \
+                batch_lens->ne[0], block_size, max_blocks, op_params_f[0], partials.ptr)
 #define CONFIGURE_Q8_GROUPED(N_WARPS, N_PARTITIONS, N_Q_HEADS, USE_CP_ASYNC, FUSE_CURRENT) \
             do { \
                 const char * carveout_kib_env = getenv("GGML_CUDA_PAGED_Q8_CARVEOUT_KIB"); \
@@ -1986,18 +2007,19 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
             CONFIGURE_Q8_GROUPED(N_WARPS, N_PARTITIONS, N_Q_HEADS, USE_CP_ASYNC, FUSE_CURRENT); \
             paged_attention_decode_q8_grouped_partial_kernel< \
                 256, N_WARPS, N_PARTITIONS, N_Q_HEADS, 32, USE_CP_ASYNC, FUSE_CURRENT> \
-                <<<dim3(n_heads / N_Q_HEADS, batch_lens->ne[0], N_PARTITIONS), \
+                <<<dim3(n_heads / N_Q_HEADS, q->ne[2], N_PARTITIONS), \
                     dim3(WARP_SIZE, N_WARPS), 0, ctx.stream()>>>( \
                 (const float *) q->data, (const float *) k_new->data, (const float *) v_new->data, \
                 (char *) k_cache->data, (char *) v_cache->data, (const int *) block_table->data, \
                 (const int *) write_rows->data, (const int *) context_lens->data, \
-                (const int *) batch_offsets->data, k_cache->nb[1], k_cache->nb[2], k_cache->nb[3], \
-                v_cache->nb[1], v_cache->nb[2], v_cache->nb[3], n_heads, n_heads_kv, block_size, max_blocks, \
-                op_params_f[0], partials.ptr)
+                (const int *) batch_offsets->data, (const int *) batch_lens->data, \
+                k_cache->nb[1], k_cache->nb[2], k_cache->nb[3], \
+                v_cache->nb[1], v_cache->nb[2], v_cache->nb[3], n_heads, n_heads_kv, \
+                batch_lens->ne[0], block_size, max_blocks, op_params_f[0], partials.ptr)
 #define LAUNCH_Q8_REDUCE(N_PARTITIONS) \
             paged_attention_decode_reduce_kernel<256, N_PARTITIONS> \
-                <<<dim3(n_heads, batch_lens->ne[0]), dim3(256), 0, ctx.stream()>>>( \
-                partials.ptr, (const int *) batch_offsets->data, n_heads, (float *) dst->data)
+                <<<dim3(n_heads, q->ne[2]), dim3(256), 0, ctx.stream()>>>( \
+                partials.ptr, n_heads, (float *) dst->data)
 #define DISPATCH_Q8_PARTITIONS(LAUNCH_BODY, FUSE_CURRENT) \
             switch (variant.n_partitions) { \
                 case 1: { LAUNCH_BODY(1, FUSE_CURRENT); LAUNCH_Q8_REDUCE(1); } break; \
@@ -2092,7 +2114,8 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
              (k_cache->type == GGML_TYPE_TURBO4_0 && v_cache->type == GGML_TYPE_TURBO4_0)));
         const ggml_paged_attn_cuda_device_caps caps = paged_attn_query_cuda_device_caps(ctx.stream());
         const char * token_vec_env = getenv("GGML_CUDA_PAGED_TURBO_TOKEN_VEC");
-        const bool use_token_vec = (token_vec_env == nullptr || atoi(token_vec_env) != 0) &&
+        const bool use_token_vec = !token_sequential &&
+            (token_vec_env == nullptr || atoi(token_vec_env) != 0) &&
             ggml_paged_attn_cuda_turbo_token_vec_supported(
                 context_bucket, head_dim, n_heads, n_heads_kv, batch_lens->ne[0], q->ne[2],
                 k_cache->type, v_cache->type, caps);
@@ -2109,18 +2132,19 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
             }
             g_paged_turbo_token_vec_launch_count.fetch_add(1, std::memory_order_relaxed);
             ggml_cuda_pool_alloc<float> partials(ctx.pool());
-            partials.alloc((size_t) batch_lens->ne[0] * n_heads * n_partitions * (256 + 2));
+            partials.alloc((size_t) q->ne[2] * n_heads * n_partitions * (256 + 2));
 #define LAUNCH_TURBO_TOKEN_VEC(N_PARTITIONS, TYPE, FUSE_TURBO_WHT) \
             paged_attention_decode_turbo_token_vec_kernel<256, N_PARTITIONS, TYPE, TYPE, FUSE_TURBO_WHT> \
-                <<<dim3(n_heads, batch_lens->ne[0], N_PARTITIONS), dim3(WARP_SIZE, 4), 0, ctx.stream()>>>( \
+                <<<dim3(n_heads, q->ne[2], N_PARTITIONS), dim3(WARP_SIZE, 4), 0, ctx.stream()>>>( \
                 (const float *) q->data, (const char *) k_cache->data, (const char *) v_cache->data, \
                 (const int *) block_table->data, (const int *) context_lens->data, \
-                (const int *) batch_offsets->data, k_cache->nb[1], k_cache->nb[2], k_cache->nb[3], \
-                v_cache->nb[1], v_cache->nb[2], v_cache->nb[3], n_heads, n_heads_kv, block_size, max_blocks, \
-                op_params_f[0], partials.ptr); \
+                (const int *) batch_offsets->data, (const int *) batch_lens->data, \
+                k_cache->nb[1], k_cache->nb[2], k_cache->nb[3], \
+                v_cache->nb[1], v_cache->nb[2], v_cache->nb[3], n_heads, n_heads_kv, \
+                batch_lens->ne[0], block_size, max_blocks, op_params_f[0], partials.ptr); \
             paged_attention_decode_reduce_kernel<256, N_PARTITIONS, FUSE_TURBO_WHT> \
-                <<<dim3(n_heads, batch_lens->ne[0]), dim3(256), 0, ctx.stream()>>>( \
-                partials.ptr, (const int *) batch_offsets->data, n_heads, (float *) dst->data)
+                <<<dim3(n_heads, q->ne[2]), dim3(256), 0, ctx.stream()>>>( \
+                partials.ptr, n_heads, (float *) dst->data)
 #define DISPATCH_TURBO_TOKEN_PARTITIONS(TYPE, FUSE_TURBO_WHT) \
             switch (n_partitions) { \
                 case 1: LAUNCH_TURBO_TOKEN_VEC(1, TYPE, FUSE_TURBO_WHT); break; \
@@ -2148,7 +2172,7 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
         }
 
         const ggml_paged_attn_cuda_variant variant = ggml_paged_attn_select_cuda_variant(
-            context_bucket, head_dim, n_heads, n_heads_kv, batch_lens->ne[0], q->ne[2],
+            context_bucket, head_dim, n_heads, n_heads_kv, batch_lens->ne[0], batch_lens->ne[0],
             k_cache->type, v_cache->type, caps);
         int turbo_warps = variant.n_warps;
         const char * turbo_warps_env = getenv("GGML_CUDA_PAGED_TURBO_WARPS");
@@ -2173,12 +2197,13 @@ void ggml_cuda_op_paged_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst)
         }
 #define LAUNCH_TURBO_VEC(N_WARPS, TYPE_K, TYPE_V) \
         paged_attention_decode_turbo_vec_kernel<256, N_WARPS, TYPE_K, TYPE_V> \
-            <<<dim3(n_heads, batch_lens->ne[0]), dim3(WARP_SIZE, N_WARPS), 0, ctx.stream()>>>( \
+            <<<dim3(n_heads, q->ne[2]), dim3(WARP_SIZE, N_WARPS), 0, ctx.stream()>>>( \
             q_data, (const char *) k_cache->data, (const char *) v_cache->data, \
             (const int *) block_table->data, (const int *) context_lens->data, \
-            (const int *) batch_offsets->data, k_cache->nb[1], k_cache->nb[2], k_cache->nb[3], \
-            v_cache->nb[1], v_cache->nb[2], v_cache->nb[3], n_heads, n_heads_kv, block_size, max_blocks, \
-            op_params_f[0], out_data)
+            (const int *) batch_offsets->data, (const int *) batch_lens->data, \
+            k_cache->nb[1], k_cache->nb[2], k_cache->nb[3], \
+            v_cache->nb[1], v_cache->nb[2], v_cache->nb[3], n_heads, n_heads_kv, \
+            batch_lens->ne[0], block_size, max_blocks, op_params_f[0], out_data)
 #define DISPATCH_TURBO_TYPES(N_WARPS) \
         if (k_cache->type == GGML_TYPE_TURBO3_0) { \
             if (v_cache->type == GGML_TYPE_TURBO3_0) { \

@@ -2443,6 +2443,10 @@ extern "C" {
             struct ggml_tensor * a,
             enum ggml_prec       prec);
 
+    GGML_API void ggml_flash_attn_ext_set_token_sequential(
+            struct ggml_tensor * a,
+            bool                 token_sequential);
+
     GGML_API enum ggml_prec ggml_flash_attn_ext_get_prec(
             const struct ggml_tensor * a);
 
@@ -2965,7 +2969,8 @@ extern "C" {
                                                   int                   block_size,
                                                   int                   max_blocks,
                                                   int                   context_bucket,
-                                                  bool                  fuse_turbo_wht);
+                                                  bool                  fuse_turbo_wht,
+                                                  bool                  token_sequential);
 
 #ifdef  __cplusplus
 }

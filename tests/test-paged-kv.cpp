@@ -1365,7 +1365,7 @@ static std::vector<float> run_paged_attention_production_case(
     ggml_tensor * out = ggml_paged_attn(
         ctx, q, k_new, v_new, k_cache, v_cache, block_table, write_slots,
         context_lens, batch_offsets, batch_lens, 1.0f / std::sqrt((float) head_dim), block_size, max_blocks,
-        ggml_paged_attn_context_bucket(context_length), false);
+        ggml_paged_attn_context_bucket(context_length), false, false);
 
     ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
     EXPECT_TRUE(buffer != nullptr);
@@ -1738,7 +1738,7 @@ static paged_decode_result run_paged_attention_decode_case(
         ctx, q, k_new, v_new, k_cache, v_cache, block_table, write_rows,
         context_lens, batch_offsets, batch_lens, 1.0f / std::sqrt((float) head_dim), block_size, max_blocks,
         ggml_paged_attn_context_bucket(context_length),
-        cache_type == GGML_TYPE_TURBO3_0 || cache_type == GGML_TYPE_TURBO4_0);
+        cache_type == GGML_TYPE_TURBO3_0 || cache_type == GGML_TYPE_TURBO4_0, false);
 
     ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
     EXPECT_TRUE(buffer != nullptr);
@@ -1914,7 +1914,7 @@ static int run_paged_attention_decode_benchmark(int argc, char ** argv) {
         ctx, q, k_new, v_new, k_cache, v_cache, block_table, write_rows,
         context_lens, batch_offsets, batch_lens, 1.0f / std::sqrt((float) head_dim), block_size, max_blocks,
         ggml_paged_attn_context_bucket(context_length),
-        cache_type == GGML_TYPE_TURBO3_0 || cache_type == GGML_TYPE_TURBO4_0);
+        cache_type == GGML_TYPE_TURBO3_0 || cache_type == GGML_TYPE_TURBO4_0, false);
     ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
     EXPECT_TRUE(buffer != nullptr);
 

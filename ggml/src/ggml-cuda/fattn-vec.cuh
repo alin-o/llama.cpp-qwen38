@@ -51,8 +51,51 @@ __global__ __launch_bounds__(WARP_SIZE * nwarps, 1) void flash_attn_ext_decode_v
     GGML_UNUSED(n_sequences);
 }
 
+template<int D, int nwarps, ggml_type type_K, ggml_type type_V, bool use_logit_softcap>
+__global__ __launch_bounds__(WARP_SIZE * nwarps, 1) void flash_attn_ext_decode_vec_shared_batch(
+        const char * Q, const char * K, const char * V, const char * mask, const char * sinks, float * dst,
+        float scale, float max_bias, float m0, float m1, uint32_t n_head_log2, float logit_softcap,
+        int n_heads, int n_heads_kv, int n_sequences, int n_tokens,
+        int32_t nb01, int32_t nb02, int32_t nb03, int32_t nb11, int32_t nb12, int64_t nb13,
+        int32_t nb21, int32_t nb22, int64_t nb23, int32_t nb31, int32_t ne33, int64_t nb33,
+        int max_shared_tokens) {
+    __shared__ fattn_decode_vec_shared<D, nwarps> shared;
+    const int head = blockIdx.x;
+    const int sequence = blockIdx.y;
+    const int query = blockIdx.z;
+    const int gqa_ratio = n_heads / n_heads_kv;
+    const int kv_head = head / gqa_ratio;
+    const fattn_contiguous_kv_address kv_address = {
+        K + (size_t) sequence * nb13 + (size_t) kv_head * nb12,
+        V + (size_t) sequence * nb23 + (size_t) kv_head * nb22,
+        (size_t) nb11,
+        (size_t) nb21,
+    };
+    const half * mask_row = mask == nullptr ? nullptr :
+        (const half *) (mask + (size_t) (sequence % ne33) * nb33 + (size_t) query * nb31);
+    int visible_tokens = n_tokens;
+    if (gridDim.z > 1) {
+        while (mask_row != nullptr && visible_tokens > 0 && isinf(__half2float(mask_row[visible_tokens - 1]))) {
+            --visible_tokens;
+        }
+    }
+    if (visible_tokens > max_shared_tokens) {
+        return;
+    }
+    const float slope = get_alibi_slope(max_bias, head, n_head_log2, m0, m1);
+    const fattn_decode_contiguous_score<use_logit_softcap> score = { mask_row, slope, logit_softcap };
+    const float * sink = sinks == nullptr ? nullptr : (const float *) sinks + head;
+    const float * q = (const float *) (Q + (size_t) sequence * nb03 + (size_t) head * nb02 + (size_t) query * nb01);
+    float * out = dst + (((size_t) sequence * gridDim.z + query) * n_heads + head) * D;
+    fattn_decode_vec_core<D, nwarps, type_K, type_V>(
+        q, kv_address, score, sink, visible_tokens, scale, out, shared);
+
+    GGML_UNUSED(n_sequences);
+}
+
 template<int D, ggml_type type_K, ggml_type type_V, bool use_logit_softcap>
-static void launch_flash_attn_ext_decode_vec_shared(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+static void launch_flash_attn_ext_decode_vec_shared(
+        ggml_backend_cuda_context & ctx, ggml_tensor * dst, int max_shared_tokens) {
     constexpr int nwarps = 32;
     const ggml_tensor * Q = dst->src[0];
     const ggml_tensor * K = dst->src[1];
@@ -75,15 +118,28 @@ static void launch_flash_attn_ext_decode_vec_shared(ggml_backend_cuda_context & 
     const float m0 = powf(2.0f, -(max_bias) / n_head_log2);
     const float m1 = powf(2.0f, -(max_bias / 2.0f) / n_head_log2);
     ggml_cuda_fattn_shared_turbo_decode_launch_count_add();
-    flash_attn_ext_decode_vec_shared<D, nwarps, type_K, type_V, use_logit_softcap>
-        <<<dim3(Q->ne[2], Q->ne[3]), dim3(WARP_SIZE, nwarps), 0, ctx.stream()>>>(
-        (const char *) Q->data, (const char *) K->data, (const char *) V->data,
-        mask == nullptr ? nullptr : (const char *) mask->data,
-        sinks == nullptr ? nullptr : (const char *) sinks->data, (float *) dst->data,
-        scale, max_bias, m0, m1, n_head_log2, logit_softcap,
-        Q->ne[2], K->ne[2], Q->ne[3], K->ne[1], Q->nb[2], Q->nb[3],
-        K->nb[1], K->nb[2], K->nb[3], V->nb[1], V->nb[2], V->nb[3],
-        mask == nullptr ? 0 : mask->ne[3], mask == nullptr ? 0 : mask->nb[3]);
+    if (Q->ne[1] == 1) {
+        flash_attn_ext_decode_vec_shared<D, nwarps, type_K, type_V, use_logit_softcap>
+            <<<dim3(Q->ne[2], Q->ne[3]), dim3(WARP_SIZE, nwarps), 0, ctx.stream()>>>(
+            (const char *) Q->data, (const char *) K->data, (const char *) V->data,
+            mask == nullptr ? nullptr : (const char *) mask->data,
+            sinks == nullptr ? nullptr : (const char *) sinks->data, (float *) dst->data,
+            scale, max_bias, m0, m1, n_head_log2, logit_softcap,
+            Q->ne[2], K->ne[2], Q->ne[3], K->ne[1], Q->nb[2], Q->nb[3],
+            K->nb[1], K->nb[2], K->nb[3], V->nb[1], V->nb[2], V->nb[3],
+            mask == nullptr ? 0 : mask->ne[3], mask == nullptr ? 0 : mask->nb[3]);
+    } else {
+        flash_attn_ext_decode_vec_shared_batch<D, nwarps, type_K, type_V, use_logit_softcap>
+            <<<dim3(Q->ne[2], Q->ne[3], Q->ne[1]), dim3(WARP_SIZE, nwarps), 0, ctx.stream()>>>(
+            (const char *) Q->data, (const char *) K->data, (const char *) V->data,
+            mask == nullptr ? nullptr : (const char *) mask->data,
+            sinks == nullptr ? nullptr : (const char *) sinks->data, (float *) dst->data,
+            scale, max_bias, m0, m1, n_head_log2, logit_softcap,
+            Q->ne[2], K->ne[2], Q->ne[3], K->ne[1], Q->nb[1], Q->nb[2], Q->nb[3],
+            K->nb[1], K->nb[2], K->nb[3], V->nb[1], V->nb[2], V->nb[3],
+            mask == nullptr ? 0 : mask->nb[1], mask == nullptr ? 0 : mask->ne[3],
+            mask == nullptr ? 0 : mask->nb[3], max_shared_tokens);
+    }
     CUDA_CHECK(cudaGetLastError());
 }
 #endif
@@ -320,13 +376,22 @@ static __global__ void flash_attn_ext_vec(
 #endif // V_DOT2_F32_F16_AVAILABLE
     }
 
-    const int k_VKQ_max = KV_max ? KV_max[sequence*gridDim.x + blockIdx.x] : ne11;
+    int k_VKQ_max = KV_max ? KV_max[sequence*gridDim.x + blockIdx.x] : ne11;
+    if (ncols == 1 && int(ne01.z) > 1 && mask) {
+        while (k_VKQ_max > 0 && isinf(__half2float(maskh[k_VKQ_max - 1]))) {
+            --k_VKQ_max;
+        }
+    }
+    // Match the reduction geometry of a single causal query when verification rows cross a KV tile boundary.
+    // Blocks beyond this query's visible range contribute a neutral partial result to the shared combine pass.
+    const int parallel_blocks = ncols == 1 && int(ne01.z) > 1 ?
+        min((int) gridDim.y, max(1, (k_VKQ_max + D - 1) / D)) : gridDim.y;
     K     += blockIdx.y*nthreads * nb11;
     V     += blockIdx.y*nthreads * nb21;
     maskh += blockIdx.y*nthreads;
-    for (int k_VKQ_0 = blockIdx.y*nthreads; k_VKQ_0 < k_VKQ_max; k_VKQ_0 += gridDim.y*nthreads,
+    for (int k_VKQ_0 = blockIdx.y*nthreads; blockIdx.y < parallel_blocks && k_VKQ_0 < k_VKQ_max; k_VKQ_0 += parallel_blocks*nthreads,
              // Increment pointers after each loop:
-             K += gridDim.y*nthreads*nb11, V += gridDim.y*nthreads*nb21, maskh += gridDim.y*nthreads) {
+             K += parallel_blocks*nthreads*nb11, V += parallel_blocks*nthreads*nb21, maskh += parallel_blocks*nthreads) {
 
         const fattn_contiguous_kv_address kv_address = { K, V, (size_t) nb11, (size_t) nb21 };
 
@@ -623,6 +688,7 @@ template <int D, ggml_type type_K, ggml_type type_V>
 void ggml_cuda_flash_attn_ext_vec_case(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * KQV = dst;
     const ggml_tensor * Q   = dst->src[0];
+    const bool token_sequential = ggml_get_op_params_i32(KQV, 4) != 0;
 
     float logit_softcap;
     memcpy(&logit_softcap, (const float *) KQV->op_params + 2, sizeof(float));
@@ -632,14 +698,27 @@ void ggml_cuda_flash_attn_ext_vec_case(ggml_backend_cuda_context & ctx, ggml_ten
             (type_K == GGML_TYPE_TURBO3_0 || type_K == GGML_TYPE_TURBO4_0) &&
             (type_V == GGML_TYPE_TURBO3_0 || type_V == GGML_TYPE_TURBO4_0)) {
         const char * shared_decode_env = getenv("GGML_CUDA_FATTN_TURBO_SHARED");
-        // The shared 32-warp geometry wins at 256 tokens; mature vec wins at longer contexts.
+        const bool force_shared_decode = shared_decode_env != nullptr && atoi(shared_decode_env) != 0;
         const bool use_shared_decode = shared_decode_env != nullptr ?
-            atoi(shared_decode_env) != 0 : dst->src[1]->ne[1] <= 256;
+            force_shared_decode : dst->src[1]->ne[1] <= 256;
         if (Q->ne[1] == 1 && use_shared_decode) {
             if (logit_softcap == 0.0f) {
-                launch_flash_attn_ext_decode_vec_shared<D, type_K, type_V, false>(ctx, dst);
+                launch_flash_attn_ext_decode_vec_shared<D, type_K, type_V, false>(ctx, dst, INT_MAX);
             } else {
-                launch_flash_attn_ext_decode_vec_shared<D, type_K, type_V, true>(ctx, dst);
+                launch_flash_attn_ext_decode_vec_shared<D, type_K, type_V, true>(ctx, dst, INT_MAX);
+            }
+            return;
+        }
+
+        const bool use_shared_batch = shared_decode_env == nullptr || force_shared_decode;
+        if (token_sequential && Q->ne[1] > 1 && Q->ne[1] <= 4 && use_shared_batch &&
+                (force_shared_decode || dst->src[1]->ne[1] <= 256)) {
+            if (logit_softcap == 0.0f) {
+                launch_flash_attn_ext_decode_vec_shared<D, type_K, type_V, false>(
+                    ctx, dst, force_shared_decode ? INT_MAX : 256);
+            } else {
+                launch_flash_attn_ext_decode_vec_shared<D, type_K, type_V, true>(
+                    ctx, dst, force_shared_decode ? INT_MAX : 256);
             }
             return;
         }
@@ -658,7 +737,19 @@ void ggml_cuda_flash_attn_ext_vec_case(ggml_backend_cuda_context & ctx, ggml_ten
         return;
     }
 
-    constexpr int cols_per_block = 2;
+    if (!token_sequential || Q->ne[1] > 4) {
+        constexpr int cols_per_block = 2;
+        if (logit_softcap == 0.0f) {
+            constexpr bool use_logit_softcap = false;
+            ggml_cuda_flash_attn_ext_vec_case_impl<D, cols_per_block, type_K, type_V, use_logit_softcap>(ctx, dst);
+        } else {
+            constexpr bool use_logit_softcap = true;
+            ggml_cuda_flash_attn_ext_vec_case_impl<D, cols_per_block, type_K, type_V, use_logit_softcap>(ctx, dst);
+        }
+        return;
+    }
+
+    constexpr int cols_per_block = 1;
     if (logit_softcap == 0.0f) {
         constexpr bool use_logit_softcap = false;
         ggml_cuda_flash_attn_ext_vec_case_impl<D, cols_per_block, type_K, type_V, use_logit_softcap>(ctx, dst);
@@ -666,6 +757,25 @@ void ggml_cuda_flash_attn_ext_vec_case(ggml_backend_cuda_context & ctx, ggml_ten
         constexpr bool use_logit_softcap = true;
         ggml_cuda_flash_attn_ext_vec_case_impl<D, cols_per_block, type_K, type_V, use_logit_softcap>(ctx, dst);
     }
+
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+    if constexpr (D == 256 &&
+            (type_K == GGML_TYPE_TURBO3_0 || type_K == GGML_TYPE_TURBO4_0) &&
+            (type_V == GGML_TYPE_TURBO3_0 || type_V == GGML_TYPE_TURBO4_0)) {
+        const char * shared_decode_env = getenv("GGML_CUDA_FATTN_TURBO_SHARED");
+        const bool force_shared_decode = shared_decode_env != nullptr && atoi(shared_decode_env) != 0;
+        const bool use_shared_decode = shared_decode_env == nullptr || force_shared_decode;
+        if (use_shared_decode) {
+            if (logit_softcap == 0.0f) {
+                launch_flash_attn_ext_decode_vec_shared<D, type_K, type_V, false>(
+                    ctx, dst, force_shared_decode ? INT_MAX : 256);
+            } else {
+                launch_flash_attn_ext_decode_vec_shared<D, type_K, type_V, true>(
+                    ctx, dst, force_shared_decode ? INT_MAX : 256);
+            }
+        }
+    }
+#endif
 }
 
 #define DECL_FATTN_VEC_CASE(D, type_K, type_V)                              \

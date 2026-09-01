@@ -507,7 +507,7 @@ struct server_slot {
     }
 
     // add sampled token of this slot to the batch, optionally add the speculative draft tokens if any
-    void handle_last_sampled_token(server_batch & batch, bool verify_one) {
+    void handle_last_sampled_token(server_batch & batch) {
         bool add_ok = true;
         if (spec_draft.empty()) {
             i_batch = batch.size();
@@ -517,10 +517,6 @@ struct server_slot {
             } else {
                 add_ok &= batch.add(id, sampled, prompt.tokens.pos_next(), true, false);
             }
-        } else if (verify_one) {
-            GGML_ASSERT(spec_i_batch.empty());
-            spec_i_batch.push_back(batch.size());
-            add_ok &= batch.add(id, sampled, prompt.tokens.pos_next(), true, false);
         } else {
             GGML_ASSERT(spec_i_batch.empty());
             spec_i_batch.push_back(batch.size());
@@ -537,9 +533,7 @@ struct server_slot {
 
         GGML_ASSERT(add_ok && "batch must be large enough to hold the sampled and draft tokens");
         prompt.tokens.push_back(sampled);
-        if (!verify_one) {
-            prompt.tokens.insert(spec_draft);
-        }
+        prompt.tokens.insert(spec_draft);
     }
 
     void release() {
@@ -903,10 +897,6 @@ private:
                     return;
                 }
 
-                if (spec_verify_one && !slot.spec_draft.empty()) {
-                    return;
-                }
-
                 slot.spec_ckpt.update_pos(
                         slot.prompt.n_tokens(),
                         llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id),
@@ -937,22 +927,20 @@ private:
                 }
             }
 
-            if (!spec_verify_one) {
-                spec_n = common_speculative_n_max(&params_base.speculative);
-                bool has_generating = false;
-                for (server_slot & slot : slots) {
-                    if (slot.state == SLOT_STATE_GENERATING) {
-                        has_generating = true;
-                        spec_n = std::min(spec_n, (int32_t) slot.spec_draft.size());
-                    }
+            spec_n = common_speculative_n_max(&params_base.speculative);
+            bool has_generating = false;
+            for (server_slot & slot : slots) {
+                if (slot.state == SLOT_STATE_GENERATING) {
+                    has_generating = true;
+                    spec_n = std::min(spec_n, (int32_t) slot.spec_draft.size());
                 }
-                if (!has_generating) {
-                    spec_n = 0;
-                }
-                for (server_slot & slot : slots) {
-                    if (slot.state == SLOT_STATE_GENERATING && (int32_t) slot.spec_draft.size() > spec_n) {
-                        slot.spec_draft.resize(spec_n);
-                    }
+            }
+            if (!has_generating) {
+                spec_n = 0;
+            }
+            for (server_slot & slot : slots) {
+                if (slot.state == SLOT_STATE_GENERATING && (int32_t) slot.spec_draft.size() > spec_n) {
+                    slot.spec_draft.resize(spec_n);
                 }
             }
 
@@ -1065,35 +1053,7 @@ private:
                 }
             }
 
-            if (!is_prefill && !slot.spec_draft.empty() && spec_verify_one) {
-                GGML_ASSERT(slot.spec_i_batch.size() == 1);
-                const llama_token id = common_sampler_sample(slot.smpl.get(), ctx_tgt, slot.spec_i_batch.front());
-                common_sampler_accept(slot.smpl.get(), id, true);
-                slot.spec_i_batch.clear();
-
-                const bool accepted = id == slot.spec_draft.front();
-                if (accepted) {
-                    slot.spec_draft.erase(slot.spec_draft.begin());
-                    slot.stats.n_draft_accepted++;
-                } else {
-                    slot.spec_draft.clear();
-                }
-
-                common_speculative_accept(spec.get(), slot.id, 0);
-                slot.stats.n_draft_verif_steps++;
-                slot.prompt.tokens.push_back(paged_batch.token[offset]);
-                sampled_tokens[i] = id;
-                accepted_counts[i] = 1;
-
-                completion_token_output result;
-                result.tok = id;
-                result.text_to_send = common_token_to_piece(ctx_tgt, id, params_base.special);
-                result.prob = 1.0f;
-                slot.stats.n_gen++;
-                if (!process_token(result, slot)) {
-                    stop_flags[i] = 1;
-                }
-            } else if (!is_prefill && !slot.spec_draft.empty()) {
+            if (!is_prefill && !slot.spec_draft.empty()) {
                 const llama_tokens draft_before = slot.spec_draft;
                 const llama_token sampler_before = common_sampler_last(slot.smpl.get());
                 auto accepted = common_sampler_sample_and_accept_n(
@@ -1203,8 +1163,6 @@ private:
     common_context_seq_rm_type ctx_dft_seq_rm_type = COMMON_CONTEXT_SEQ_RM_TYPE_NO;
 
     common_speculative_ptr spec;
-
-    bool spec_verify_one{};
 
     bool add_bos_token = true;
 
@@ -1556,10 +1514,6 @@ private:
                 SRV_ERR("failed to initialize speculative decoding context: %s\n", e.what());
             }
         }
-
-        spec_verify_one = spec && spec_mtp &&
-                (llama_model_is_recurrent(llama_get_model(ctx_tgt)) ||
-                 llama_model_is_hybrid(llama_get_model(ctx_tgt)));
 
         if (ctx_dft) {
             ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft);
@@ -3361,7 +3315,7 @@ private:
 
         // update the batch with the sampled/drafted tokens
         iterate(generating, [&](server_slot & slot) {
-            slot.handle_last_sampled_token(batch, spec_verify_one);
+            slot.handle_last_sampled_token(batch);
         });
 
         // process in chunks of params.n_batch
@@ -4166,41 +4120,6 @@ private:
             const size_t n_draft = slot.spec_draft.size();
 
             GGML_ASSERT(n_draft > 0);
-
-            if (spec_verify_one) {
-                GGML_ASSERT(slot.spec_i_batch.size() == 1);
-                const int token_idx(slot.spec_i_batch.at(0) - off);
-                const llama_token id = common_sampler_sample(slot.smpl.get(), slot.ctx_tgt, token_idx);
-                common_sampler_accept(slot.smpl.get(), id, true);
-                slot.spec_i_batch.clear();
-
-                const bool accepted = id == slot.spec_draft.front();
-                if (accepted) {
-                    slot.spec_draft.erase(slot.spec_draft.begin());
-                    slot.stats.n_draft_accepted++;
-                } else {
-                    slot.spec_draft.clear();
-                }
-
-                common_speculative_accept(spec.get(), slot.id, 0);
-                slot.stats.n_draft_verif_steps++;
-                slot.stats.update_gen_last();
-
-                completion_token_output result;
-                result.tok = id;
-                result.text_to_send = common_token_to_piece(slot.ctx_tgt, id, accept_special_token(slot, id));
-                result.prob = 1.0f;
-                slot.stats.n_gen++;
-                if (!process_token(result, slot)) {
-                    slot.print_timings();
-                    send_final_response(slot);
-                    slot.release();
-                    return;
-                }
-
-                slot.print_timings_tg();
-                return;
-            }
 
             {
                 std::vector<int> spec_i_batch = slot.spec_i_batch;

@@ -116,9 +116,16 @@ def test_paged_mtp_matches_target_greedy(monkeypatch):
     configure(model_draft)
     server.start(timeout_seconds=180)
     responses = generate_all()
+    n_draft_steps = 0
+    n_draft_accepted = 0
     for res, tokens_target in zip(responses, expected):
         assert res.body["timings"]["draft_n"] > 0
         assert res.body["tokens"] == tokens_target
+        n_draft_steps += res.body["timings"]["draft_n_steps"]
+        n_draft_accepted += res.body["timings"]["draft_n_accepted"]
+
+    assert n_draft_steps <= len(prompts) * request["n_predict"] * 0.60
+    assert n_draft_accepted > n_draft_steps
 
 
 def test_different_draft_min_draft_max():

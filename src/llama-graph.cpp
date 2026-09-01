@@ -2718,10 +2718,12 @@ ggml_tensor * llm_graph_context::build_attn_mha_paged(
     ggml_tensor * v_flat = ggml_reshape_2d(ctx0, v_cache, v_cache->ne[0], n_rows_v);
     ggml_tensor * k_rows = ggml_reshape_2d(ctx0, k_cur, k_cur->ne[0], k_cur->ne[1] * k_cur->ne[2]);
     ggml_tensor * v_rows = ggml_reshape_2d(ctx0, v_cur, v_cur->ne[0], v_cur->ne[1] * v_cur->ne[2]);
+    const bool token_sequential = llm_arch_is_recurrent(arch) || llm_arch_is_hybrid(arch);
 #if defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
     const bool fuse_turbo_wht = false;
 #else
-    const bool fuse_turbo_wht = ggml_paged_attn_turbo_fused_wht_supported(
+    const bool fuse_turbo_wht = !token_sequential &&
+        ggml_paged_attn_turbo_fused_wht_supported(
         context_bucket, q->ne[0], q->ne[1], k_cur->ne[1], batch_lens->ne[0], q->ne[2],
         k_cache->type, v_cache->type);
 #endif
@@ -2753,7 +2755,8 @@ ggml_tensor * llm_graph_context::build_attn_mha_paged(
     ggml_tensor * cur = ggml_paged_attn(ctx0,
                                         q, k_cur, v_cur, k_cache, v_cache,
                                         block_table, write_rows, context_lens, batch_offsets, batch_lens,
-                                        kq_scale, block_size, max_blocks, context_bucket, fuse_turbo_wht);
+                                        kq_scale, block_size, max_blocks, context_bucket,
+                                        fuse_turbo_wht, token_sequential);
     if (!fuse_turbo_wht && (v_cache->type == GGML_TYPE_TURBO3_0 || v_cache->type == GGML_TYPE_TURBO4_0)) {
         cur = ggml_turbo_wht(ctx0, cur, 1);
     }
@@ -2803,6 +2806,8 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         cur = ggml_flash_attn_ext(ctx0, q, k, v, kq_mask, kq_scale, hparams.f_max_alibi_bias,
                                   hparams.attn_soft_cap ? hparams.f_attn_logit_softcapping : 0.0f);
+        ggml_flash_attn_ext_set_token_sequential(cur, cparams.n_rs_seq > 0 &&
+            n_tokens > 1 && n_tokens <= (int64_t) cparams.n_rs_seq + 1 && n_outputs == n_tokens);
         res->add_fused_node({LLM_FUSED_OP_FLASH_ATTN, cur, il});
 
         ggml_flash_attn_ext_add_sinks(cur, sinks);

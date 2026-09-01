@@ -395,6 +395,7 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     const ggml_tensor * K     = dst->src[1];
     const ggml_tensor * V     = dst->src[2];
     const ggml_tensor * mask  = dst->src[3];
+    const bool token_sequential = ggml_get_op_params_i32(KQV, 4) != 0;
 
     const int gqa_ratio = Q->ne[2] / K->ne[2];
     GGML_ASSERT(Q->ne[2] % K->ne[2] == 0);
@@ -495,7 +496,7 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
                 }
             } else {
                 if (cc >= GGML_CUDA_CC_ADA_LOVELACE) {
-                    if (Q->ne[1] <= 2) {
+                    if (Q->ne[1] <= 2 || (token_sequential && Q->ne[1] <= 4)) {
                         return BEST_FATTN_KERNEL_VEC;
                     }
                 } else {
