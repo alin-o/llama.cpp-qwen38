@@ -1226,9 +1226,11 @@ __global__ __launch_bounds__(128, 1) void paged_attention_decode_turbo_token_vec
 
     constexpr int N_WARPS = 4;
     constexpr int TILE_TOKENS = N_WARPS * WARP_SIZE;
-    constexpr vec_dot_KQ_t vec_dot_KQ = get_vec_dot_KQ<TYPE_K, HEAD_DIM, WARP_SIZE>();
+    constexpr int KQ_THREADS = 8;
+    constexpr vec_dot_KQ_t vec_dot_KQ = get_vec_dot_KQ<TYPE_K, HEAD_DIM, KQ_THREADS>();
     constexpr dequantize_V_t dequantize_V = get_dequantize_V<TYPE_V, float, 4>();
-    constexpr int Q_FRAGMENTS = HEAD_DIM / (2 * WARP_SIZE);
+    constexpr int Q_COPY_PAIRS = ggml_cuda_get_max_cpy_bytes() / sizeof(float);
+    constexpr int Q_FRAGMENTS = HEAD_DIM / (2 * KQ_THREADS);
     constexpr int V_GROUPS = HEAD_DIM / (4 * WARP_SIZE);
 
     __shared__ fattn_kv_rows row_cache[TILE_TOKENS];
@@ -1241,6 +1243,7 @@ __global__ __launch_bounds__(128, 1) void paged_attention_decode_turbo_token_vec
     const int partition = blockIdx.z;
     const int warp = threadIdx.y;
     const int lane = threadIdx.x;
+    const int kq_lane = lane & (KQ_THREADS - 1);
     const int tid = warp * WARP_SIZE + lane;
     const int kv_head = ggml_paged_attn_kv_head(head, n_heads, n_heads_kv);
     const int limit = context_lens[seq];
@@ -1262,7 +1265,9 @@ __global__ __launch_bounds__(128, 1) void paged_attention_decode_turbo_token_vec
     float acc[HEAD_DIM / WARP_SIZE] = {};
 #pragma unroll
     for (int i = 0; i < Q_FRAGMENTS; ++i) {
-        q_reg[i] = q_row[lane * Q_FRAGMENTS + i];
+        const int chunk = i / Q_COPY_PAIRS;
+        const int offset = i % Q_COPY_PAIRS;
+        q_reg[i] = q_row[(chunk * KQ_THREADS + kq_lane) * Q_COPY_PAIRS + offset];
         q_reg[i].x *= scale;
         q_reg[i].y *= scale;
     }
@@ -1273,22 +1278,23 @@ __global__ __launch_bounds__(128, 1) void paged_attention_decode_turbo_token_vec
         const int token = tile + tid;
         float tile_max = -FLT_MAX;
 #pragma unroll
-        for (int i = 0; i < WARP_SIZE; ++i) {
-            const int row = warp * WARP_SIZE + i;
+        for (int i = 0; i < KQ_THREADS; ++i) {
+            const int row = warp * WARP_SIZE + (lane & ~(KQ_THREADS - 1)) + i;
             const bool valid = tile + row < limit;
-            fattn_kv_rows rows = { nullptr, nullptr };
-            float qk = -FLT_MAX / 2.0f;
-            if (valid) {
-                rows = kv_address.rows(tile + row);
-                qk = vec_dot_KQ(rows.k, q_reg, nullptr, nullptr);
-                qk = warp_reduce_sum(qk);
+            fattn_kv_rows rows = kv_address.rows<KQ_THREADS>(valid ? tile + row : tile);
+            float qk = vec_dot_KQ(rows.k, q_reg, nullptr, nullptr);
+            qk = warp_reduce_sum<KQ_THREADS>(qk);
+            if (!valid) {
+                rows = { nullptr, nullptr };
+                qk = -FLT_MAX / 2.0f;
             }
             tile_max = fmaxf(tile_max, qk);
-            if (lane == i) {
+            if (kq_lane == i) {
                 row_cache[row] = rows;
                 weights[row] = qk;
             }
         }
+        tile_max = warp_reduce_max(tile_max);
 
         const float new_max = fmaxf(qk_max, tile_max);
         const float old_scale = fattn_softmax_rescale(qk_max, new_max);

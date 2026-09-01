@@ -1262,6 +1262,22 @@ struct ggml_cuda_graph {
 #endif
 };
 
+struct ggml_cuda_graph_key {
+    const void * first_node_ptr;
+    uint64_t topology_hash;
+
+    bool operator==(const ggml_cuda_graph_key & other) const {
+        return first_node_ptr == other.first_node_ptr && topology_hash == other.topology_hash;
+    }
+};
+
+struct ggml_cuda_graph_key_hash {
+    size_t operator()(const ggml_cuda_graph_key & key) const {
+        const size_t pointer_hash = std::hash<const void *>{}(key.first_node_ptr);
+        return pointer_hash ^ (key.topology_hash + 0x9e3779b97f4a7c15ULL + (pointer_hash << 6) + (pointer_hash >> 2));
+    }
+};
+
 struct ggml_cuda_concurrent_event {
     std::vector<cudaEvent_t> join_events;
     cudaEvent_t              fork_event = nullptr;
@@ -1426,13 +1442,12 @@ struct ggml_backend_cuda_context {
     int curr_stream_no = 0;
 
 #ifdef USE_CUDA_GRAPH
-    // Map from first_node_ptr to cuda_graph - allows multiple graphs per context
-    // when the computation is split across CPU/GPU (e.g., with --n-cpu-moe)
-    std::unordered_map<const void *, std::unique_ptr<ggml_cuda_graph>> cuda_graphs;
+    // The arena can reuse a first-node address for graphs with different shapes.
+    std::unordered_map<ggml_cuda_graph_key, std::unique_ptr<ggml_cuda_graph>, ggml_cuda_graph_key_hash> cuda_graphs;
 
     int64_t last_graph_eviction_sweep = 0;
 
-    ggml_cuda_graph * cuda_graph(const void * first_node_ptr) {
+    ggml_cuda_graph * cuda_graph(const ggml_cuda_graph_key & key) {
         const int64_t time_now = ggml_time_us();
 
         // sweep every 5s, evicting cuda graphs unused for >=10s
@@ -1447,9 +1462,9 @@ struct ggml_backend_cuda_context {
             }
         }
 
-        auto it = cuda_graphs.find(first_node_ptr);
+        auto it = cuda_graphs.find(key);
         if (it == cuda_graphs.end()) {
-            it = cuda_graphs.emplace(first_node_ptr, std::make_unique<ggml_cuda_graph>()).first;
+            it = cuda_graphs.emplace(key, std::make_unique<ggml_cuda_graph>()).first;
         }
         it->second->last_used_time = time_now;
         return it->second.get();

@@ -339,6 +339,7 @@ int main(int argc, char ** argv) {
     for (auto & [rid, s] : samplers) {
         common_sampler_free(s);
     }
+    llama_batch_free(batch);
     llama_paged_scheduler_free(scheduler);
     llama_memory_clear(llama_get_memory(ctx), true);
     } while (++repetition < repetitions);

@@ -74,15 +74,18 @@ struct fattn_paged_kv_address {
     size_t v_stride_block;
     int block_size;
 
+    template <int GROUP_SIZE = WARP_SIZE>
     __device__ __forceinline__ fattn_kv_rows rows(int token) const {
+        static_assert(GROUP_SIZE > 0 && GROUP_SIZE <= WARP_SIZE && WARP_SIZE % GROUP_SIZE == 0,
+            "paged K/V address group size must divide the warp size");
         int physical_block = 0;
         int token_in_block = 0;
-        if ((threadIdx.x & (WARP_SIZE - 1)) == 0) {
+        if ((threadIdx.x & (GROUP_SIZE - 1)) == 0) {
             physical_block = block_table[token / block_size];
             token_in_block = token % block_size;
         }
-        physical_block = __shfl_sync(0xffffffffu, physical_block, 0);
-        token_in_block = __shfl_sync(0xffffffffu, token_in_block, 0);
+        physical_block = __shfl_sync(0xffffffffu, physical_block, 0, GROUP_SIZE);
+        token_in_block = __shfl_sync(0xffffffffu, token_in_block, 0, GROUP_SIZE);
         return {
             k + (size_t) physical_block * k_stride_block + (size_t) token_in_block * k_stride_token,
             v + (size_t) physical_block * v_stride_block + (size_t) token_in_block * v_stride_token,

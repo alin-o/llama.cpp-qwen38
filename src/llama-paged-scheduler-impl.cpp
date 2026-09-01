@@ -445,11 +445,6 @@ void llama_paged_scheduler_impl::clear_batch(llama_batch & batch) {
     delete[] curr_info.batch_lens;
     curr_info = {};  // reset to defaults
 
-    if (batch.n_tokens == 0) {
-        return;
-    }
-
-    llama_batch_free(batch);
     batch.n_tokens = 0;
 }
 
@@ -475,8 +470,10 @@ void llama_paged_scheduler_impl::populate_batch_from(const llama_sequence_group_
 
     GGML_ASSERT(total_tokens <= (int32_t) n_batch && "total_tokens exceeds n_batch - token budget logic is broken");
 
-    // Initialize the batch (assumed it was cleared before)
-    batch = llama_batch_init(total_tokens, 0, 1);
+    // Allocate for the scheduler's full token budget once so graph input pointers stay stable across steps.
+    if (batch.token == nullptr) {
+        batch = llama_batch_init(n_batch, 0, 1);
+    }
     GGML_ASSERT(batch.token != nullptr && "llama_batch_init failed to allocate tokens.");
 
     batch.n_tokens = total_tokens;

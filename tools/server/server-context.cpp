@@ -1252,6 +1252,8 @@ private:
         ctx_dft   = nullptr;
         model_dft = nullptr;
 
+        llama_batch_free(paged_batch);
+        paged_batch = {};
         paged_scheduler.reset();
         llama_init.reset();
 

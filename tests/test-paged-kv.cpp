@@ -1091,12 +1091,14 @@ TEST(test_scheduler_admits_full_token_budget_prefill) {
     EXPECT_TRUE(info->n_blocks_per_seq == 5);
     EXPECT_TRUE(info->write_slots[15] == info->write_slots[0] + 15);
     EXPECT_TRUE(info->write_slots[16] == info->write_slots[0] + 16);
+    const llama_token * token_storage = batch.token;
 
     const int8_t continue_flag[] = { 0 };
     fixture.sched->update(batch, { 1 }, continue_flag);
     EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
     EXPECT_TRUE(batch.n_tokens == 1);
     EXPECT_TRUE(batch.pos[0] == 64);
+    EXPECT_TRUE(batch.token == token_storage);
     llama_batch_free(batch);
 }
 
