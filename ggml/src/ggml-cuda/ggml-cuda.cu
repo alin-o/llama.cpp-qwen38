@@ -2602,8 +2602,18 @@ static ggml_cuda_graph_key ggml_cuda_graph_get_key(ggml_cgraph * cgraph) {
             hash_value(node->ne[dim]);
             hash_value(node->nb[dim]);
         }
+        for (int src = 0; src < GGML_MAX_SRC; ++src) {
+            const ggml_tensor * source = node->src[src];
+            if (source != nullptr) {
+                hash_value(source->type);
+                for (int dim = 0; dim < GGML_MAX_DIMS; ++dim) {
+                    hash_value(source->ne[dim]);
+                    hash_value(source->nb[dim]);
+                }
+            }
+        }
     }
-    const uintptr_t graph_identity = cgraph->uid != 0 ? cgraph->uid : reinterpret_cast<uintptr_t>(cgraph->nodes[0]);
+    const uint64_t graph_identity = reinterpret_cast<uintptr_t>(cgraph->nodes[0]->data);
     return { graph_identity, topology_hash };
 }
 

@@ -2718,9 +2718,13 @@ ggml_tensor * llm_graph_context::build_attn_mha_paged(
     ggml_tensor * v_flat = ggml_reshape_2d(ctx0, v_cache, v_cache->ne[0], n_rows_v);
     ggml_tensor * k_rows = ggml_reshape_2d(ctx0, k_cur, k_cur->ne[0], k_cur->ne[1] * k_cur->ne[2]);
     ggml_tensor * v_rows = ggml_reshape_2d(ctx0, v_cur, v_cur->ne[0], v_cur->ne[1] * v_cur->ne[2]);
+#if defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
+    const bool fuse_turbo_wht = false;
+#else
     const bool fuse_turbo_wht = ggml_paged_attn_turbo_fused_wht_supported(
         context_bucket, q->ne[0], q->ne[1], k_cur->ne[1], batch_lens->ne[0], q->ne[2],
         k_cache->type, v_cache->type);
+#endif
     const char * combined_write_env = getenv("LLAMA_PAGED_Q8_COMBINED_WRITE");
     const bool combined_q8_write = (combined_write_env == nullptr || strcmp(combined_write_env, "0") != 0) &&
         k_cache->type == GGML_TYPE_Q8_0 && v_cache->type == GGML_TYPE_Q8_0 &&
