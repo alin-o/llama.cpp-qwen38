@@ -2707,6 +2707,19 @@ ggml_tensor * llm_graph_context::build_attn_mha_paged(
                  int   max_blocks,
                  int   context_bucket) const {
 
+    if (getenv("LLAMA_PAGED_LAYOUT_DIAG") != nullptr) {
+        fprintf(stderr,
+                "paged layout: q ne=%lld,%lld,%lld nb=%zu,%zu,%zu cont=%d; "
+                "k ne=%lld,%lld,%lld nb=%zu,%zu,%zu cont=%d; "
+                "v ne=%lld,%lld,%lld nb=%zu,%zu,%zu cont=%d\n",
+                (long long) q->ne[0], (long long) q->ne[1], (long long) q->ne[2], q->nb[0], q->nb[1], q->nb[2],
+                ggml_is_contiguous(q),
+                (long long) k_cur->ne[0], (long long) k_cur->ne[1], (long long) k_cur->ne[2],
+                k_cur->nb[0], k_cur->nb[1], k_cur->nb[2], ggml_is_contiguous(k_cur),
+                (long long) v_cur->ne[0], (long long) v_cur->ne[1], (long long) v_cur->ne[2],
+                v_cur->nb[0], v_cur->nb[1], v_cur->nb[2], ggml_is_contiguous(v_cur));
+    }
+
     // Paged attention reads dense current K/V tensors. Store them with the
     // CUDA set_rows quantizers before the paged read.
     k_cur = ggml_cont(ctx0, k_cur);
