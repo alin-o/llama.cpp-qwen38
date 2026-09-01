@@ -2603,7 +2603,8 @@ static ggml_cuda_graph_key ggml_cuda_graph_get_key(ggml_cgraph * cgraph) {
             hash_value(node->nb[dim]);
         }
     }
-    return { topology_hash };
+    const uintptr_t graph_identity = cgraph->uid != 0 ? cgraph->uid : reinterpret_cast<uintptr_t>(cgraph->nodes[0]);
+    return { graph_identity, topology_hash };
 }
 
 static bool ggml_cuda_graph_update_required(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph * cgraph) {

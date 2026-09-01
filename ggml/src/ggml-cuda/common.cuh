@@ -1263,16 +1263,18 @@ struct ggml_cuda_graph {
 };
 
 struct ggml_cuda_graph_key {
+    uintptr_t graph_identity;
     uint64_t topology_hash;
 
     bool operator==(const ggml_cuda_graph_key & other) const {
-        return topology_hash == other.topology_hash;
+        return graph_identity == other.graph_identity && topology_hash == other.topology_hash;
     }
 };
 
 struct ggml_cuda_graph_key_hash {
     size_t operator()(const ggml_cuda_graph_key & key) const {
-        return std::hash<uint64_t>{}(key.topology_hash);
+        const size_t identity_hash = std::hash<uintptr_t>{}(key.graph_identity);
+        return identity_hash ^ (key.topology_hash + 0x9e3779b97f4a7c15ULL + (identity_hash << 6) + (identity_hash >> 2));
     }
 };
 
@@ -1440,7 +1442,7 @@ struct ggml_backend_cuda_context {
     int curr_stream_no = 0;
 
 #ifdef USE_CUDA_GRAPH
-    // Graph arenas can rotate node addresses while retaining the same topology.
+    // Graph UIDs remain stable when an arena rotates tensor object addresses.
     std::unordered_map<ggml_cuda_graph_key, std::unique_ptr<ggml_cuda_graph>, ggml_cuda_graph_key_hash> cuda_graphs;
 
     int64_t last_graph_eviction_sweep = 0;
