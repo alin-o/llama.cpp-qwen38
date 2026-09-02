@@ -358,10 +358,15 @@ struct server_slot {
 
         prompt.clear();
         paged_prompt_ckpt.clear();
+        paged_prompt_lora.clear();
+        paged_prompt_alora_invocation_start = -1;
     }
 
     std::vector<common_adapter_lora_info> lora;
     int32_t alora_invocation_start = -1;
+
+    std::vector<common_adapter_lora_info> paged_prompt_lora;
+    int32_t paged_prompt_alora_invocation_start = -1;
 
     // sampling
     json json_schema;
@@ -2364,8 +2369,28 @@ private:
                 if (full_prompt_match && n_prefix > 0) {
                     --n_prefix;
                 }
-                if (slot.alora_invocation_start > 0) {
-                    n_prefix = std::min(n_prefix, slot.alora_invocation_start - 1);
+
+                const bool same_cached_lora = are_lora_equal(slot.paged_prompt_lora, slot.lora);
+                const bool cached_is_base = lora_get_enabled_ids(slot.paged_prompt_lora).empty();
+                const bool cached_is_alora = lora_all_alora(slot.paged_prompt_lora);
+                const bool current_is_alora = lora_all_alora(slot.lora);
+                if (!same_cached_lora && !(current_is_alora && (cached_is_base || cached_is_alora))) {
+                    n_prefix = 0;
+                }
+                if (n_prefix > 0 && cached_is_alora) {
+                    if (slot.paged_prompt_alora_invocation_start < 0) {
+                        n_prefix = 0;
+                    } else {
+                        n_prefix = std::min(n_prefix,
+                            std::max(0, slot.paged_prompt_alora_invocation_start - 1));
+                    }
+                }
+                if (n_prefix > 0 && current_is_alora) {
+                    if (slot.alora_invocation_start < 0) {
+                        n_prefix = 0;
+                    } else {
+                        n_prefix = std::min(n_prefix, std::max(0, slot.alora_invocation_start - 1));
+                    }
                 }
 
                 const bool needs_tgt_checkpoint =
@@ -2429,8 +2454,11 @@ private:
                     llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt) ||
                     (ctx_dft && (ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
                                  ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS));
-                llama_paged_scheduler_retain_request(
-                    paged_scheduler.get(), slot.id, checkpoint_before_last);
+                if (llama_paged_scheduler_retain_request(
+                        paged_scheduler.get(), slot.id, checkpoint_before_last)) {
+                    slot.paged_prompt_lora = slot.lora;
+                    slot.paged_prompt_alora_invocation_start = slot.alora_invocation_start;
+                }
             }
             slot.stats.n_prompt_cached = n_prefix_used;
             slot.stats.n_prompt_processed = 0;

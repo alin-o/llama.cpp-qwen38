@@ -214,6 +214,48 @@ def test_paged_alora_pre_invocation_and_batch_isolation():
     assert 0 < warm.body["timings"]["cache_n"] < prime.body["timings"]["prompt_n"]
     assert warm.body["timings"]["cache_n"] + warm.body["timings"]["prompt_n"] == prime.body["timings"]["prompt_n"]
 
+    followup_prompt = (
+        prompt
+        + " The assistant answered the first turn. The user now asks a follow-up."
+        + invocation
+        + " Continue from the new instruction."
+    )
+    followup_request = {
+        **request,
+        "prompt": followup_prompt,
+        "lora": [{"id": 0, "scale": 1.0}],
+    }
+    followup_warm = server.make_request("POST", "/completion", data={
+        **followup_request,
+        "cache_prompt": True,
+        "id_slot": 0,
+    })
+    followup_cold = server.make_request("POST", "/completion", data={
+        **followup_request,
+        "cache_prompt": False,
+        "id_slot": 1,
+    })
+    assert followup_warm.status_code == 200
+    assert followup_cold.status_code == 200
+    assert followup_warm.body["tokens"] == followup_cold.body["tokens"]
+    assert followup_cold.body["timings"]["cache_n"] == 0
+
+    tokenized = server.make_request("POST", "/tokenize", data={
+        "content": prompt,
+        "add_special": True,
+    })
+    invocation_tokens = adapters.body[0]["alora_invocation_tokens"]
+    retained_invocation_start = next(
+        i for i in range(len(tokenized.body["tokens"]) - len(invocation_tokens), -1, -1)
+        if tokenized.body["tokens"][i:i + len(invocation_tokens)] == invocation_tokens
+    )
+    assert 0 < followup_warm.body["timings"]["cache_n"] <= retained_invocation_start - 1
+    assert (
+        followup_warm.body["timings"]["cache_n"]
+        + followup_warm.body["timings"]["prompt_n"]
+        == followup_cold.body["timings"]["prompt_n"]
+    )
+
     tasks = [(
         server.make_request,
         ("POST", "/completion", {
