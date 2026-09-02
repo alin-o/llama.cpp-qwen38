@@ -266,6 +266,12 @@ else()
 endif()
 set(MODEL_DEST "${CMAKE_BINARY_DIR}/${MODEL_NAME}")
 
+set(PAGED_MODEL_REPO "afrideva/zephyr-smol_llama-100m-sft-full-GGUF")
+set(PAGED_MODEL_REVISION "397ea6339dba6a0e14c5ed118990cf58f2ce422a")
+set(PAGED_MODEL_NAME "zephyr-smol_llama-100m-sft-full.q4_k_m.gguf")
+set(PAGED_MODEL_HASH "SHA256=29ad2035c12439ad8341510ac594fd29ce96fb6817e0f9823b30ebd03099cb88")
+set(PAGED_MODEL_DEST "${CMAKE_BINARY_DIR}/paged-kv/${PAGED_MODEL_NAME}")
+
 add_test(NAME test-download-model COMMAND ${CMAKE_COMMAND}
     -DDEST=${MODEL_DEST}
     -DNAME=${MODEL_NAME}
@@ -274,10 +280,22 @@ add_test(NAME test-download-model COMMAND ${CMAKE_COMMAND}
 )
 set_tests_properties(test-download-model PROPERTIES FIXTURES_SETUP test-download-model)
 
+add_test(NAME test-download-paged-model COMMAND ${CMAKE_COMMAND}
+    -DDEST=${PAGED_MODEL_DEST}
+    -DNAME=${PAGED_MODEL_NAME}
+    -DHASH=${PAGED_MODEL_HASH}
+    -DREPO=${PAGED_MODEL_REPO}
+    -DREVISION=${PAGED_MODEL_REVISION}
+    -P ${CMAKE_SOURCE_DIR}/cmake/download-models.cmake
+)
+set_tests_properties(test-download-paged-model PROPERTIES FIXTURES_SETUP test-download-paged-model)
+
 llama_build_and_test(test-thread-safety.cpp ARGS -m "${MODEL_DEST}" -ngl 99 -p "The meaning of life is" -n 128 -c 256 -ub 32 -np 4 -t 2)
 set_tests_properties(test-thread-safety PROPERTIES FIXTURES_REQUIRED test-download-model)
 llama_build_and_test(test-paged-kv-e2e.cpp ARGS -m "${MODEL_DEST}" -ngl 99)
-set_tests_properties(test-paged-kv-e2e PROPERTIES FIXTURES_REQUIRED test-download-model)
+set_tests_properties(test-paged-kv-e2e PROPERTIES
+    ENVIRONMENT "LLAMA_TEST_PAGED_KV_DENSE_MODEL=${PAGED_MODEL_DEST}"
+    FIXTURES_REQUIRED "test-download-model;test-download-paged-model")
 
 llama_build_and_test(test-arg-parser.cpp)
 llama_build_and_test(test-model-resolution.cpp)

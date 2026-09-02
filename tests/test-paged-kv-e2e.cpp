@@ -546,6 +546,132 @@ static void run_paged_retained_prefix(const std::string & model_path) {
     llama_batch_free(batch);
 }
 
+static path_result run_paged_divergent_prefix_case(
+        const std::string & model_path, bool reuse_prefix, int32_t * n_cached) {
+    static constexpr int32_t n_prefix  = 18;
+    static constexpr int32_t n_predict = 8;
+
+    common_params params;
+    params.model.path       = model_path;
+    params.n_ctx            = 256;
+    params.n_batch          = 128;
+    params.n_ubatch         = 128;
+    params.warmup           = false;
+    params.kv_paged         = true;
+    params.block_size       = 16;
+    params.n_gpu_blocks     = 64;
+    params.n_cpu_blocks     = 16;
+    params.n_gpu_blocks_set = true;
+    params.n_cpu_blocks_set = true;
+    params.n_sequences      = 1;
+    params.n_parallel       = 1;
+    params.cache_type_k     = GGML_TYPE_Q8_0;
+    params.cache_type_v     = GGML_TYPE_Q8_0;
+
+    auto init = common_init_from_params(params);
+    llama_model * model = init->model();
+    llama_context * ctx = init->context();
+    EXPECT_TRUE(model != nullptr && ctx != nullptr);
+    EXPECT_TRUE(!llama_model_is_recurrent(model));
+    EXPECT_TRUE(!llama_model_is_hybrid(model));
+    const llama_vocab * vocab = llama_model_get_vocab(model);
+    const int n_vocab = llama_vocab_n_tokens(vocab);
+
+    std::vector<llama_token> retained_prompt = common_tokenize(ctx, TEST_PROMPT, true);
+    EXPECT_TRUE(retained_prompt.size() > n_prefix);
+    EXPECT_TRUE(retained_prompt.size() <= (size_t) params.n_batch);
+    EXPECT_TRUE(n_prefix % params.block_size != 0);
+    std::vector<llama_token> divergent_prompt = retained_prompt;
+    const llama_token replacement = divergent_prompt[n_prefix] == 0 ? 1 : 0;
+    EXPECT_TRUE(replacement < n_vocab);
+    divergent_prompt[n_prefix] = replacement;
+    EXPECT_TRUE(std::equal(
+        divergent_prompt.begin(), divergent_prompt.begin() + n_prefix, retained_prompt.begin()));
+    EXPECT_TRUE(divergent_prompt[n_prefix] != retained_prompt[n_prefix]);
+
+    llama_paged_scheduler * sched = llama_paged_scheduler_init(ctx);
+    EXPECT_TRUE(sched != nullptr);
+    llama_batch batch = {};
+    int32_t retained_partial_block = -1;
+
+    if (reuse_prefix) {
+        EXPECT_TRUE(llama_paged_scheduler_add_request(
+            sched, retained_prompt.data(), retained_prompt.size(), 0));
+        EXPECT_TRUE(llama_paged_scheduler_retain_request(sched, 0, false));
+        EXPECT_TRUE(llama_paged_scheduler_prepare_batch(sched, &batch));
+        EXPECT_TRUE(batch.n_tokens == (int32_t) retained_prompt.size());
+        EXPECT_TRUE(llama_decode(ctx, batch) == 0);
+        llama_synchronize(ctx);
+        const llama_paged_batch_info * info = llama_paged_scheduler_get_batch_info(sched);
+        EXPECT_TRUE(info != nullptr && info->n_seq == 1);
+        retained_partial_block = info->block_table[n_prefix / params.block_size];
+        EXPECT_TRUE(retained_partial_block >= 0);
+        const int32_t logits_index = info->batch_offsets[0] + info->batch_lens[0] - 1;
+        const llama_token next = argmax_logits(get_logits(ctx, logits_index, n_vocab));
+        const int8_t stop[] = { 1 };
+        llama_paged_scheduler_update(sched, &batch, &next, stop);
+        EXPECT_TRUE(llama_paged_scheduler_is_retained(sched, 0));
+
+        EXPECT_TRUE(llama_paged_scheduler_add_request_with_prefix(
+            sched, divergent_prompt.data(), divergent_prompt.size(), 0, n_prefix, n_cached));
+        EXPECT_TRUE(*n_cached == n_prefix);
+    } else {
+        EXPECT_TRUE(llama_paged_scheduler_add_request(
+            sched, divergent_prompt.data(), divergent_prompt.size(), 0));
+        *n_cached = 0;
+    }
+
+    path_result result;
+    result.n_vocab = n_vocab;
+    for (int step = 0; step < n_predict; ++step) {
+        EXPECT_TRUE(llama_paged_scheduler_prepare_batch(sched, &batch));
+        const llama_paged_batch_info * info = llama_paged_scheduler_get_batch_info(sched);
+        EXPECT_TRUE(info != nullptr && info->n_seq == 1);
+        if (step == 0) {
+            EXPECT_TRUE(batch.n_tokens == (int32_t) divergent_prompt.size() - *n_cached);
+            EXPECT_TRUE(batch.pos[0] == *n_cached);
+            EXPECT_TRUE(info->context_lens[0] == (int32_t) divergent_prompt.size());
+            if (reuse_prefix) {
+                const int32_t partial_block = n_prefix / params.block_size;
+                EXPECT_TRUE(info->block_table[partial_block] == retained_partial_block);
+                EXPECT_TRUE(info->write_slots[0] ==
+                    retained_partial_block * params.block_size + n_prefix % params.block_size);
+            }
+        } else {
+            EXPECT_TRUE(batch.n_tokens == 1);
+        }
+
+        EXPECT_TRUE(llama_decode(ctx, batch) == 0);
+        llama_synchronize(ctx);
+        const int32_t logits_index = info->batch_offsets[0] + info->batch_lens[0] - 1;
+        result.logits.push_back(get_logits(ctx, logits_index, n_vocab));
+        const llama_token next = argmax_logits(result.logits.back());
+        result.tokens.push_back(next);
+        const int8_t stop[] = { static_cast<int8_t>(step + 1 == n_predict) };
+        llama_paged_scheduler_update(sched, &batch, &next, stop);
+    }
+
+    llama_paged_scheduler_remove_request(sched, 0);
+    llama_paged_scheduler_free(sched);
+    llama_batch_free(batch);
+    return result;
+}
+
+static void run_paged_divergent_prefix(const std::string & model_path) {
+    int32_t cold_cached = -1;
+    const path_result cold = run_paged_divergent_prefix_case(model_path, false, &cold_cached);
+    EXPECT_TRUE(cold_cached == 0);
+
+    int32_t warm_cached = -1;
+    const path_result warm = run_paged_divergent_prefix_case(model_path, true, &warm_cached);
+    EXPECT_TRUE(warm_cached == 18);
+    EXPECT_TRUE(warm.tokens == cold.tokens);
+    EXPECT_TRUE(warm.logits.size() == cold.logits.size());
+    for (size_t step = 0; step < cold.logits.size(); ++step) {
+        compare_logits(step, cold.logits[step], warm.logits[step]);
+    }
+}
+
 static std::vector<path_result> run_paged_multi_slot_prefix_case(
         const std::string & model_path, bool reuse_slot_zero) {
     static constexpr int n_predict = 8;
@@ -809,6 +935,16 @@ int main(int argc, char ** argv) {
         run_paged_retained_prefix(params.model.path);
         fprintf(stderr, "test-paged-kv-e2e: batching a warm hit with a cold miss\n");
         run_paged_multi_slot_retained_prefix(params.model.path);
+    }
+    const char * dense_model_path = getenv("LLAMA_TEST_PAGED_KV_DENSE_MODEL");
+    if (dense_model_path != nullptr && dense_model_path[0] != '\0') {
+        fprintf(stderr, "test-paged-kv-e2e: rewriting a divergent dense q8_0 paged prefix tail\n");
+        run_paged_divergent_prefix(dense_model_path);
+    } else if (head_dim % ggml_blck_size(GGML_TYPE_Q8_0) == 0) {
+        fprintf(stderr, "test-paged-kv-e2e: rewriting a divergent dense q8_0 paged prefix tail\n");
+        run_paged_divergent_prefix(params.model.path);
+    } else {
+        fprintf(stderr, "skip: no compatible dense model for divergent retained-prefix coverage\n");
     }
     fprintf(stderr, "test-paged-kv-e2e: PASSED\n");
 

@@ -356,13 +356,13 @@ void llama_kv_cache_paged::concat_block_ids(llama_block_ids &       to_block_tab
 
 llama_memory_context_ptr llama_kv_cache_paged::init_batch(llama_batch_allocr & balloc,
                                                           uint32_t             n_ubatch,
-                                                          bool /*embd_all*/) {
+                                                          bool                 embd_all) {
     do {
         balloc.split_reset();
 
         std::vector<llama_ubatch> ubatches;
         while (true) {
-            auto ubatch = balloc.split_simple(n_ubatch);
+            auto ubatch = embd_all ? balloc.split_seq(n_ubatch) : balloc.split_equal(n_ubatch, false, 0);
             if (ubatch.n_tokens == 0) {
                 break;
             }
