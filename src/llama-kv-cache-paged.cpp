@@ -347,6 +347,18 @@ uint32_t llama_kv_cache_paged::get_num_gpu_blocks() const {
     return num_gpu_blocks;
 }
 
+uint32_t llama_kv_cache_paged::get_num_free_gpu_blocks() const {
+    return block_manager.n_free_gpu_blocks();
+}
+
+uint32_t llama_kv_cache_paged::get_num_cpu_blocks() const {
+    return num_cpu_blocks;
+}
+
+uint32_t llama_kv_cache_paged::get_num_free_cpu_blocks() const {
+    return block_manager.n_free_cpu_blocks();
+}
+
 void llama_kv_cache_paged::concat_block_ids(llama_block_ids &       to_block_table,
                                             const llama_block_ids & from_block_table) {
     to_block_table.insert(to_block_table.end(), from_block_table.begin(), from_block_table.end());

@@ -342,6 +342,7 @@ def test_paged_slot_reuse_pressure():
     server.n_gpu_layer = 99
     server.n_predict = 8
     server.server_slots = True
+    server.server_metrics = True
     server.slot_save_path = TMP_DIR
     server.debug = True
     server.log_path = os.path.join(TMP_DIR, "paged-slot-reuse.log")
@@ -364,6 +365,26 @@ def test_paged_slot_reuse_pressure():
     assert cold.body["timings"]["cache_n"] == 0
     assert warm.body["timings"]["cache_n"] == cold.body["timings"]["prompt_n"] - 1
     assert warm.body["timings"]["prompt_n"] == 1
+
+    metrics_res = server.make_request("GET", "/metrics")
+    assert metrics_res.status_code == 200
+    metric_values = {
+        line.split(" ", 1)[0]: float(line.split(" ", 1)[1])
+        for line in metrics_res.body.splitlines()
+        if line.startswith("llamacpp:") and "{" not in line
+    }
+    n_cached = warm.body["timings"]["cache_n"]
+    n_processed = cold.body["timings"]["prompt_n"] + warm.body["timings"]["prompt_n"]
+    assert metric_values["llamacpp:prompt_tokens_cached_total"] == n_cached
+    assert metric_values["llamacpp:prompt_cache_hit_ratio"] == pytest.approx(
+        n_cached / (n_cached + n_processed)
+    )
+    assert metric_values["llamacpp:kv_cache_size_tokens"] == server.n_gpu_blocks * server.block_size
+    assert 0 < metric_values["llamacpp:kv_cache_free_tokens"] < metric_values["llamacpp:kv_cache_size_tokens"]
+    assert 0 < metric_values["llamacpp:kv_cache_usage_ratio"] < 1
+    assert metric_values["llamacpp:kv_cache_cpu_size_tokens"] == server.n_cpu_blocks * server.block_size
+    assert metric_values["llamacpp:kv_cache_cpu_free_tokens"] == metric_values["llamacpp:kv_cache_cpu_size_tokens"]
+    assert metric_values["llamacpp:prompt_cache_retained"] == 1
 
     oracle = server.make_request("POST", "/completion", data={**request, "cache_prompt": False})
     assert oracle.status_code == 200
@@ -413,11 +434,135 @@ def test_paged_slot_reuse_pressure():
     assert after_erase.body["tokens"] == cold.body["tokens"]
     assert after_erase.body["timings"]["cache_n"] == 0
 
-    log = open(server.log_path, encoding="utf-8").read()
+    with open(server.log_path, encoding="utf-8") as log_file:
+        log = log_file.read()
+    assert "paged KV cache: GPU blocks used" in log
+    assert "prompt cache hit rate" in log
     assert "already queued" not in log
     assert "paged KV sequence state is empty" not in log
     assert "non-consecutive token position" not in log
     assert "HTTP 500" not in log
+
+
+def test_paged_attached_prefix_recompute_resets_server_accounting():
+    model = os.environ.get("LLAMA_SERVER_PAGED_MODEL")
+    if not model:
+        pytest.skip("set LLAMA_SERVER_PAGED_MODEL to run paged prefix recomputation")
+
+    server.model_file = model
+    server.model_hf_repo = None
+    server.model_hf_file = None
+    server.offline = True
+    server.kv_paged = True
+    server.server_port = 18089
+    server.n_slots = 2
+    server.n_ctx = 256
+    server.n_batch = 64
+    server.n_ubatch = 64
+    server.block_size = 16
+    server.n_gpu_blocks = 5
+    server.n_cpu_blocks = 1
+    server.n_gpu_layer = 0
+    server.n_predict = 10
+    server.server_slots = True
+    server.server_metrics = True
+    server.debug = True
+    server.log_path = os.path.join(TMP_DIR, "paged-prefix-recompute.log")
+    server.start()
+
+    tokenized = server.make_request("POST", "/tokenize", data={
+        "content": "pressure scheduling",
+        "add_special": False,
+    })
+    assert len(tokenized.body["tokens"]) >= 2
+    token_a, token_b = tokenized.body["tokens"][:2]
+    retained_prompt = [1] + [token_a] * 14
+    warm_prompt = retained_prompt + [token_b]
+    cold_prompt = [1] + [token_b] * 30
+
+    seed = server.make_request("POST", "/completion", data={
+        "prompt": retained_prompt,
+        "id_slot": 1,
+        "n_predict": 1,
+        "ignore_eos": True,
+        "temperature": 0.0,
+        "cache_prompt": True,
+    })
+    assert seed.status_code == 200
+    assert seed.body["timings"]["prompt_n"] == len(retained_prompt)
+
+    def run_warm():
+        time.sleep(0.001)
+        return list(server.make_stream_request("POST", "/completion", data={
+            "prompt": warm_prompt,
+            "id_slot": 1,
+            "n_predict": 3,
+            "ignore_eos": True,
+            "temperature": 0.0,
+            "cache_prompt": True,
+            "return_tokens": True,
+            "return_progress": True,
+            "stream": True,
+        }))
+
+    cold_request = {
+        "prompt": cold_prompt,
+        "id_slot": 0,
+        "n_predict": 10,
+        "ignore_eos": True,
+        "temperature": 0.0,
+        "cache_prompt": False,
+    }
+    cold, warm_chunks = parallel_function_calls([
+        (server.make_request, ("POST", "/completion", cold_request)),
+        (run_warm, ()),
+    ])
+    assert cold.status_code == 200
+
+    warm_final = next(chunk for chunk in warm_chunks if chunk.get("stop"))
+    warm_tokens = [
+        token
+        for chunk in warm_chunks
+        if "prompt_progress" not in chunk
+        for token in chunk.get("tokens", [])
+    ]
+    assert warm_final["timings"]["cache_n"] == 0
+    assert warm_final["timings"]["prompt_n"] == len(warm_prompt)
+
+    progress = [chunk["prompt_progress"] for chunk in warm_chunks if "prompt_progress" in chunk]
+    assert progress
+    assert progress[-1]["cache"] == 0
+    assert all(item["cache"] <= item["processed"] <= item["total"] for item in progress)
+    assert all(item["total"] == len(warm_prompt) for item in progress)
+
+    oracle = server.make_request("POST", "/completion", data={
+        "prompt": warm_prompt,
+        "id_slot": 1,
+        "n_predict": 3,
+        "ignore_eos": True,
+        "temperature": 0.0,
+        "cache_prompt": False,
+        "return_tokens": True,
+    })
+    assert oracle.status_code == 200
+    assert warm_tokens == oracle.body["tokens"]
+
+    metrics = server.make_request("GET", "/metrics")
+    metric_values = {
+        line.split(" ", 1)[0]: float(line.split(" ", 1)[1])
+        for line in metrics.body.splitlines()
+        if line.startswith("llamacpp:") and "{" not in line
+    }
+    # The warm suffix is decoded once before pressure forces the full replay.
+    expected_processed = len(retained_prompt) + len(cold_prompt) + 2 * len(warm_prompt) + 1
+    assert metric_values["llamacpp:prompt_tokens_total"] == expected_processed
+    assert metric_values["llamacpp:prompt_tokens_cached_total"] == 0
+    assert metric_values["llamacpp:prompt_cache_hit_ratio"] == 0
+
+    with open(server.log_path, encoding="utf-8") as log_file:
+        log = log_file.read()
+    assert "(recomputation) request_id=1" in log
+    assert "discarding cached prompt accounting after scheduler recomputation" in log
 
 
 def test_paged_multimodal_prompt_is_rejected_and_discards_retained_prefix():

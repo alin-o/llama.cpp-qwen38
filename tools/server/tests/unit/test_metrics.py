@@ -65,6 +65,14 @@ def test_metrics_prometheus_format():
     ]
     expected_gauges = [
         "llamacpp:prompt_tokens_seconds",
+        "llamacpp:prompt_cache_hit_ratio",
+        "llamacpp:kv_cache_usage_ratio",
+        "llamacpp:kv_cache_free_tokens",
+        "llamacpp:kv_cache_size_tokens",
+        "llamacpp:kv_cache_cpu_usage_ratio",
+        "llamacpp:kv_cache_cpu_free_tokens",
+        "llamacpp:kv_cache_cpu_size_tokens",
+        "llamacpp:prompt_cache_retained",
         "llamacpp:predicted_tokens_seconds",
         "llamacpp:requests_processing",
         "llamacpp:requests_deferred",
@@ -107,6 +115,9 @@ def test_metrics_prompt_processed_and_cached():
     # cached tokens are counted apart, they cost no decode
     assert metrics["llamacpp:prompt_tokens_total"][1] == n_processed
     assert metrics["llamacpp:prompt_tokens_cached_total"][1] == n_cached
+    assert metrics["llamacpp:prompt_cache_hit_ratio"][1] == pytest.approx(
+        n_cached / (n_processed + n_cached)
+    )
 
 
 def test_metrics_predicted_total_matches_requests():

@@ -862,7 +862,9 @@ public:
     }
 
     server_metrics get_metrics() const {
-        return metrics;
+        server_metrics result = metrics;
+        refresh_paged_cache_stats(result);
+        return result;
     }
 
     void reset_metrics_bucket() {
@@ -1053,7 +1055,7 @@ private:
             const int offset = info->batch_offsets[i];
             const server_slot & slot = slots[paged_batch.seq_id[offset][0]];
             for (int j = 0; j < info->batch_lens[i]; ++j) {
-                n_prompt_tokens += paged_batch.pos[offset + j] < (llama_pos) slot.prompt.tokens.size();
+                n_prompt_tokens += paged_batch.pos[offset + j] < slot.task->n_tokens();
             }
         }
         metrics_queue_prompt(n_prompt_tokens);
@@ -1103,7 +1105,10 @@ private:
             const bool is_prefill = batch_pos_last < prompt_tokens;
             const bool is_final_prefill = is_prefill && batch_pos_last + 1 == prompt_tokens;
             if (is_prefill) {
-                slot.stats.n_prompt_processed += info->batch_lens[i];
+                const llama_pos batch_pos_first = paged_batch.pos[offset];
+                const llama_pos prompt_pos_end = std::min<llama_pos>(
+                    batch_pos_last + 1, slot.task->n_tokens());
+                slot.stats.n_prompt_processed += std::max<llama_pos>(0, prompt_pos_end - batch_pos_first);
             }
 
             if (is_prefill && !is_final_prefill) {
@@ -1615,6 +1620,23 @@ private:
                 }
                 slot->stats.n_prompt_cached = 0;
                 slot->stats.n_prompt_processed = 0;
+                llama_paged_seq_state state = {};
+                if (llama_paged_scheduler_get_seq_state(server->paged_scheduler.get(), request_id, &state) &&
+                    slot->stats.n_gen > 0 && slot->prompt.n_tokens() + 1 == state.n_prompt) {
+                    slot->prompt.tokens.push_back(slot->sampled);
+                }
+                if (slot->ctx_dft) {
+                    llama_memory_seq_rm(llama_get_memory(slot->ctx_dft), request_id, -1, -1);
+                }
+                slot->spec_draft.clear();
+                slot->spec_i_batch.clear();
+                if (server->spec) {
+                    common_speculative_get_draft_params(server->spec.get(), request_id).drafting = false;
+                }
+                if (slot->task && slot->task->params.stream && slot->task->params.return_progress &&
+                    slot->stats.is_set()) {
+                    server->send_partial_response(*slot, {}, true);
+                }
             }, this);
         }
 
@@ -1659,6 +1681,7 @@ private:
                     if (!llama_paged_scheduler_is_retained(paged_scheduler.get(), id_slot)) {
                         slots[id_slot].prompt_clear();
                     }
+                    log_paged_cache_stats();
                 }
                 queue_tasks.pop_deferred_task(id_slot);
             };
@@ -2950,7 +2973,7 @@ private:
                     res->id                  = task.id;
                     res->n_processing_slots  = n_processing_slots;
                     res->n_tasks_deferred    = queue_tasks.queue_tasks_deferred_size();
-                    res->metrics             = metrics;
+                    res->metrics             = get_metrics();
 
                     if (task.metrics_reset_bucket) {
                         metrics.reset_bucket();
@@ -4479,6 +4502,30 @@ private:
     //
     // metrics helpers
     //
+
+    void refresh_paged_cache_stats(server_metrics & dst) const {
+        dst.paged_cache = {};
+        if (paged_scheduler) {
+            llama_paged_scheduler_get_cache_stats(paged_scheduler.get(), &dst.paged_cache);
+        }
+    }
+
+    void log_paged_cache_stats() const {
+        server_metrics snapshot = get_metrics();
+        const auto & cache = snapshot.paged_cache;
+        const uint32_t gpu_used = cache.n_gpu_blocks - cache.n_gpu_blocks_free;
+        const uint32_t cpu_used = cache.n_cpu_blocks - cache.n_cpu_blocks_free;
+        const uint64_t gpu_free_tokens = (uint64_t) cache.n_gpu_blocks_free * cache.block_size;
+        const uint64_t cpu_free_tokens = (uint64_t) cache.n_cpu_blocks_free * cache.block_size;
+
+        SRV_INF("paged KV cache: GPU blocks used = %u/%u, free = %u (%" PRIu64 " tokens); "
+                "CPU blocks used = %u/%u, free = %u (%" PRIu64 " tokens); retained = %u; "
+                "prompt cache hit rate = %.2f%% (%" PRIu64 " cached / %" PRIu64 " total prompt tokens)\n",
+                gpu_used, cache.n_gpu_blocks, cache.n_gpu_blocks_free, gpu_free_tokens,
+                cpu_used, cache.n_cpu_blocks, cache.n_cpu_blocks_free, cpu_free_tokens,
+                cache.n_retained, 100.0 * snapshot.prompt_cache_hit_ratio(), snapshot.n_prompt_cached,
+                snapshot.prompt.count + snapshot.n_prompt_cached);
+    }
 
     // call before submitting a decode, so that the queued prompt stats can be timed
     void metrics_pre_decode() {

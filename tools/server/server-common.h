@@ -472,6 +472,9 @@ struct server_metrics {
     // tokens reused from the cache need no decode, so they only have a count
     uint64_t n_prompt_cached = 0;
 
+    // immediate paged-KV capacity snapshot, refreshed when metrics are read
+    llama_paged_cache_stats paged_cache = {};
+
     uint64_t n_tokens_max = 0;
 
     uint64_t n_decode     = 0;
@@ -498,6 +501,11 @@ struct server_metrics {
 
     void add_prompt_cached(uint64_t n_tokens) {
         n_prompt_cached += n_tokens;
+    }
+
+    double prompt_cache_hit_ratio() const {
+        const uint64_t total = prompt.count + n_prompt_cached;
+        return total > 0 ? (double) n_prompt_cached / total : 0.0;
     }
 };
 

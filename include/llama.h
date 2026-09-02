@@ -1663,6 +1663,15 @@ extern "C" {
         int64_t t_first_token_us;
     };
 
+    struct llama_paged_cache_stats {
+        uint32_t block_size;
+        uint32_t n_gpu_blocks;
+        uint32_t n_gpu_blocks_free;
+        uint32_t n_cpu_blocks;
+        uint32_t n_cpu_blocks_free;
+        uint32_t n_retained;
+    };
+
     typedef void (*llama_paged_on_finish_cb)(int32_t             request_id,
                                              const llama_token * tokens,
                                              int32_t             n_tokens,
@@ -1713,6 +1722,8 @@ extern "C" {
     LLAMA_API bool llama_paged_scheduler_get_seq_state(struct llama_paged_scheduler * sched,
                                                        int32_t                        request_id,
                                                        struct llama_paged_seq_state * out_state);
+    LLAMA_API bool llama_paged_scheduler_get_cache_stats(const struct llama_paged_scheduler * sched,
+                                                          struct llama_paged_cache_stats *     out_stats);
 
     // Returns the current batch's paged routing metadata. Valid until the next
     // call to llama_paged_scheduler_prepare_batch on this scheduler. Do not free.

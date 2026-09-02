@@ -1125,8 +1125,17 @@ In *router mode* the query param `?model={model_id}` has to be set. This endpoin
 | Metric | Type | Description |
 | ------ | ---------------------- | ----------- |
 | `llamacpp:prompt_tokens_total` | Counter | Number of prompt tokens processed. |
+| `llamacpp:prompt_tokens_cached_total` | Counter | Number of prompt tokens reused from the cache. |
 | `llamacpp:prompt_seconds_total` | Counter | Prompt process time in seconds. |
 | `llamacpp:prompt_tokens_seconds` | Gauge | Average prompt throughput in tokens/s. |
+| `llamacpp:prompt_cache_hit_ratio` | Gauge | Fraction of prompt tokens reused from the cache. |
+| `llamacpp:kv_cache_usage_ratio` | Gauge | Fraction of paged GPU KV cache blocks in use. |
+| `llamacpp:kv_cache_free_tokens` | Gauge | Prompt-token capacity available in free paged GPU KV cache blocks. |
+| `llamacpp:kv_cache_size_tokens` | Gauge | Total prompt-token capacity of the paged GPU KV cache. |
+| `llamacpp:kv_cache_cpu_usage_ratio` | Gauge | Fraction of paged CPU swap KV cache blocks in use. |
+| `llamacpp:kv_cache_cpu_free_tokens` | Gauge | Prompt-token capacity available in free paged CPU swap KV cache blocks. |
+| `llamacpp:kv_cache_cpu_size_tokens` | Gauge | Total prompt-token capacity of the paged CPU swap KV cache. |
+| `llamacpp:prompt_cache_retained` | Gauge | Number of idle slot-local paged prompt states retained. |
 | `llamacpp:tokens_predicted_total` | Counter | Number of generation tokens processed. |
 | `llamacpp:tokens_predicted_seconds_total` | Counter | Predict process time in seconds. |
 | `llamacpp:predicted_tokens_seconds` | Gauge | Average generation throughput in tokens/s. |

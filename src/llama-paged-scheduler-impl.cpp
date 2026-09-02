@@ -341,6 +341,17 @@ bool llama_paged_scheduler_impl::is_retained(int32_t request_id) const {
     return retained.count(request_id) != 0;
 }
 
+llama_paged_cache_stats llama_paged_scheduler_impl::get_cache_stats() const {
+    return {
+        /* .block_size        = */ block_size,
+        /* .n_gpu_blocks      = */ kv_cache_manager->get_num_gpu_blocks(),
+        /* .n_gpu_blocks_free = */ kv_cache_manager->get_num_free_gpu_blocks(),
+        /* .n_cpu_blocks      = */ kv_cache_manager->get_num_cpu_blocks(),
+        /* .n_cpu_blocks_free = */ kv_cache_manager->get_num_free_cpu_blocks(),
+        /* .n_retained        = */ (uint32_t) retained.size(),
+    };
+}
+
 void llama_paged_scheduler_impl::evict_retained_requests() {
     while (!retained.empty()) {
         remove_request(retained.begin()->first);
@@ -374,9 +385,9 @@ void llama_paged_scheduler_impl::swap_out_or_recompute(llama_sequence_group_ptr 
     if (recurrent_manager) {
         recurrent_manager->seq_rm(rid, -1, -1);
     }
+    group_ptr->n_prompt  = (uint32_t) group_ptr->logical_seq.size();
     group_ptr->n_past    = 0;
     group_ptr->n_decoded = 0;
-    group_ptr->logical_seq.resize(group_ptr->n_prompt);
     if (on_recompute_cb) {
         on_recompute_cb(rid, on_recompute_user_data);
     }

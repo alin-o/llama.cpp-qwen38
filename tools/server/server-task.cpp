@@ -1614,6 +1614,42 @@ std::string server_task_result_metrics::to_metrics() {
             "Average prompt throughput in tokens/s",
             metrics.prompt_bucket.n_per_second()
         }, {
+            "prompt_cache_hit_ratio",
+            "Fraction of prompt tokens reused from the cache",
+            metrics.prompt_cache_hit_ratio()
+        }, {
+            "kv_cache_usage_ratio",
+            "Fraction of paged GPU KV cache blocks in use",
+            metrics.paged_cache.n_gpu_blocks > 0
+                ? 1.0 - (double) metrics.paged_cache.n_gpu_blocks_free / metrics.paged_cache.n_gpu_blocks
+                : 0.0
+        }, {
+            "kv_cache_free_tokens",
+            "Prompt-token capacity available in free paged GPU KV cache blocks",
+            (double) metrics.paged_cache.n_gpu_blocks_free * metrics.paged_cache.block_size
+        }, {
+            "kv_cache_size_tokens",
+            "Total prompt-token capacity of the paged GPU KV cache",
+            (double) metrics.paged_cache.n_gpu_blocks * metrics.paged_cache.block_size
+        }, {
+            "kv_cache_cpu_usage_ratio",
+            "Fraction of paged CPU swap KV cache blocks in use",
+            metrics.paged_cache.n_cpu_blocks > 0
+                ? 1.0 - (double) metrics.paged_cache.n_cpu_blocks_free / metrics.paged_cache.n_cpu_blocks
+                : 0.0
+        }, {
+            "kv_cache_cpu_free_tokens",
+            "Prompt-token capacity available in free paged CPU swap KV cache blocks",
+            (double) metrics.paged_cache.n_cpu_blocks_free * metrics.paged_cache.block_size
+        }, {
+            "kv_cache_cpu_size_tokens",
+            "Total prompt-token capacity of the paged CPU swap KV cache",
+            (double) metrics.paged_cache.n_cpu_blocks * metrics.paged_cache.block_size
+        }, {
+            "prompt_cache_retained",
+            "Number of idle slot-local paged prompt states retained",
+            (double) metrics.paged_cache.n_retained
+        }, {
             "predicted_tokens_seconds",
             "Average generation throughput in tokens/s",
             metrics.predict_bucket.n_per_second()

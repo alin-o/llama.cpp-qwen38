@@ -233,6 +233,15 @@ LLAMA_API bool llama_paged_scheduler_get_seq_state(struct llama_paged_scheduler 
     return true;
 }
 
+LLAMA_API bool llama_paged_scheduler_get_cache_stats(const struct llama_paged_scheduler * sched,
+                                                      struct llama_paged_cache_stats *     out_stats) {
+    if (!sched || !out_stats) {
+        return false;
+    }
+    *out_stats = sched->impl.get_cache_stats();
+    return true;
+}
+
 LLAMA_API const struct llama_paged_batch_info * llama_paged_scheduler_get_batch_info(
     const struct llama_paged_scheduler * sched) {
     if (!sched) {

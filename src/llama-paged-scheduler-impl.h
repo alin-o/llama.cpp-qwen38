@@ -43,6 +43,7 @@ class llama_paged_scheduler_impl {
     void                   set_on_recompute(llama_paged_on_recompute_cb cb, void * user_data);
     llama_sequence_group *         get_group_from_id(int32_t request_id) const;
     const llama_paged_batch_info * get_curr_batch_info() const;
+    llama_paged_cache_stats        get_cache_stats() const;
 
   private:
     void insert_sorted_by_arrival_time(llama_sequence_group_ptr new_group, llama_sequence_group_list & list);
