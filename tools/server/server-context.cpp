@@ -1053,7 +1053,7 @@ private:
             const int offset = info->batch_offsets[i];
             const server_slot & slot = slots[paged_batch.seq_id[offset][0]];
             for (int j = 0; j < info->batch_lens[i]; ++j) {
-                n_prompt_tokens += paged_batch.pos[offset + j] < (llama_pos) slot.task->tokens.size();
+                n_prompt_tokens += paged_batch.pos[offset + j] < (llama_pos) slot.prompt.tokens.size();
             }
         }
         metrics_queue_prompt(n_prompt_tokens);
@@ -1065,7 +1065,7 @@ private:
         for (int i = 0; i < info->n_seq; ++i) {
             const int offset = info->batch_offsets[i];
             auto & slot = slots[paged_batch.seq_id[offset][0]];
-            const int32_t prompt_tokens = slot.task->tokens.size();
+            const int32_t prompt_tokens = slot.prompt.tokens.size();
             const llama_pos batch_pos_last = paged_batch.pos[offset + info->batch_lens[i] - 1];
 
             if (slot.stats.is_set() && batch_pos_last < prompt_tokens) {
@@ -1098,7 +1098,7 @@ private:
             const int offset = info->batch_offsets[i];
             const int slot_id = paged_batch.seq_id[offset][0];
             server_slot & slot = slots[slot_id];
-            const int32_t prompt_tokens = slot.task->tokens.size();
+            const int32_t prompt_tokens = slot.prompt.tokens.size();
             const llama_pos batch_pos_last = paged_batch.pos[offset + info->batch_lens[i] - 1];
             const bool is_prefill = batch_pos_last < prompt_tokens;
             const bool is_final_prefill = is_prefill && batch_pos_last + 1 == prompt_tokens;
@@ -1207,13 +1207,13 @@ private:
         for (int i = 0; i < info->n_seq; ++i) {
             const int offset = info->batch_offsets[i];
             const server_slot & slot = slots[paged_batch.seq_id[offset][0]];
-            const int32_t prompt_tokens = slot.task->tokens.size();
+            const int32_t prompt_tokens = slot.prompt.tokens.size();
             const llama_pos batch_pos_last = paged_batch.pos[offset + info->batch_lens[i] - 1];
             const bool checkpoint_before_last =
                 llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt) ||
                 (ctx_dft && (ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
                              ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS));
-            if (slot.task->params.cache_prompt && checkpoint_before_last &&
+            if (slot.task->params.cache_prompt && !slot.task->tokens.has_media_chunks() && checkpoint_before_last &&
                 prompt_tokens > 1 && batch_pos_last + 2 == prompt_tokens) {
                 checkpoint_slots.push_back(paged_batch.seq_id[offset][0]);
             }
@@ -1226,7 +1226,7 @@ private:
             auto & checkpoint = slot.paged_prompt_ckpt;
             checkpoint.clear();
             checkpoint.update_pos(
-                slot.task->n_tokens() - 1,
+                slot.prompt.n_tokens() - 1,
                 llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), id_slot),
                 llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), id_slot));
             if (llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt)) {
@@ -2166,9 +2166,10 @@ private:
                 return true;
             }
 
+            const bool has_media = task.tokens.has_media_chunks();
             int32_t n_prefix = 0;
             const bool can_reuse = task.type == SERVER_TASK_TYPE_COMPLETION && task.params.cache_prompt &&
-                !task.tokens.has_media_chunks() && !slot.prompt.tokens.has_media_chunks() &&
+                !has_media && !slot.prompt.tokens.has_media_chunks() &&
                 llama_paged_scheduler_is_retained(paged_scheduler.get(), slot.id);
             if (can_reuse) {
                 n_prefix = slot.prompt.tokens.get_common_prefix(task.tokens);
@@ -2223,9 +2224,18 @@ private:
             }
 
             int32_t n_prefix_used = 0;
-            if (!llama_paged_scheduler_add_request_with_prefix(
-                    paged_scheduler.get(), task.tokens.get_text_tokens().data(), task.tokens.size(), slot.id,
-                    n_prefix, &n_prefix_used)) {
+            const llama_tokens text_tokens = task.tokens.get_text_tokens();
+            bool request_queued = false;
+            if (has_media) {
+                slot.prompt_clear();
+                request_queued = llama_paged_scheduler_add_request(
+                        paged_scheduler.get(), text_tokens.data(), text_tokens.size(), slot.id);
+            } else {
+                request_queued = llama_paged_scheduler_add_request_with_prefix(
+                        paged_scheduler.get(), text_tokens.data(), text_tokens.size(), slot.id,
+                        n_prefix, &n_prefix_used);
+            }
+            if (!request_queued) {
                 send_error(task, "failed to queue request in paged KV scheduler", ERROR_TYPE_SERVER);
                 slot.prompt_clear();
                 return false;
@@ -2234,7 +2244,7 @@ private:
                 llama_memory_seq_rm(llama_get_memory(ctx_dft), slot.id, -1, -1);
             }
             if (task.type == SERVER_TASK_TYPE_COMPLETION && task.params.cache_prompt &&
-                !task.tokens.has_media_chunks() &&
+                !has_media &&
                 (!ctx_dft || ctx_dft_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_NO)) {
                 const bool checkpoint_before_last =
                     llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt) ||

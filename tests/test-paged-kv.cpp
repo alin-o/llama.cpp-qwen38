@@ -1025,6 +1025,25 @@ TEST(test_scheduler_prefix_mismatch_fails_open_cold) {
     llama_batch_free(batch);
 }
 
+TEST(test_scheduler_uncached_replacement_discards_retained_prefix) {
+    auto fixture = make_fixture();
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/0, /*n_prompt=*/20)));
+    EXPECT_TRUE(fixture.sched->retain_request(0, false));
+    finish_retained_prompt(fixture, 0);
+
+    llama_sequence_group replacement = make_group(/*id=*/0, /*n_prompt=*/7);
+    EXPECT_TRUE(fixture.sched->queue_request(std::move(replacement)));
+    EXPECT_FALSE(fixture.sched->is_retained(0));
+    EXPECT_EQ(fixture.sched->get_group_from_id(0)->n_past, 0u);
+
+    llama_batch batch = {};
+    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    EXPECT_EQ(batch.n_tokens, 7);
+    EXPECT_EQ(batch.pos[0], 0);
+    fixture.sched->remove_request(0);
+    llama_batch_free(batch);
+}
+
 TEST(test_scheduler_exact_hit_batches_with_cold_miss) {
     auto fixture = make_fixture(/*n_ctx=*/128, /*block_size=*/16, /*n_batch=*/64,
                                 /*n_gpu_blocks=*/8, /*n_cpu_blocks=*/2);
@@ -2748,6 +2767,7 @@ int main(int argc, char ** argv) {
     RUN(test_scheduler_retains_and_attaches_prompt_prefix);
     RUN(test_scheduler_splits_for_retained_checkpoint);
     RUN(test_scheduler_prefix_mismatch_fails_open_cold);
+    RUN(test_scheduler_uncached_replacement_discards_retained_prefix);
     RUN(test_scheduler_exact_hit_batches_with_cold_miss);
     RUN(test_scheduler_evicts_retained_prefix_under_pressure);
     RUN(test_scheduler_repeated_retain_reuse_and_discard);

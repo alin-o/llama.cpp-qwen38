@@ -420,6 +420,55 @@ def test_paged_slot_reuse_pressure():
     assert "HTTP 500" not in log
 
 
+def test_paged_multimodal_prompt_bypasses_retained_prefix():
+    repo = os.environ.get("LLAMA_SERVER_PAGED_MM_REPO")
+    image = os.environ.get("LLAMA_SERVER_PAGED_MM_IMAGE")
+    if not repo or not image:
+        pytest.skip(
+            "set LLAMA_SERVER_PAGED_MM_REPO and LLAMA_SERVER_PAGED_MM_IMAGE to run paged multimodal fallback"
+        )
+
+    os.environ["LLAMA_MEDIA_MARKER"] = "<__media__>"
+    server.model_hf_repo = repo
+    server.model_hf_file = None
+    server.offline = True
+    server.kv_paged = True
+    server.n_slots = 1
+    server.n_batch = 512
+    server.n_ubatch = 512
+    server.n_predict = 4
+    server.server_slots = True
+    server.start()
+
+    retained = server.make_request("POST", "/completion", data={
+        "prompt": "Retain this text-only prompt.",
+        "id_slot": 0,
+        "cache_prompt": True,
+        "temperature": 0.0,
+    })
+    assert retained.status_code == 200
+
+    request = {
+        "prompt": {
+            JSON_PROMPT_STRING_KEY: "What is this: <__media__>\n",
+            JSON_MULTIMODAL_KEY: [image],
+        },
+        "id_slot": 0,
+        "n_predict": 4,
+        "cache_prompt": True,
+        "temperature": 0.0,
+        "return_tokens": True,
+    }
+    fallback = server.make_request("POST", "/completion", data=request)
+    oracle = server.make_request("POST", "/completion", data={**request, "cache_prompt": False})
+    assert fallback.status_code == 200
+    assert oracle.status_code == 200
+    assert fallback.body["tokens"] == oracle.body["tokens"]
+    assert fallback.body["timings"]["cache_n"] == 0
+    assert oracle.body["timings"]["cache_n"] == 0
+    assert fallback.body["timings"]["prompt_n"] == oracle.body["timings"]["prompt_n"]
+
+
 @pytest.mark.parametrize("n_slots,n_requests", [
     (1, 3),
     (2, 2),
