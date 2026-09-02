@@ -128,6 +128,110 @@ def test_paged_mtp_matches_target_greedy(monkeypatch):
     assert n_draft_accepted > n_draft_steps
 
 
+def test_paged_hybrid_prompt_reuse_with_and_without_mtp():
+    global server
+    model = os.environ.get("LLAMA_SERVER_PAGED_MODEL")
+    model_draft = os.environ.get("LLAMA_SERVER_MTP_MODEL")
+    if not model or not model_draft:
+        pytest.skip("set LLAMA_SERVER_PAGED_MODEL and LLAMA_SERVER_MTP_MODEL to run paged hybrid prompt reuse")
+
+    request = {
+        "temperature": 0.0,
+        "top_k": 1,
+        "seed": 1234,
+        "n_predict": 8,
+        "ignore_eos": True,
+        "cache_prompt": True,
+        "return_tokens": True,
+    }
+
+    def configure(enable_mtp):
+        global server
+        server = ServerPreset.stories15m_moe()
+        server.model_file = model
+        server.model_hf_repo = None
+        server.model_hf_file = None
+        server.model_draft = model_draft if enable_mtp else None
+        server.spec_type = "draft-mtp" if enable_mtp else None
+        server.spec_draft_n_min = 1
+        server.spec_draft_n_max = int(os.environ.get("LLAMA_SERVER_MTP_N_MAX", "3"))
+        server.n_gpu_layer = 99
+        server.n_batch = 1024
+        server.n_ubatch = 1024
+        server.n_slots = 1
+        server.server_port = 18089
+        server.ctk = os.environ.get("LLAMA_SERVER_MTP_KV_TYPE", "q8_0")
+        server.ctv = server.ctk
+        server.fa = "on"
+        server.kv_paged = True
+
+    def verify_prompt_reuse(enable_mtp):
+        sentence = "Paged KV prefix reuse avoids recomputing stable instructions while preserving deterministic continuation. "
+        prompt = sentence * 90 + "Return a concise summary."
+        tokenized = server.make_request("POST", "/tokenize", data={
+            "content": prompt,
+            "add_special": True,
+        })
+        replacement = server.make_request("POST", "/tokenize", data={
+            "content": "Different tail token",
+            "add_special": True,
+        })
+        assert tokenized.status_code == 200
+        assert replacement.status_code == 200
+        prompt_tokens = tokenized.body["tokens"]
+        replacement_token = replacement.body["tokens"][-1]
+        if replacement_token == prompt_tokens[-1]:
+            replacement_token = replacement.body["tokens"][0]
+        assert replacement_token != prompt_tokens[-1]
+        divergent_tokens = [*prompt_tokens[:-1], replacement_token]
+
+        cold = server.make_request("POST", "/completion", data={
+            **request,
+            "prompt": prompt_tokens,
+        })
+        warm = server.make_request("POST", "/completion", data={
+            **request,
+            "prompt": prompt_tokens,
+        })
+        divergent = server.make_request("POST", "/completion", data={
+            **request,
+            "prompt": divergent_tokens,
+        })
+        divergent_oracle = server.make_request("POST", "/completion", data={
+            **request,
+            "prompt": divergent_tokens,
+            "cache_prompt": False,
+        })
+
+        for res in [cold, warm, divergent, divergent_oracle]:
+            assert res.status_code == 200
+            assert len(res.body["tokens"]) == request["n_predict"]
+        assert cold.body["timings"]["cache_n"] == 0
+        assert cold.body["timings"]["prompt_n"] == len(prompt_tokens)
+        assert warm.body["timings"]["cache_n"] == len(prompt_tokens) - 1
+        assert warm.body["timings"]["prompt_n"] == 1
+        assert warm.body["tokens"] == cold.body["tokens"]
+        # Hybrid recurrent and MTP checkpoint state is retained only for exact
+        # prompt replay. Divergent prompts must fail open to a cold prefill.
+        assert divergent.body["timings"]["cache_n"] == 0
+        assert divergent.body["timings"]["prompt_n"] == len(divergent_tokens)
+        assert divergent_oracle.body["timings"]["cache_n"] == 0
+        assert divergent_oracle.body["timings"]["prompt_n"] == len(divergent_tokens)
+        assert divergent.body["tokens"] == divergent_oracle.body["tokens"]
+        if enable_mtp:
+            for res in [cold, warm, divergent, divergent_oracle]:
+                assert res.body["timings"]["draft_n"] > 0
+
+    configure(True)
+    server.start(timeout_seconds=180)
+    verify_prompt_reuse(True)
+    server.stop()
+
+    configure(False)
+    server.start(timeout_seconds=180)
+    verify_prompt_reuse(False)
+
+
 def test_different_draft_min_draft_max():
     global server
     test_values = [

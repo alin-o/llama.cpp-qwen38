@@ -2172,7 +2172,8 @@ private:
                 llama_paged_scheduler_is_retained(paged_scheduler.get(), slot.id);
             if (can_reuse) {
                 n_prefix = slot.prompt.tokens.get_common_prefix(task.tokens);
-                if (n_prefix == (int32_t) task.tokens.size() && n_prefix > 0) {
+                const bool full_prompt_match = n_prefix == (int32_t) task.tokens.size();
+                if (full_prompt_match && n_prefix > 0) {
                     --n_prefix;
                 }
                 if (slot.alora_invocation_start > 0) {
@@ -2185,6 +2186,9 @@ private:
                     (ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
                      ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS);
                 const bool needs_checkpoint = needs_tgt_checkpoint || needs_dft_checkpoint;
+                if (needs_checkpoint && !full_prompt_match) {
+                    n_prefix = 0;
+                }
                 if (n_prefix > 0 && needs_checkpoint) {
                     const bool checkpoint_matches = slot.paged_prompt_ckpt.n_tokens == n_prefix &&
                         slot.paged_prompt_ckpt.pos_max == n_prefix - 1;
