@@ -1014,6 +1014,20 @@ private:
             throw std::runtime_error("failed to process paged speculative batch");
         }
 
+        // The paged-KV path does not go through metrics_post_decode(), so keep
+        // the per-slot prompt timing up to date here after synchronization.
+        const int64_t t_prompt_now = ggml_time_us();
+        for (int i = 0; i < info->n_seq; ++i) {
+            const int offset = info->batch_offsets[i];
+            auto & slot = slots[paged_batch.seq_id[offset][0]];
+            const int32_t prompt_tokens = slot.task->tokens.size();
+            const llama_pos batch_pos_last = paged_batch.pos[offset + info->batch_lens[i] - 1];
+
+            if (slot.stats.is_set() && batch_pos_last < prompt_tokens) {
+                slot.stats.set_prompt_last(t_prompt_now);
+            }
+        }
+
         if (server_mtp_diag_enabled()) {
             for (int i{}; i < info->n_seq; ++i) {
                 const int offset = info->batch_offsets[i];
@@ -1039,7 +1053,10 @@ private:
             const int offset = info->batch_offsets[i];
             const int slot_id = paged_batch.seq_id[offset][0];
             server_slot & slot = slots[slot_id];
-            const bool is_prefill = slot.state == SLOT_STATE_STARTED;
+            const int32_t prompt_tokens = slot.task->tokens.size();
+            const llama_pos batch_pos_last = paged_batch.pos[offset + info->batch_lens[i] - 1];
+            const bool is_prefill = batch_pos_last < prompt_tokens;
+            const bool is_final_prefill = is_prefill && batch_pos_last + 1 == prompt_tokens;
             if (slot.state == SLOT_STATE_STARTED) {
                 slot.prompt.clear();
                 slot.prompt.tokens.insert(slot.task->tokens.get_text_tokens());
@@ -1047,6 +1064,15 @@ private:
                 slot.stats.update_prompt_start();
                 slot.stats.n_prompt_processed = slot.prompt.n_tokens();
                 slot.init_sampler();
+            }
+
+            if (is_prefill && !is_final_prefill) {
+                sampled_tokens[i] = LLAMA_TOKEN_NULL;
+                accepted_counts[i] = info->batch_lens[i];
+                continue;
+            }
+
+            if (is_final_prefill) {
                 slot.state = SLOT_STATE_DONE_PROMPT;
                 if (spec) {
                     common_speculative_begin(spec.get(), slot.id, slot.prompt.tokens.get_text_tokens());
@@ -1092,6 +1118,7 @@ private:
                     result.text_to_send = common_token_to_piece(ctx_tgt, id, params_base.special);
                     result.prob = 1.0f;
                     slot.stats.n_gen++;
+                    slot.stats.update_gen_last();
                     if (!process_token(result, slot)) {
                         stop_flags[i] = 1;
                         break;
@@ -1120,6 +1147,7 @@ private:
                 result.text_to_send = common_token_to_piece(ctx_tgt, id, params_base.special);
                 result.prob = 1.0f;
                 slot.stats.n_gen++;
+                slot.stats.update_gen_last();
                 sampled_tokens[i] = id;
                 accepted_counts[i] = info->batch_lens[i];
                 if (!process_token(result, slot)) {

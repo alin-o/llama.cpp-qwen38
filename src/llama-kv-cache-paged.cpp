@@ -193,8 +193,8 @@ bool llama_kv_cache_paged::register_group(llama_sequence_group & group) {
 bool llama_kv_cache_paged::allocate(int32_t num_tokens, llama_sequence_group & group) {
     register_group(group);
     const uint32_t curr_block_count = group.block_table.size();
-    const uint32_t total_num_tokens = group.n_decoded == 0 ? std::max(group.n_prompt, (uint32_t) num_tokens)
-                                                           : group.n_decoded + num_tokens;
+    const uint32_t total_num_tokens = num_tokens == 0 ? std::max(group.n_prompt, group.n_past)
+                                                      : group.n_past + num_tokens;
     uint32_t num_requested_blocks = std::ceil((float) total_num_tokens / block_size) - curr_block_count;
     LLAMA_LOG_DEBUG("%s: curr_block_count=%d, total_num_tokens=%d, num_requested_blocks=%d\n", __func__,
                     curr_block_count, total_num_tokens, num_requested_blocks);

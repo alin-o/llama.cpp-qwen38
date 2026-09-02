@@ -1,12 +1,13 @@
 # syntax=docker/dockerfile:1
 
-ARG CUDA_VERSION=13.3.1
+# Reuse Carapa's local CUDA image for both compilation and runtime. Although a
+# standalone runtime base would be smaller in isolation, it would introduce a
+# second set of CUDA layers on this host.
+FROM carapa-llama-cpp AS cuda-toolchain
 
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu26.04 AS build
+FROM cuda-toolchain AS build
 
-RUN apt-get update && apt-get install -y \
-    cmake build-essential git libssl-dev libcurl4-openssl-dev \
-    && rm -rf /var/lib/apt/lists/*
+USER root
 
 WORKDIR /workspace
 COPY . .
@@ -30,14 +31,26 @@ RUN --mount=type=cache,id=qwen38-cmake-cuda133-sm89,target=/workspace/build,shar
     && mkdir -p /out \
     && cp -a build/bin/. /out/
 
-FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu26.04
+FROM cuda-toolchain AS production
 
-RUN apt-get update && apt-get install -y \
-    curl libssl3t64 libcurl4t64 python3 \
-    && rm -rf /var/lib/apt/lists/*
-
+USER root
 COPY --from=build /out/ /usr/local/bin/
 
+# Carapa is also used for GPU-free image builds and carries
+# NVIDIA_VISIBLE_DEVICES=void. Override that inherited build-time default in
+# the runnable qwen image; otherwise nvidia-smi can see the device while CUDA
+# applications are told that no devices are available.
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    CUDA_VISIBLE_DEVICES=0
+
+# The Carapa development image checks for its agent daemon. This image runs
+# llama-server instead; Compose provides the server healthcheck.
+HEALTHCHECK NONE
 EXPOSE 8080
+# The previous nvidia/cuda runtime stage ran as root. Carapa's `ubuntu`
+# account does not necessarily have permission to open the host-provided
+# /dev/nvidia* device nodes, which makes CUDA report "no GPU device found".
+USER root
 ENTRYPOINT ["llama-server"]
 CMD ["--host", "0.0.0.0", "--port", "8080"]

@@ -53,6 +53,7 @@ class llama_paged_scheduler_impl {
     void finish(llama_sequence_group & group);
 
     int32_t get_curr_decode_tokens() const;
+    int32_t get_scheduled_tokens(const llama_sequence_group & group) const;
 
     void activate_priority_request(llama_sequence_group_raw_list & candidates);
     void process_running_list(llama_sequence_group_raw_list & candidates);

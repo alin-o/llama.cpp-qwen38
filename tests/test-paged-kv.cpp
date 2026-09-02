@@ -1102,6 +1102,49 @@ TEST(test_scheduler_admits_full_token_budget_prefill) {
     llama_batch_free(batch);
 }
 
+TEST(test_scheduler_chunks_prefill_larger_than_batch) {
+    auto fixture = make_fixture(/*n_ctx=*/256, /*block_size=*/16, /*n_batch=*/64,
+                                /*n_gpu_blocks=*/16, /*n_cpu_blocks=*/1);
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/0, /*n_prompt=*/150)));
+
+    llama_batch batch = {};
+    const int8_t continue_flag[] = { 0 };
+
+    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    EXPECT_EQ(batch.n_tokens, 64);
+    EXPECT_EQ(batch.pos[0], 0);
+    EXPECT_EQ(batch.pos[63], 63);
+    EXPECT_FALSE(batch.logits[63]);
+    fixture.sched->update(batch, { LLAMA_TOKEN_NULL }, { 64 }, continue_flag);
+
+    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    EXPECT_EQ(batch.n_tokens, 64);
+    EXPECT_EQ(batch.pos[0], 64);
+    EXPECT_EQ(batch.pos[63], 127);
+    EXPECT_FALSE(batch.logits[63]);
+    fixture.sched->update(batch, { LLAMA_TOKEN_NULL }, { 64 }, continue_flag);
+
+    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    EXPECT_EQ(batch.n_tokens, 22);
+    EXPECT_EQ(batch.pos[0], 128);
+    EXPECT_EQ(batch.pos[21], 149);
+    EXPECT_TRUE(batch.logits[21]);
+    fixture.sched->update(batch, { 42 }, { 22 }, continue_flag);
+
+    auto * group = fixture.sched->get_group_from_id(0);
+    EXPECT_TRUE(group != nullptr);
+    EXPECT_EQ(group->n_past, 150u);
+    EXPECT_EQ(group->n_decoded, 150u);
+    EXPECT_EQ(group->logical_seq.size(), 151u);
+    EXPECT_EQ(group->logical_seq.back(), 42);
+
+    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    EXPECT_EQ(batch.n_tokens, 1);
+    EXPECT_EQ(batch.pos[0], 150);
+    EXPECT_EQ(batch.token[0], 42);
+    llama_batch_free(batch);
+}
+
 TEST(test_scheduler_batches_two_cross_block_prefills) {
     auto fixture = make_fixture(/*n_ctx=*/128, /*block_size=*/16, /*n_batch=*/64,
                                 /*n_gpu_blocks=*/4, /*n_cpu_blocks=*/1);

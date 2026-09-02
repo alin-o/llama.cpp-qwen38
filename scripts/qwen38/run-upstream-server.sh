@@ -117,6 +117,8 @@ else
     ARGS+=(--kv-unified)
 fi
 
+[[ -n "${FIT:-}" ]] && ARGS+=(--fit "$FIT")
+
 if [[ "$SPEC" == "mtp" ]]; then
     ARGS+=(
         --spec-type draft-mtp

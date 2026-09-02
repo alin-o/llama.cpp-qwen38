@@ -28,9 +28,14 @@ services:
   upstream-candidate:
     <<: *runtime
     profiles: [upstream]
+    # Make GPU injection explicit for ordinary `docker compose up/run`; do
+    # not rely solely on the Swarm-style deploy reservation below.
+    gpus: all
     build:
       context: .
       dockerfile: docker/Dockerfile
+      additional_contexts:
+        carapa-llama-cpp: docker-image://carapa-llama-cpp:latest
     image: qwen38-upstream:b10502
     ports:
       - "${QWEN38_UPSTREAM_PORT:-8882}:8080"
@@ -41,6 +46,9 @@ services:
       - ./docker/run-model-server.sh:/docker/run-model-server.sh:ro
       - qwen38_upstream_state:/state
     environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      CUDA_VISIBLE_DEVICES: "0"
       MODEL_GGUF: ${MODEL_GGUF:-}
       MTP_GGUF: ${MTP_GGUF:-}
       MMPROJ_GGUF: ${MMPROJ_GGUF:-}
@@ -59,6 +67,7 @@ services:
       N_GPU_BLOCKS: ${N_GPU_BLOCKS:-}
       N_CPU_BLOCKS: ${N_CPU_BLOCKS:-}
       KV_PAGED_WATERMARK: ${KV_PAGED_WATERMARK:-}
+      FIT: ${FIT:-}
       LLAMA_ARG_CACHE_RAM: "16384"
       LLAMA_ARG_LOG_VERBOSITY: "3"
     # MODEL_ENTRYPOINT switches launchers: the qwen38 script is the default,
