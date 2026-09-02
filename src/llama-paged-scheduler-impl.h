@@ -40,6 +40,7 @@ class llama_paged_scheduler_impl {
     }
     void                   remove_request(int32_t request_id);
     void                   set_on_finish(llama_paged_on_finish_cb cb, void * user_data);
+    void                   set_on_recompute(llama_paged_on_recompute_cb cb, void * user_data);
     llama_sequence_group *         get_group_from_id(int32_t request_id) const;
     const llama_paged_batch_info * get_curr_batch_info() const;
 
@@ -98,6 +99,8 @@ class llama_paged_scheduler_impl {
     uint32_t max_livelock_steps = 20;
 
     // Callback for output tracking
-    llama_paged_on_finish_cb on_finish_cb        = nullptr;
-    void *                   on_finish_user_data = nullptr;
+    llama_paged_on_finish_cb    on_finish_cb          = nullptr;
+    void *                      on_finish_user_data   = nullptr;
+    llama_paged_on_recompute_cb on_recompute_cb        = nullptr;
+    void *                      on_recompute_user_data = nullptr;
 };

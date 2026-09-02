@@ -1604,6 +1604,18 @@ private:
                 SRV_ERR("%s", "failed to initialize paged KV scheduler\n");
                 return false;
             }
+            llama_paged_scheduler_set_on_recompute(paged_scheduler.get(), [](int32_t request_id, void * user_data) {
+                auto * server = static_cast<server_context_impl *>(user_data);
+                server_slot * slot = server->get_slot_by_id(request_id);
+                if (slot == nullptr) {
+                    return;
+                }
+                if (slot->stats.n_prompt_cached > 0) {
+                    SLT_DBG(*slot, "%s", "discarding cached prompt accounting after scheduler recomputation\n");
+                }
+                slot->stats.n_prompt_cached = 0;
+                slot->stats.n_prompt_processed = 0;
+            }, this);
         }
 
         // try speculative decoding
@@ -2251,7 +2263,6 @@ private:
             }
             slot.stats.n_prompt_cached = n_prefix_used;
             slot.stats.n_prompt_processed = 0;
-            metrics.add_prompt_cached(n_prefix_used);
         }
         slot.task = std::make_unique<const server_task>(std::move(task));
 
@@ -2525,6 +2536,9 @@ private:
     }
 
     void send_final_response(server_slot & slot) {
+        if (params_base.kv_paged) {
+            metrics.add_prompt_cached(slot.stats.n_prompt_cached);
+        }
         auto res = std::make_unique<server_task_result_cmpl_final>();
 
         res->id      = slot.task->id;

@@ -1086,6 +1086,50 @@ TEST(test_scheduler_evicts_retained_prefix_under_pressure) {
     llama_batch_free(batch);
 }
 
+TEST(test_scheduler_reports_active_prefix_recomputation) {
+    auto fixture = make_fixture(/*n_ctx=*/128, /*block_size=*/16, /*n_batch=*/64,
+                                /*n_gpu_blocks=*/4, /*n_cpu_blocks=*/1);
+    std::vector<int32_t> recomputed;
+    fixture.sched->set_on_recompute([](int32_t request_id, void * user_data) {
+        static_cast<std::vector<int32_t> *>(user_data)->push_back(request_id);
+    }, &recomputed);
+
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/1, /*n_prompt=*/15)));
+    EXPECT_TRUE(fixture.sched->retain_request(1, false));
+    finish_retained_prompt(fixture, 1);
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/1, /*n_prompt=*/16), /*n_past=*/15));
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/0, /*n_prompt=*/31)));
+
+    llama_batch batch = {};
+    const int8_t continue_flags[] = { 0, 0 };
+    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    EXPECT_EQ(fixture.sched->get_curr_batch_info()->n_seq, 2);
+    fixture.sched->update(batch, { 10, 11 }, continue_flags);
+
+    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    EXPECT_EQ(fixture.sched->get_curr_batch_info()->n_seq, 2);
+    fixture.sched->update(batch, { 12, 13 }, continue_flags);
+
+    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    EXPECT_EQ(recomputed.size(), 1u);
+    EXPECT_EQ(recomputed[0], 1);
+    const auto * warm = fixture.sched->get_group_from_id(1);
+    EXPECT_TRUE(warm != nullptr);
+    EXPECT_EQ(warm->n_past, 0u);
+    EXPECT_TRUE(warm->status == llama_sequence_group_status::WAITING);
+    EXPECT_EQ(fixture.sched->get_curr_batch_info()->n_seq, 1);
+    EXPECT_EQ(batch.seq_id[0][0], 0);
+
+    const int8_t stop_flag[] = { 1 };
+    fixture.sched->update(batch, { 14 }, stop_flag);
+    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    EXPECT_EQ(batch.seq_id[0][0], 1);
+    EXPECT_EQ(batch.pos[0], 0);
+    EXPECT_EQ(batch.n_tokens, 16);
+    fixture.sched->remove_request(1);
+    llama_batch_free(batch);
+}
+
 TEST(test_scheduler_repeated_retain_reuse_and_discard) {
     auto fixture = make_fixture(/*n_ctx=*/128, /*block_size=*/16, /*n_batch=*/64,
                                 /*n_gpu_blocks=*/4, /*n_cpu_blocks=*/1);
@@ -2770,6 +2814,7 @@ int main(int argc, char ** argv) {
     RUN(test_scheduler_uncached_replacement_discards_retained_prefix);
     RUN(test_scheduler_exact_hit_batches_with_cold_miss);
     RUN(test_scheduler_evicts_retained_prefix_under_pressure);
+    RUN(test_scheduler_reports_active_prefix_recomputation);
     RUN(test_scheduler_repeated_retain_reuse_and_discard);
     RUN(test_scheduler_cancels_active_retained_request);
     fprintf(stderr, "test-paged-kv: llama_kv_cache_paged scheduler\n");

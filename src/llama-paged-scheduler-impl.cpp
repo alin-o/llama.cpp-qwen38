@@ -377,6 +377,9 @@ void llama_paged_scheduler_impl::swap_out_or_recompute(llama_sequence_group_ptr 
     group_ptr->n_past    = 0;
     group_ptr->n_decoded = 0;
     group_ptr->logical_seq.resize(group_ptr->n_prompt);
+    if (on_recompute_cb) {
+        on_recompute_cb(rid, on_recompute_user_data);
+    }
 
     LLAMA_LOG_DEBUG("%s: (recomputation) request_id=%d was sent for recomputation.\n", __func__, rid);
     set_waiting(std::move(group_ptr));
@@ -751,6 +754,11 @@ void llama_paged_scheduler_impl::update(const llama_batch &              batch,
 void llama_paged_scheduler_impl::set_on_finish(llama_paged_on_finish_cb cb, void * user_data) {
     on_finish_cb        = cb;
     on_finish_user_data = user_data;
+}
+
+void llama_paged_scheduler_impl::set_on_recompute(llama_paged_on_recompute_cb cb, void * user_data) {
+    on_recompute_cb        = cb;
+    on_recompute_user_data = user_data;
 }
 
 llama_sequence_group * llama_paged_scheduler_impl::get_group_from_id(int32_t request_id) const {

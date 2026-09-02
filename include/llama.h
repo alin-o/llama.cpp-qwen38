@@ -1667,6 +1667,7 @@ extern "C" {
                                              const llama_token * tokens,
                                              int32_t             n_tokens,
                                              void *              user_data);
+    typedef void (*llama_paged_on_recompute_cb)(int32_t request_id, void * user_data);
     LLAMA_API struct llama_paged_scheduler * llama_paged_scheduler_init(struct llama_context * ctx);
     LLAMA_API void llama_paged_scheduler_free(struct llama_paged_scheduler * sched);
 
@@ -1722,6 +1723,10 @@ extern "C" {
     LLAMA_API void llama_paged_scheduler_set_on_finish(struct llama_paged_scheduler * sched,
                                                        llama_paged_on_finish_cb       cb,
                                                        void *                         user_data);
+    // Called when memory pressure discards a request's sequence state and restarts it from token zero.
+    LLAMA_API void llama_paged_scheduler_set_on_recompute(struct llama_paged_scheduler * sched,
+                                                          llama_paged_on_recompute_cb    cb,
+                                                          void *                         user_data);
 #ifdef __cplusplus
 }
 #endif

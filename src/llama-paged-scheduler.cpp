@@ -203,6 +203,14 @@ LLAMA_API void llama_paged_scheduler_set_on_finish(struct llama_paged_scheduler 
     sched->impl.set_on_finish(cb, user_data);
 }
 
+LLAMA_API void llama_paged_scheduler_set_on_recompute(struct llama_paged_scheduler * sched,
+                                                      llama_paged_on_recompute_cb    cb,
+                                                      void *                         user_data) {
+    if (sched) {
+        sched->impl.set_on_recompute(cb, user_data);
+    }
+}
+
 LLAMA_API bool llama_paged_scheduler_get_seq_state(struct llama_paged_scheduler * sched,
                                                    int32_t                        request_id,
                                                    struct llama_paged_seq_state * out_state) {
