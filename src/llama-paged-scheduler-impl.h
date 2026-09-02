@@ -3,6 +3,7 @@
 #include "llama-kv-cache-paged.h"
 
 #include <clocale>
+#include <unordered_set>
 #include <vector>
 
 class llama_memory_recurrent;
@@ -28,7 +29,9 @@ class llama_paged_scheduler_impl {
     ~llama_paged_scheduler_impl();
 
     llama_scheduler_status step(llama_batch & batch, int32_t spec_n = 0);
-    bool                   queue_request(llama_sequence_group group);
+    bool                   queue_request(llama_sequence_group group, uint32_t n_past = 0);
+    bool                   retain_request(int32_t request_id, bool checkpoint_before_last);
+    bool                   is_retained(int32_t request_id) const;
     void                   update(const llama_batch & batch, const std::vector<llama_token> & new_tokens,
                                    const std::vector<uint32_t> & accepted, const int8_t * stop_flags);
     void                   update(const llama_batch & batch, const std::vector<llama_token> & new_tokens,
@@ -50,7 +53,9 @@ class llama_paged_scheduler_impl {
     void set_swapped(llama_sequence_group_ptr group);
     void set_waiting(llama_sequence_group_ptr group);
 
-    void finish(llama_sequence_group & group);
+    bool finish(llama_sequence_group & group);
+    void complete_request(int32_t request_id);
+    void evict_retained_requests();
 
     int32_t get_curr_decode_tokens() const;
     int32_t get_scheduled_tokens(const llama_sequence_group & group) const;
@@ -70,6 +75,9 @@ class llama_paged_scheduler_impl {
     llama_sequence_group_list running;
     llama_sequence_group_list swapped;
     llama_sequence_group_list waiting;
+    std::unordered_map<int32_t, llama_sequence_group_ptr> retained;
+    std::unordered_set<int32_t> retain_on_finish;
+    std::unordered_set<int32_t> checkpoint_before_last;
 
     // Used for fast lookups
     std::unordered_map<int32_t, llama_sequence_group *> id_to_group;

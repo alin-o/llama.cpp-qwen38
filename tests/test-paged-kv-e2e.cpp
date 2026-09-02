@@ -460,6 +460,232 @@ static void run_paged_checkpoint_resume(const std::string & model_path) {
     llama_paged_scheduler_free(restored_sched);
 }
 
+static void run_paged_retained_prefix(const std::string & model_path) {
+    common_params params;
+    params.model.path       = model_path;
+    params.n_ctx            = 256;
+    params.n_batch          = 64;
+    params.n_ubatch         = 64;
+    params.warmup           = false;
+    params.kv_paged         = true;
+    params.n_gpu_blocks     = 64;
+    params.n_cpu_blocks     = 16;
+    params.n_gpu_blocks_set = true;
+    params.n_cpu_blocks_set = true;
+    params.n_sequences      = 1;
+    params.n_parallel       = 1;
+    params.cache_type_k     = GGML_TYPE_Q8_0;
+    params.cache_type_v     = GGML_TYPE_Q8_0;
+
+    auto init = common_init_from_params(params);
+    llama_context * ctx = init->context();
+    EXPECT_TRUE(ctx != nullptr);
+    const llama_vocab * vocab = llama_model_get_vocab(init->model());
+    const int n_vocab = llama_vocab_n_tokens(vocab);
+    std::vector<llama_token> prompt = common_tokenize(ctx, TEST_PROMPT, true);
+    EXPECT_TRUE(prompt.size() > 1);
+
+    llama_paged_scheduler * sched = llama_paged_scheduler_init(ctx);
+    EXPECT_TRUE(sched != nullptr);
+    EXPECT_TRUE(llama_paged_scheduler_add_request(sched, prompt.data(), prompt.size(), 0));
+    EXPECT_TRUE(llama_paged_scheduler_retain_request(sched, 0, false));
+
+    llama_batch batch = {};
+    EXPECT_TRUE(llama_paged_scheduler_prepare_batch(sched, &batch));
+    EXPECT_TRUE(batch.n_tokens == (int32_t) prompt.size());
+    EXPECT_TRUE(llama_decode(ctx, batch) == 0);
+    llama_synchronize(ctx);
+    const llama_paged_batch_info * info = llama_paged_scheduler_get_batch_info(sched);
+    EXPECT_TRUE(info != nullptr && info->n_seq == 1);
+    const std::vector<float> cold_logits = get_logits(
+        ctx, info->batch_offsets[0] + info->batch_lens[0] - 1, n_vocab);
+    const llama_token cold_token = argmax_logits(cold_logits);
+    const int8_t stop[] = { 1 };
+    llama_paged_scheduler_update(sched, &batch, &cold_token, stop);
+    EXPECT_TRUE(llama_paged_scheduler_is_retained(sched, 0));
+
+    int32_t n_prefix_used = 0;
+    EXPECT_TRUE(llama_paged_scheduler_add_request_with_prefix(
+        sched, prompt.data(), prompt.size(), 0, prompt.size() - 1, &n_prefix_used));
+    EXPECT_TRUE(n_prefix_used == (int32_t) prompt.size() - 1);
+    EXPECT_TRUE(llama_paged_scheduler_prepare_batch(sched, &batch));
+    EXPECT_TRUE(batch.n_tokens == 1);
+    info = llama_paged_scheduler_get_batch_info(sched);
+    EXPECT_TRUE(info != nullptr && info->n_seq == 1);
+    EXPECT_TRUE(batch.token[0] == prompt.back());
+    EXPECT_TRUE(batch.pos[0] == (llama_pos) prompt.size() - 1);
+    const int32_t prompt_block = batch.pos[0] / params.block_size;
+    const int32_t prompt_offset = batch.pos[0] % params.block_size;
+    EXPECT_TRUE(info->write_slots[0] == info->block_table[prompt_block] * params.block_size + prompt_offset);
+
+    EXPECT_TRUE(llama_decode(ctx, batch) == 0);
+    llama_synchronize(ctx);
+    compare_logits(0, cold_logits, get_logits(ctx, 0, n_vocab));
+    const llama_token warm_token = argmax_logits(get_logits(ctx, 0, n_vocab));
+    EXPECT_TRUE(warm_token == cold_token);
+    const int8_t keep_running[] = { 0 };
+    llama_paged_scheduler_update(sched, &batch, &warm_token, keep_running);
+
+    const int32_t reused_before = llama_perf_context(ctx).n_reused;
+    EXPECT_TRUE(llama_paged_scheduler_prepare_batch(sched, &batch));
+    info = llama_paged_scheduler_get_batch_info(sched);
+    EXPECT_TRUE(info != nullptr && info->n_seq == 1 && batch.n_tokens == 1);
+    EXPECT_TRUE(batch.token[0] == warm_token);
+    EXPECT_TRUE(batch.pos[0] == (llama_pos) prompt.size());
+    const int32_t decode_block = batch.pos[0] / params.block_size;
+    const int32_t decode_offset = batch.pos[0] % params.block_size;
+    EXPECT_TRUE(info->write_slots[0] == info->block_table[decode_block] * params.block_size + decode_offset);
+    EXPECT_TRUE(llama_decode(ctx, batch) == 0);
+    llama_synchronize(ctx);
+    EXPECT_TRUE(llama_perf_context(ctx).n_reused > reused_before);
+    const llama_token next = argmax_logits(get_logits(ctx, 0, n_vocab));
+    llama_paged_scheduler_update(sched, &batch, &next, stop);
+
+    llama_paged_scheduler_remove_request(sched, 0);
+    llama_paged_scheduler_free(sched);
+    llama_batch_free(batch);
+}
+
+static std::vector<path_result> run_paged_multi_slot_prefix_case(
+        const std::string & model_path, bool reuse_slot_zero) {
+    static constexpr int n_predict = 8;
+
+    common_params params;
+    params.model.path       = model_path;
+    params.n_ctx            = 256;
+    params.n_batch          = 128;
+    params.n_ubatch         = 128;
+    params.warmup           = false;
+    params.kv_paged         = true;
+    params.n_gpu_blocks     = 64;
+    params.n_cpu_blocks     = 16;
+    params.n_gpu_blocks_set = true;
+    params.n_cpu_blocks_set = true;
+    params.n_sequences      = 2;
+    params.n_parallel       = 2;
+    params.cache_type_k     = GGML_TYPE_Q8_0;
+    params.cache_type_v     = GGML_TYPE_Q8_0;
+
+    auto init = common_init_from_params(params);
+    llama_context * ctx = init->context();
+    EXPECT_TRUE(ctx != nullptr);
+    const llama_vocab * vocab = llama_model_get_vocab(init->model());
+    const int n_vocab = llama_vocab_n_tokens(vocab);
+    std::vector<std::vector<llama_token>> prompts = {
+        common_tokenize(ctx, TEST_PROMPT, true),
+        common_tokenize(ctx, "A cold request about a red fox crossing a snowy field.", true),
+    };
+    EXPECT_TRUE(prompts[0].size() > 1);
+    EXPECT_TRUE(!prompts[1].empty());
+    EXPECT_TRUE(prompts[0].size() + prompts[1].size() <= (size_t) params.n_batch);
+
+    llama_paged_scheduler * sched = llama_paged_scheduler_init(ctx);
+    EXPECT_TRUE(sched != nullptr);
+    llama_batch batch = {};
+
+    if (reuse_slot_zero) {
+        EXPECT_TRUE(llama_paged_scheduler_add_request(
+            sched, prompts[0].data(), prompts[0].size(), 0));
+        EXPECT_TRUE(llama_paged_scheduler_retain_request(sched, 0, false));
+        EXPECT_TRUE(llama_paged_scheduler_prepare_batch(sched, &batch));
+        EXPECT_TRUE(batch.n_tokens == (int32_t) prompts[0].size());
+        EXPECT_TRUE(llama_decode(ctx, batch) == 0);
+        llama_synchronize(ctx);
+        const llama_paged_batch_info * info = llama_paged_scheduler_get_batch_info(sched);
+        EXPECT_TRUE(info != nullptr && info->n_seq == 1);
+        const int32_t logits_index = info->batch_offsets[0] + info->batch_lens[0] - 1;
+        const llama_token next = argmax_logits(get_logits(ctx, logits_index, n_vocab));
+        const int8_t stop[] = { 1 };
+        llama_paged_scheduler_update(sched, &batch, &next, stop);
+        EXPECT_TRUE(llama_paged_scheduler_is_retained(sched, 0));
+
+        int32_t n_prefix_used = 0;
+        EXPECT_TRUE(llama_paged_scheduler_add_request_with_prefix(
+            sched, prompts[0].data(), prompts[0].size(), 0, prompts[0].size() - 1, &n_prefix_used));
+        EXPECT_TRUE(n_prefix_used == (int32_t) prompts[0].size() - 1);
+    } else {
+        EXPECT_TRUE(llama_paged_scheduler_add_request(
+            sched, prompts[0].data(), prompts[0].size(), 0));
+    }
+    EXPECT_TRUE(llama_paged_scheduler_add_request(
+        sched, prompts[1].data(), prompts[1].size(), 1));
+
+    std::vector<path_result> results(2);
+    for (auto & result : results) {
+        result.n_vocab = n_vocab;
+    }
+
+    for (int step = 0; step < n_predict; ++step) {
+        EXPECT_TRUE(llama_paged_scheduler_prepare_batch(sched, &batch));
+        const llama_paged_batch_info * info = llama_paged_scheduler_get_batch_info(sched);
+        EXPECT_TRUE(info != nullptr && info->n_seq == 2);
+
+        int rows[2] = { -1, -1 };
+        for (int row = 0; row < info->n_seq; ++row) {
+            const int32_t request_id = batch.seq_id[info->batch_offsets[row]][0];
+            EXPECT_TRUE(request_id == 0 || request_id == 1);
+            rows[request_id] = row;
+        }
+        EXPECT_TRUE(rows[0] >= 0 && rows[1] >= 0);
+
+        if (step == 0) {
+            EXPECT_TRUE(info->batch_lens[rows[0]] ==
+                (reuse_slot_zero ? 1 : (int32_t) prompts[0].size()));
+            EXPECT_TRUE(info->batch_lens[rows[1]] == (int32_t) prompts[1].size());
+            EXPECT_TRUE(batch.pos[info->batch_offsets[rows[0]]] ==
+                (reuse_slot_zero ? (llama_pos) prompts[0].size() - 1 : 0));
+            EXPECT_TRUE(batch.pos[info->batch_offsets[rows[1]]] == 0);
+
+            const int32_t blocks_zero =
+                (info->context_lens[rows[0]] + params.block_size - 1) / params.block_size;
+            const int32_t blocks_one =
+                (info->context_lens[rows[1]] + params.block_size - 1) / params.block_size;
+            for (int32_t i = 0; i < blocks_zero; ++i) {
+                const int32_t block_zero =
+                    info->block_table[rows[0] * info->n_blocks_per_seq + i];
+                EXPECT_TRUE(block_zero >= 0);
+                for (int32_t j = 0; j < blocks_one; ++j) {
+                    const int32_t block_one =
+                        info->block_table[rows[1] * info->n_blocks_per_seq + j];
+                    EXPECT_TRUE(block_one >= 0);
+                    EXPECT_TRUE(block_zero != block_one);
+                }
+            }
+        }
+
+        EXPECT_TRUE(llama_decode(ctx, batch) == 0);
+        llama_synchronize(ctx);
+        llama_token next[2] = {};
+        int8_t stop[2] = {};
+        for (int row = 0; row < info->n_seq; ++row) {
+            const int32_t request_id = batch.seq_id[info->batch_offsets[row]][0];
+            const int32_t logits_index = info->batch_offsets[row] + info->batch_lens[row] - 1;
+            results[request_id].logits.push_back(get_logits(ctx, logits_index, n_vocab));
+            next[row] = argmax_logits(results[request_id].logits.back());
+            results[request_id].tokens.push_back(next[row]);
+            stop[row] = step + 1 == n_predict;
+        }
+        llama_paged_scheduler_update(sched, &batch, next, stop);
+    }
+
+    llama_paged_scheduler_free(sched);
+    llama_batch_free(batch);
+    return results;
+}
+
+static void run_paged_multi_slot_retained_prefix(const std::string & model_path) {
+    const std::vector<path_result> cold = run_paged_multi_slot_prefix_case(model_path, false);
+    const std::vector<path_result> mixed = run_paged_multi_slot_prefix_case(model_path, true);
+    EXPECT_TRUE(cold.size() == 2 && mixed.size() == 2);
+    for (int request_id = 0; request_id < 2; ++request_id) {
+        EXPECT_TRUE(mixed[request_id].tokens == cold[request_id].tokens);
+        EXPECT_TRUE(mixed[request_id].logits.size() == cold[request_id].logits.size());
+        for (size_t step = 0; step < cold[request_id].logits.size(); ++step) {
+            compare_logits(step, cold[request_id].logits[step], mixed[request_id].logits[step]);
+        }
+    }
+}
+
 static std::vector<int> top_k(const std::vector<float> & logits) {
     std::vector<int> result(logits.size());
     std::iota(result.begin(), result.end(), 0);
@@ -579,6 +805,10 @@ int main(int argc, char ** argv) {
     if (head_dim % ggml_blck_size(GGML_TYPE_Q8_0) == 0) {
         fprintf(stderr, "test-paged-kv-e2e: resuming q8_0 paged checkpoint\n");
         run_paged_checkpoint_resume(params.model.path);
+        fprintf(stderr, "test-paged-kv-e2e: reusing retained q8_0 paged prefix\n");
+        run_paged_retained_prefix(params.model.path);
+        fprintf(stderr, "test-paged-kv-e2e: batching a warm hit with a cold miss\n");
+        run_paged_multi_slot_retained_prefix(params.model.path);
     }
     fprintf(stderr, "test-paged-kv-e2e: PASSED\n");
 

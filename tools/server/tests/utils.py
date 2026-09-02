@@ -70,6 +70,9 @@ class ServerProcess:
     n_batch: int | None = None
     n_ubatch: int | None = None
     n_ctx: int | None = None
+    block_size: int | None = None
+    n_gpu_blocks: int | None = None
+    n_cpu_blocks: int | None = None
     n_ga: int | None = None
     n_ga_w: int | None = None
     n_predict: int | None = None
@@ -187,6 +190,12 @@ class ServerProcess:
             server_args.extend(["--batch-size", self.n_batch])
         if self.n_ubatch:
             server_args.extend(["--ubatch-size", self.n_ubatch])
+        if self.block_size:
+            server_args.extend(["--kv-block-size", self.block_size])
+        if self.n_gpu_blocks:
+            server_args.extend(["--n-gpu-blocks", self.n_gpu_blocks])
+        if self.n_cpu_blocks:
+            server_args.extend(["--n-cpu-blocks", self.n_cpu_blocks])
         if self.n_threads:
             server_args.extend(["--threads", self.n_threads])
         if self.n_gpu_layer:

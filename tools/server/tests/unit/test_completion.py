@@ -336,20 +336,83 @@ def test_paged_slot_reuse_pressure():
     server.n_ctx = 8192
     server.n_batch = 512
     server.n_ubatch = 512
+    server.block_size = 16
+    server.n_gpu_blocks = 32
+    server.n_cpu_blocks = 4
     server.n_gpu_layer = 99
     server.n_predict = 8
+    server.server_slots = True
+    server.slot_save_path = TMP_DIR
     server.debug = True
     server.log_path = os.path.join(TMP_DIR, "paged-slot-reuse.log")
     server.start()
 
-    tasks = [(server.make_request, ("POST", "/completion", {
-        "prompt": "Explain why request ordering matters.",
+    prompt = "Explain why request ordering matters. " * 16
+    request = {
+        "prompt": prompt,
+        "id_slot": 0,
         "n_predict": 8,
         "temperature": 0.0,
-    })) for _ in range(4)]
+        "cache_prompt": True,
+        "return_tokens": True,
+    }
+    cold = server.make_request("POST", "/completion", data=request)
+    warm = server.make_request("POST", "/completion", data=request)
+    assert cold.status_code == 200
+    assert warm.status_code == 200
+    assert warm.body["tokens"] == cold.body["tokens"]
+    assert cold.body["timings"]["cache_n"] == 0
+    assert warm.body["timings"]["cache_n"] == cold.body["timings"]["prompt_n"] - 1
+    assert warm.body["timings"]["prompt_n"] == 1
+
+    oracle = server.make_request("POST", "/completion", data={**request, "cache_prompt": False})
+    assert oracle.status_code == 200
+    assert oracle.body["tokens"] == cold.body["tokens"]
+    assert oracle.body["timings"]["cache_n"] == 0
+    assert oracle.body["timings"]["prompt_n"] == cold.body["timings"]["prompt_n"]
+
+    after_nocache = server.make_request("POST", "/completion", data=request)
+    assert after_nocache.status_code == 200
+    assert after_nocache.body["tokens"] == cold.body["tokens"]
+    assert after_nocache.body["timings"]["cache_n"] == 0
+    assert after_nocache.body["timings"]["prompt_n"] == cold.body["timings"]["prompt_n"]
+
+    prefix = "Explain why request ordering matters. " * 12
+    divergent = server.make_request("POST", "/completion", data={**request, "prompt": prefix + "Focus on fairness."})
+    divergent_oracle = server.make_request("POST", "/completion", data={
+        **request,
+        "prompt": prefix + "Focus on fairness.",
+        "cache_prompt": False,
+    })
+    assert divergent.status_code == 200
+    assert divergent_oracle.status_code == 200
+    assert divergent.body["tokens"] == divergent_oracle.body["tokens"]
+    assert divergent.body["timings"]["prompt_n"] + divergent.body["timings"]["cache_n"] == divergent_oracle.body["timings"]["prompt_n"]
+
+    tokenized = server.make_request("POST", "/tokenize", data={"content": prompt, "add_special": True})
+    mismatch_tokens = tokenized.body["tokens"]
+    mismatch_tokens[0] = 1 if mismatch_tokens[0] != 1 else 2
+    mismatch = server.make_request("POST", "/completion", data={**request, "prompt": mismatch_tokens})
+    assert mismatch.status_code == 200
+    assert mismatch.body["timings"]["cache_n"] == 0
+
+    tasks = [(server.make_request, ("POST", "/completion", {
+        "prompt": "Explain why request ordering matters.",
+        "id_slot": index % 2,
+        "n_predict": 8,
+        "temperature": 0.0,
+    })) for index in range(4)]
     results = parallel_function_calls(tasks)
 
     assert all(res.status_code == 200 for res in results)
+
+    erased = server.make_request("POST", "/slots/0?action=erase")
+    assert erased.status_code == 200
+    after_erase = server.make_request("POST", "/completion", data=request)
+    assert after_erase.status_code == 200
+    assert after_erase.body["tokens"] == cold.body["tokens"]
+    assert after_erase.body["timings"]["cache_n"] == 0
+
     log = open(server.log_path, encoding="utf-8").read()
     assert "already queued" not in log
     assert "paged KV sequence state is empty" not in log

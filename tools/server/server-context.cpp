@@ -261,6 +261,7 @@ struct server_slot {
     llama_tokens spec_prompt;
     std::vector<int32_t> spec_i_batch;
     common_prompt_checkpoint spec_ckpt;
+    common_prompt_checkpoint paged_prompt_ckpt;
     bool spec_is_replay = false;
 
     // TODO: move members that belong to the task (such as `generated_text`, `has_new_line`) to task_results_state
@@ -339,9 +340,11 @@ struct server_slot {
     void prompt_clear() {
         SLT_TRC(*this, "clearing prompt with %zu tokens\n", prompt.tokens.size());
 
+        callback_on_prompt_clear(id);
         mem.seq_rm(id, -1, -1);
 
         prompt.clear();
+        paged_prompt_ckpt.clear();
     }
 
     std::vector<common_adapter_lora_info> lora;
@@ -365,6 +368,7 @@ struct server_slot {
     std::vector<uint64_t> n_accepted_per_pos;
 
     std::function<void(int /* id_slot */)>   callback_on_release;
+    std::function<void(int /* id_slot */)>   callback_on_prompt_clear = [](int) {};
     std::function<void(const server_slot &)> callback_on_reset; // called before reset()
 
     // this is for printing timings with slot progress, not part of metrics
@@ -1006,6 +1010,29 @@ private:
             }
         }
 
+        for (int i = 0; i < info->n_seq; ++i) {
+            const int offset = info->batch_offsets[i];
+            server_slot & slot = slots[paged_batch.seq_id[offset][0]];
+            if (slot.state != SLOT_STATE_STARTED) {
+                continue;
+            }
+
+            slot.prompt.clear();
+            slot.prompt.tokens.insert(slot.task->tokens.get_text_tokens());
+            slot.state = SLOT_STATE_PROCESSING_PROMPT;
+            slot.stats.update_prompt_start();
+            slot.init_sampler();
+
+            if (slot.task->params.stream) {
+                if (slot.task->params.return_progress) {
+                    send_partial_response(slot, {}, true);
+                } else {
+                    send_partial_response(slot, {}, false, true);
+                }
+            }
+        }
+
+        metrics_pre_decode();
         if (llama_decode(ctx_tgt, paged_batch) != 0) {
             throw std::runtime_error("paged scheduler decode failed");
         }
@@ -1013,6 +1040,24 @@ private:
         if (spec && !common_speculative_process(spec.get(), paged_batch)) {
             throw std::runtime_error("failed to process paged speculative batch");
         }
+
+        metrics.n_decode++;
+        uint64_t n_prompt_tokens = 0;
+        for (const auto & slot : slots) {
+            if (slot.is_processing()) {
+                metrics.n_busy_slots++;
+            }
+            metrics.n_tokens_max = std::max(metrics.n_tokens_max, (uint64_t) slot.prompt.n_tokens());
+        }
+        for (int i = 0; i < info->n_seq; ++i) {
+            const int offset = info->batch_offsets[i];
+            const server_slot & slot = slots[paged_batch.seq_id[offset][0]];
+            for (int j = 0; j < info->batch_lens[i]; ++j) {
+                n_prompt_tokens += paged_batch.pos[offset + j] < (llama_pos) slot.task->tokens.size();
+            }
+        }
+        metrics_queue_prompt(n_prompt_tokens);
+        metrics_flush_prompt();
 
         // The paged-KV path does not go through metrics_post_decode(), so keep
         // the per-slot prompt timing up to date here after synchronization.
@@ -1057,13 +1102,8 @@ private:
             const llama_pos batch_pos_last = paged_batch.pos[offset + info->batch_lens[i] - 1];
             const bool is_prefill = batch_pos_last < prompt_tokens;
             const bool is_final_prefill = is_prefill && batch_pos_last + 1 == prompt_tokens;
-            if (slot.state == SLOT_STATE_STARTED) {
-                slot.prompt.clear();
-                slot.prompt.tokens.insert(slot.task->tokens.get_text_tokens());
-                slot.state = SLOT_STATE_PROCESSING_PROMPT;
-                slot.stats.update_prompt_start();
-                slot.stats.n_prompt_processed = slot.prompt.n_tokens();
-                slot.init_sampler();
+            if (is_prefill) {
+                slot.stats.n_prompt_processed += info->batch_lens[i];
             }
 
             if (is_prefill && !is_final_prefill) {
@@ -1163,8 +1203,41 @@ private:
                 slot.state = SLOT_STATE_GENERATING;
             }
         }
+        std::vector<int32_t> checkpoint_slots;
+        for (int i = 0; i < info->n_seq; ++i) {
+            const int offset = info->batch_offsets[i];
+            const server_slot & slot = slots[paged_batch.seq_id[offset][0]];
+            const int32_t prompt_tokens = slot.task->tokens.size();
+            const llama_pos batch_pos_last = paged_batch.pos[offset + info->batch_lens[i] - 1];
+            const bool checkpoint_before_last =
+                llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt) ||
+                (ctx_dft && (ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
+                             ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS));
+            if (slot.task->params.cache_prompt && checkpoint_before_last &&
+                prompt_tokens > 1 && batch_pos_last + 2 == prompt_tokens) {
+                checkpoint_slots.push_back(paged_batch.seq_id[offset][0]);
+            }
+        }
+
         llama_paged_scheduler_update_ex(
                 paged_scheduler.get(), &paged_batch, sampled_tokens.data(), accepted_counts.data(), stop_flags.data());
+        for (int id_slot : checkpoint_slots) {
+            server_slot & slot = slots[id_slot];
+            auto & checkpoint = slot.paged_prompt_ckpt;
+            checkpoint.clear();
+            checkpoint.update_pos(
+                slot.task->n_tokens() - 1,
+                llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), id_slot),
+                llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), id_slot));
+            if (llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt)) {
+                checkpoint.update_tgt(ctx_tgt, id_slot, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+            }
+            if (ctx_dft && (ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
+                            ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS)) {
+                checkpoint.update_dft(ctx_dft, id_slot, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+            }
+            common_speculative_get_state(spec.get(), id_slot, checkpoint.data_spec);
+        }
         if (server_mtp_diag_enabled()) {
             for (int i{}; i < info->n_seq; ++i) {
                 const int offset = info->batch_offsets[i];
@@ -1176,7 +1249,6 @@ private:
             }
         }
         for (int id_slot : finished_slots) {
-            llama_paged_scheduler_remove_request(paged_scheduler.get(), id_slot);
             slots[id_slot].release();
         }
         return true;
@@ -1572,10 +1644,17 @@ private:
 
             slot.callback_on_release = [this](int id_slot) {
                 if (params_base.kv_paged) {
-                    llama_paged_scheduler_remove_request(paged_scheduler.get(), id_slot);
-                    slots[id_slot].prompt_clear();
+                    if (!llama_paged_scheduler_is_retained(paged_scheduler.get(), id_slot)) {
+                        slots[id_slot].prompt_clear();
+                    }
                 }
                 queue_tasks.pop_deferred_task(id_slot);
+            };
+
+            slot.callback_on_prompt_clear = [this](int id_slot) {
+                if (params_base.kv_paged) {
+                    llama_paged_scheduler_remove_request(paged_scheduler.get(), id_slot);
+                }
             };
 
             slot.callback_on_reset = [this](const server_slot & slot) {
@@ -1890,6 +1969,7 @@ private:
 
         if (ret) {
             update_cache = update_cache && prompt_cache;
+            update_cache = update_cache && !params_base.kv_paged;
 
             // cache prompts only for completion tasks
             update_cache = update_cache && task.type == SERVER_TASK_TYPE_COMPLETION;
@@ -1961,20 +2041,20 @@ private:
 
     bool launch_slot_with_task(server_slot & slot, server_task && task) {
         // process per-request lora adapters
-        if (!task.params.lora.empty()) {
-            auto task_loras = construct_lora_list(task.params.lora);
-            if (!are_lora_equal(task_loras, slot.lora)) {
-                // if lora has changed, check to see if the cache should be cleared
-                if (lora_should_clear_cache(slot.lora, task_loras)) {
-                    SLT_TRC(slot, "clearing cache for lora change. %zu loras -> %zu loras\n", slot.lora.size(), task.params.lora.size());
-                    slot.prompt.clear();
+        auto task_loras = task.params.lora.empty() ? params_base.lora_adapters : construct_lora_list(task.params.lora);
+        if (!are_lora_equal(task_loras, slot.lora)) {
+            // if lora has changed, check to see if the cache should be cleared
+            if (lora_should_clear_cache(slot.lora, task_loras)) {
+                SLT_TRC(slot, "clearing cache for lora change. %zu loras -> %zu loras\n", slot.lora.size(), task.params.lora.size());
+                if (params_base.kv_paged) {
+                    slot.prompt_clear();
                 } else {
-                    SLT_TRC(slot, "keeping cache for alora. %zu target loras\n", task_loras.size());
+                    slot.prompt.clear();
                 }
-                slot.lora = task_loras;
+            } else {
+                SLT_TRC(slot, "keeping cache for alora. %zu target loras\n", task_loras.size());
             }
-        } else {
-            slot.lora = params_base.lora_adapters;
+            slot.lora = std::move(task_loras);
         }
 
         // if using alora, make sure it's only a single one requested and active
@@ -1986,6 +2066,9 @@ private:
             // for all requested alora activation strings and then either keep
             // only the last one, or reject if multiple are found.
             if (enabled_ids.size() != 1) {
+                if (params_base.kv_paged) {
+                    slot.prompt_clear();
+                }
                 send_error(task, "Cannot run multiple aLoRAs in a single request", ERROR_TYPE_INVALID_REQUEST);
                 return false;
             }
@@ -2026,6 +2109,9 @@ private:
         }
 
         if (!task.tokens.validate(ctx_tgt)) {
+            if (params_base.kv_paged) {
+                slot.prompt_clear();
+            }
             send_error(task, "Prompt contains invalid tokens", ERROR_TYPE_INVALID_REQUEST);
             return false;
         }
@@ -2037,6 +2123,9 @@ private:
             try {
                 slot.smpl.reset(common_sampler_init(model_tgt, task.params.sampling));
             } catch (std::exception & e) {
+                if (params_base.kv_paged) {
+                    slot.prompt_clear();
+                }
                 std::string err_msg = std::string("Failed to initialize samplers: ") + e.what();
                 send_error(task, err_msg, ERROR_TYPE_INVALID_REQUEST);
                 return false;
@@ -2065,9 +2154,94 @@ private:
         // the per-request limit takes priority over the global one
         slot.n_predict_max = task.params.n_predict != -1 ? task.params.n_predict : params_base.n_predict;
 
-        if (params_base.kv_paged && !llama_paged_scheduler_add_request(paged_scheduler.get(), task.tokens.get_text_tokens().data(), task.tokens.size(), slot.id)) {
-            send_error(task, "failed to queue request in paged KV scheduler", ERROR_TYPE_SERVER);
-            return false;
+        if (params_base.kv_paged) {
+            if (task.tokens.empty()) {
+                slot.prompt_clear();
+                slot.task = std::make_unique<const server_task>(std::move(task));
+                slot.state = SLOT_STATE_PROCESSING_PROMPT;
+                slot.stats.update_prompt_start();
+                slot.print_timings();
+                send_final_response(slot);
+                slot.release();
+                return true;
+            }
+
+            int32_t n_prefix = 0;
+            const bool can_reuse = task.type == SERVER_TASK_TYPE_COMPLETION && task.params.cache_prompt &&
+                !task.tokens.has_media_chunks() && !slot.prompt.tokens.has_media_chunks() &&
+                llama_paged_scheduler_is_retained(paged_scheduler.get(), slot.id);
+            if (can_reuse) {
+                n_prefix = slot.prompt.tokens.get_common_prefix(task.tokens);
+                if (n_prefix == (int32_t) task.tokens.size() && n_prefix > 0) {
+                    --n_prefix;
+                }
+                if (slot.alora_invocation_start > 0) {
+                    n_prefix = std::min(n_prefix, slot.alora_invocation_start - 1);
+                }
+
+                const bool needs_tgt_checkpoint =
+                    llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
+                const bool needs_dft_checkpoint = ctx_dft &&
+                    (ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
+                     ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS);
+                const bool needs_checkpoint = needs_tgt_checkpoint || needs_dft_checkpoint;
+                if (n_prefix > 0 && needs_checkpoint) {
+                    const bool checkpoint_matches = slot.paged_prompt_ckpt.n_tokens == n_prefix &&
+                        slot.paged_prompt_ckpt.pos_max == n_prefix - 1;
+                    const bool tgt_current_matches = !needs_tgt_checkpoint ||
+                        llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id) == n_prefix - 1;
+                    const bool dft_current_matches = !needs_dft_checkpoint ||
+                        llama_memory_seq_pos_max(llama_get_memory(ctx_dft), slot.id) == n_prefix - 1;
+                    const bool can_restore_tgt = tgt_current_matches ||
+                        (checkpoint_matches && !slot.paged_prompt_ckpt.data_tgt.empty());
+                    const bool can_restore_dft = dft_current_matches ||
+                        (checkpoint_matches && !slot.paged_prompt_ckpt.data_dft.empty());
+                    if (can_restore_tgt && can_restore_dft) {
+                        if (!tgt_current_matches) {
+                            slot.paged_prompt_ckpt.load_tgt(
+                                ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                        }
+                        if (!dft_current_matches) {
+                            slot.paged_prompt_ckpt.load_dft(
+                                ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                        }
+                        if (!tgt_current_matches || !dft_current_matches) {
+                            common_speculative_set_state(spec.get(), slot.id, slot.paged_prompt_ckpt.data_spec);
+                        }
+                    } else {
+                        n_prefix = 0;
+                    }
+                }
+                if (n_prefix > 0 && ctx_dft && !needs_dft_checkpoint &&
+                    !llama_memory_seq_rm(llama_get_memory(ctx_dft), slot.id, n_prefix, -1)) {
+                    n_prefix = 0;
+                }
+            }
+
+            int32_t n_prefix_used = 0;
+            if (!llama_paged_scheduler_add_request_with_prefix(
+                    paged_scheduler.get(), task.tokens.get_text_tokens().data(), task.tokens.size(), slot.id,
+                    n_prefix, &n_prefix_used)) {
+                send_error(task, "failed to queue request in paged KV scheduler", ERROR_TYPE_SERVER);
+                slot.prompt_clear();
+                return false;
+            }
+            if (n_prefix_used == 0 && ctx_dft) {
+                llama_memory_seq_rm(llama_get_memory(ctx_dft), slot.id, -1, -1);
+            }
+            if (task.type == SERVER_TASK_TYPE_COMPLETION && task.params.cache_prompt &&
+                !task.tokens.has_media_chunks() &&
+                (!ctx_dft || ctx_dft_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_NO)) {
+                const bool checkpoint_before_last =
+                    llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt) ||
+                    (ctx_dft && (ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
+                                 ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS));
+                llama_paged_scheduler_retain_request(
+                    paged_scheduler.get(), slot.id, checkpoint_before_last);
+            }
+            slot.stats.n_prompt_cached = n_prefix_used;
+            slot.stats.n_prompt_processed = 0;
+            metrics.add_prompt_cached(n_prefix_used);
         }
         slot.task = std::make_unique<const server_task>(std::move(task));
 
@@ -2305,7 +2479,8 @@ private:
             res->is_progress        = true;
             res->progress.total     = slot.task->n_tokens();
             res->progress.cache     = slot.stats.n_prompt_cached;
-            res->progress.processed = slot.prompt.tokens.size();
+            res->progress.processed = std::min<uint64_t>(
+                slot.task->n_tokens(), slot.stats.n_prompt_cached + slot.stats.n_prompt_processed);
             res->progress.time_ms   = slot.stats.t_elapsed_us() / 1000;
         }
         if (is_begin) {
@@ -2852,6 +3027,10 @@ private:
 
                     size_t nread = 0;
                     try {
+                        if (params_base.kv_paged) {
+                            llama_paged_scheduler_remove_request(paged_scheduler.get(), slot->id);
+                            slot->paged_prompt_ckpt.clear();
+                        }
                         size_t n_packed = 0;
                         llama_tokens packed;
                         nread = llama_state_seq_load_file(ctx_tgt, filepath.c_str(), slot->id, nullptr, 0, &n_packed);

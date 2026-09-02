@@ -105,6 +105,78 @@ LLAMA_API bool llama_paged_scheduler_add_request(struct llama_paged_scheduler * 
     }
 }
 
+LLAMA_API bool llama_paged_scheduler_add_request_with_prefix(struct llama_paged_scheduler * sched,
+                                                              const llama_token *            tokens,
+                                                              int32_t                        n_tokens,
+                                                              int32_t                        request_id,
+                                                              int32_t                        n_prefix,
+                                                              int32_t *                      n_prefix_used) {
+    if (n_prefix_used) {
+        *n_prefix_used = 0;
+    }
+    if (!sched || !tokens || n_tokens <= 0 || n_prefix < 0 || n_prefix >= n_tokens) {
+        if (sched) {
+            sched->impl.remove_request(request_id);
+        }
+        return false;
+    }
+
+    llama_sequence_group group;
+    group.request_id = request_id;
+    group.n_prompt   = n_tokens;
+    group.logical_seq.assign(tokens, tokens + n_tokens);
+    group.t_arrival_time = ggml_time_us();
+
+    try {
+        if (sched->impl.queue_request(std::move(group), n_prefix)) {
+            if (n_prefix_used) {
+                const llama_sequence_group * queued = sched->impl.get_group_from_id(request_id);
+                *n_prefix_used = queued && queued->n_past == (uint32_t) n_prefix ? n_prefix : 0;
+            }
+            return true;
+        }
+        llama_sequence_group cold;
+        cold.request_id = request_id;
+        cold.n_prompt   = n_tokens;
+        cold.logical_seq.assign(tokens, tokens + n_tokens);
+        cold.t_arrival_time = ggml_time_us();
+        const bool queued = sched->impl.queue_request(std::move(cold));
+        if (!queued) {
+            sched->impl.remove_request(request_id);
+        }
+        return queued;
+    } catch (const std::exception & e) {
+        LLAMA_LOG_ERROR("%s: %s\n", __func__, e.what());
+        sched->impl.remove_request(request_id);
+        try {
+            llama_sequence_group cold;
+            cold.request_id = request_id;
+            cold.n_prompt   = n_tokens;
+            cold.logical_seq.assign(tokens, tokens + n_tokens);
+            cold.t_arrival_time = ggml_time_us();
+            const bool queued = sched->impl.queue_request(std::move(cold));
+            if (!queued) {
+                sched->impl.remove_request(request_id);
+            }
+            return queued;
+        } catch (const std::exception & retry_error) {
+            LLAMA_LOG_ERROR("%s: cold retry failed: %s\n", __func__, retry_error.what());
+            sched->impl.remove_request(request_id);
+            return false;
+        }
+    }
+}
+
+LLAMA_API bool llama_paged_scheduler_retain_request(
+        struct llama_paged_scheduler * sched, int32_t request_id, bool checkpoint_before_last) {
+    return sched && sched->impl.retain_request(request_id, checkpoint_before_last);
+}
+
+LLAMA_API bool llama_paged_scheduler_is_retained(
+        const struct llama_paged_scheduler * sched, int32_t request_id) {
+    return sched && sched->impl.is_retained(request_id);
+}
+
 LLAMA_API void llama_paged_scheduler_update(struct llama_paged_scheduler * sched,
                                             struct llama_batch *           batch,
                                             const llama_token *            tokens,

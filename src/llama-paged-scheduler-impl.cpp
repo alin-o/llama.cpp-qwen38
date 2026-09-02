@@ -28,6 +28,9 @@ llama_paged_scheduler_impl::~llama_paged_scheduler_impl() {
 
     for (const auto & item : id_to_group) {
         kv_cache_manager->seq_rm(item.first, -1, -1);
+        if (recurrent_manager) {
+            recurrent_manager->seq_rm(item.first, -1, -1);
+        }
     }
 }
 
@@ -80,7 +83,11 @@ int32_t llama_paged_scheduler_impl::get_curr_decode_tokens() const {
 
 int32_t llama_paged_scheduler_impl::get_scheduled_tokens(const llama_sequence_group & group) const {
     if (group.n_past < group.n_prompt) {
-        return std::min<int32_t>(group.n_prompt - group.n_past, n_batch);
+        int32_t remaining = group.n_prompt - group.n_past;
+        if (remaining > 1 && checkpoint_before_last.count(group.request_id)) {
+            --remaining;
+        }
+        return std::min<int32_t>(remaining, n_batch);
     }
     return 1 + spec_n;
 }
@@ -127,12 +134,50 @@ llama_scheduler_status llama_paged_scheduler_impl::step(llama_batch & batch, int
     return llama_scheduler_status::OK;
 }
 
-bool llama_paged_scheduler_impl::queue_request(llama_sequence_group group) {
+bool llama_paged_scheduler_impl::queue_request(llama_sequence_group group, uint32_t n_past) {
     // Rejecting any requests that exceeds max context for a seq
     if (group.n_prompt >= n_seq_max_ctx) {
         LLAMA_LOG_ERROR("%s: request %d exceeds max context (%d > %d).\n", __func__, group.request_id, group.n_prompt,
                         n_seq_max_ctx);
         return false;
+    }
+
+    if (n_past > group.n_prompt) {
+        LLAMA_LOG_ERROR("%s: request %d has invalid cached prefix (%u > %u).\n", __func__, group.request_id,
+                        n_past, group.n_prompt);
+        return false;
+    }
+
+    if (const auto cached = retained.find(group.request_id); cached != retained.end()) {
+        llama_sequence_group * old = cached->second.get();
+        const size_t required_blocks = (n_past + block_size - 1) / block_size;
+        const bool prefix_matches = n_past > 0 && old->logical_seq.size() >= n_past &&
+            group.logical_seq.size() >= n_past &&
+            std::equal(group.logical_seq.begin(), group.logical_seq.begin() + n_past, old->logical_seq.begin());
+        const bool blocks_match = old->n_past >= n_past && old->block_table.size() >= required_blocks;
+        const bool positions_match = kv_cache_manager->seq_pos_min(group.request_id) == 0 &&
+            kv_cache_manager->seq_pos_max(group.request_id) >= (llama_pos) n_past - 1;
+        const bool recurrent_matches = recurrent_manager == nullptr ||
+            recurrent_manager->seq_pos_max(group.request_id) == (llama_pos) n_past - 1;
+
+        if (prefix_matches && blocks_match && positions_match && recurrent_matches &&
+            kv_cache_manager->release_seq_tail(group.request_id, n_past)) {
+            kv_cache_manager->set_seq_max_pos(group.request_id, n_past - 1);
+            llama_sequence_group_ptr group_ptr = std::move(cached->second);
+            retained.erase(cached);
+            group_ptr->status          = llama_sequence_group_status::PENDING;
+            group_ptr->t_arrival_time  = group.t_arrival_time;
+            group_ptr->t_first_token_us = 0;
+            group_ptr->n_prompt        = group.n_prompt;
+            group_ptr->n_decoded       = 0;
+            group_ptr->n_past          = n_past;
+            group_ptr->logical_seq     = std::move(group.logical_seq);
+            set_waiting(std::move(group_ptr));
+            return true;
+        }
+
+        remove_request(group.request_id);
+        n_past = 0;
     }
 
     if (id_to_group.count(group.request_id)) {
@@ -147,6 +192,9 @@ bool llama_paged_scheduler_impl::queue_request(llama_sequence_group group) {
     if (!restored && !group_ptr->block_table.empty()) {
         LLAMA_LOG_ERROR("%s: request %d has restored blocks without scheduler state.\n", __func__, group_ptr->request_id);
         kv_cache_manager->seq_rm(group_ptr->request_id, -1, -1);
+        if (recurrent_manager) {
+            recurrent_manager->seq_rm(group_ptr->request_id, -1, -1);
+        }
         return false;
     }
 
@@ -154,6 +202,9 @@ bool llama_paged_scheduler_impl::queue_request(llama_sequence_group group) {
     if (restored && restored_status == llama_sequence_group_status::FINISHED) {
         LLAMA_LOG_ERROR("%s: request %d has finished scheduler state.\n", __func__, group_ptr->request_id);
         kv_cache_manager->seq_rm(group_ptr->request_id, -1, -1);
+        if (recurrent_manager) {
+            recurrent_manager->seq_rm(group_ptr->request_id, -1, -1);
+        }
         return false;
     }
 
@@ -202,7 +253,7 @@ void llama_paged_scheduler_impl::set_waiting(llama_sequence_group_ptr group_ptr)
     insert_sorted_by_arrival_time(std::move(group_ptr), waiting);
 }
 
-void llama_paged_scheduler_impl::finish(llama_sequence_group & group) {
+bool llama_paged_scheduler_impl::finish(llama_sequence_group & group) {
     GGML_ASSERT(kv_cache_manager && "kv_cache_manager is nullptr.");
     GGML_ASSERT(group.status == llama_sequence_group_status::FINISHED && "Request was not marked as finished.");
     // We prioritize user CB, otherwise we log by default
@@ -213,11 +264,24 @@ void llama_paged_scheduler_impl::finish(llama_sequence_group & group) {
     } else {
         LLAMA_LOG_DEBUG("%s: Request: %d generated %d tokens.\n", __func__, group.request_id, group.n_decoded);
     }
-    kv_cache_manager->free_blocks(group);
     group.status = llama_sequence_group_status::FINISHED;
+    checkpoint_before_last.erase(group.request_id);
+    if (retain_on_finish.erase(group.request_id) > 0) {
+        if (kv_cache_manager->release_seq_tail(group.request_id, group.n_past)) {
+            return true;
+        }
+        LLAMA_LOG_WARN("%s: request %d could not retain its paged state; discarding it.\n",
+                       __func__, group.request_id);
+    }
+    kv_cache_manager->free_blocks(group);
+    if (recurrent_manager) {
+        recurrent_manager->seq_rm(group.request_id, -1, -1);
+    }
     id_to_group.erase(group.request_id);
+    return false;
 }
-void llama_paged_scheduler_impl::remove_request(int32_t request_id) {
+
+void llama_paged_scheduler_impl::complete_request(int32_t request_id) {
     auto it = id_to_group.find(request_id);
     if (it == id_to_group.end()) {
         return;
@@ -225,11 +289,14 @@ void llama_paged_scheduler_impl::remove_request(int32_t request_id) {
 
     llama_sequence_group * group = it->second;
     group->status = llama_sequence_group_status::FINISHED;
-    finish(*group);
 
-    auto erase_group = [&](llama_sequence_group_list & list) {
+    auto finish_group = [&](llama_sequence_group_list & list) {
         for (auto list_it = list.begin(); list_it != list.end(); ++list_it) {
             if (list_it->get() == group) {
+                const bool keep = finish(*group);
+                if (keep) {
+                    retained[request_id] = std::move(*list_it);
+                }
                 list.erase(list_it);
                 return true;
             }
@@ -237,10 +304,46 @@ void llama_paged_scheduler_impl::remove_request(int32_t request_id) {
         return false;
     };
 
-    if (erase_group(running) || erase_group(swapped) || erase_group(waiting)) {
+    if (finish_group(running) || finish_group(swapped) || finish_group(waiting)) {
         if (priority_request_id == request_id) {
             priority_request_id = -1;
         }
+    }
+}
+
+void llama_paged_scheduler_impl::remove_request(int32_t request_id) {
+    retain_on_finish.erase(request_id);
+    checkpoint_before_last.erase(request_id);
+    if (const auto it = retained.find(request_id); it != retained.end()) {
+        kv_cache_manager->free_blocks(*it->second);
+        if (recurrent_manager) {
+            recurrent_manager->seq_rm(request_id, -1, -1);
+        }
+        id_to_group.erase(request_id);
+        retained.erase(it);
+        return;
+    }
+    complete_request(request_id);
+}
+
+bool llama_paged_scheduler_impl::retain_request(int32_t request_id, bool needs_checkpoint) {
+    if (!id_to_group.count(request_id) || retained.count(request_id)) {
+        return false;
+    }
+    retain_on_finish.insert(request_id);
+    if (needs_checkpoint) {
+        checkpoint_before_last.insert(request_id);
+    }
+    return true;
+}
+
+bool llama_paged_scheduler_impl::is_retained(int32_t request_id) const {
+    return retained.count(request_id) != 0;
+}
+
+void llama_paged_scheduler_impl::evict_retained_requests() {
+    while (!retained.empty()) {
+        remove_request(retained.begin()->first);
     }
 }
 
@@ -268,6 +371,9 @@ void llama_paged_scheduler_impl::swap_out_or_recompute(llama_sequence_group_ptr 
     // There was not enough CPU memory to swap the request (recomputation)
     kv_cache_manager->free_blocks(*group_ptr);
     kv_cache_manager->seq_rm(rid, -1, -1);
+    if (recurrent_manager) {
+        recurrent_manager->seq_rm(rid, -1, -1);
+    }
     group_ptr->n_past    = 0;
     group_ptr->n_decoded = 0;
     group_ptr->logical_seq.resize(group_ptr->n_prompt);
@@ -309,7 +415,11 @@ void llama_paged_scheduler_impl::process_running_list(llama_sequence_group_raw_l
 
         if (group->status == llama_sequence_group_status::FINISHED) {
             const bool was_priority = group->request_id == priority_request_id;
-            finish(*group);
+            const int32_t request_id = group->request_id;
+            const bool keep = finish(*group);
+            if (keep) {
+                retained[request_id] = std::move(*it);
+            }
             it = running.erase(it);
             if (was_priority) {
                 priority_request_id = -1;
@@ -329,6 +439,10 @@ void llama_paged_scheduler_impl::process_running_list(llama_sequence_group_raw_l
             LLAMA_LOG_DEBUG("%s: (running_pending) request_id=%d: requires a new block to decode.\n", __func__,
                             group->request_id);
             bool success = kv_cache_manager->allocate(allocation_tokens, *group);
+            if (!success) {
+                evict_retained_requests();
+                success = kv_cache_manager->allocate(allocation_tokens, *group);
+            }
             if (!success) {
                 if (running.size() > 1) {
                     activate_priority_request(candidates);
@@ -375,7 +489,11 @@ void llama_paged_scheduler_impl::process_swapped_list(llama_sequence_group_raw_l
         const int32_t scheduled_tokens = get_scheduled_tokens(*group);
         const int32_t allocation_tokens = scheduled_tokens +
             (group->n_past < group->n_prompt && group->n_past + scheduled_tokens == group->n_prompt ? 1 : 0);
-        const bool success = kv_cache_manager->swap_in(*group, allocation_tokens);
+        bool success = kv_cache_manager->swap_in(*group, allocation_tokens);
+        if (!success && !retained.empty()) {
+            evict_retained_requests();
+            success = kv_cache_manager->swap_in(*group, allocation_tokens);
+        }
         if (!success) {
             // We respect FCFS, so we stop here to prevent a younger swapped request from jumping ahead.
             break;
@@ -405,8 +523,8 @@ void llama_paged_scheduler_impl::process_waiting_list(llama_sequence_group_raw_l
         }
 
         const int32_t batch_tokens = group->n_past < group->n_prompt
-            ? std::min<int32_t>(group->n_prompt - group->n_past, remaining_token_budget)
-            : 1 + spec_n;
+            ? std::min(get_scheduled_tokens(*group), remaining_token_budget)
+            : get_scheduled_tokens(*group);
         if (batch_tokens > remaining_token_budget) {
             break;
         }
@@ -415,7 +533,11 @@ void llama_paged_scheduler_impl::process_waiting_list(llama_sequence_group_raw_l
 
         ++count;
         // Reserve room for speculative decode without charging it to prefill.
-        const bool success = kv_cache_manager->allocate(allocation_tokens, *group);
+        bool success = kv_cache_manager->allocate(allocation_tokens, *group);
+        if (!success && !retained.empty()) {
+            evict_retained_requests();
+            success = kv_cache_manager->allocate(allocation_tokens, *group);
+        }
         if (!success) {
             // We respect FCFS, so we stop here to prevent a younger waiting request from jumping ahead.
             break;
@@ -621,7 +743,7 @@ void llama_paged_scheduler_impl::update(const llama_batch &              batch,
 
         if (stop_flags[i] || group->n_past >= n_seq_max_ctx) {
             group->status = llama_sequence_group_status::FINISHED;
-            remove_request(request_id);
+            complete_request(request_id);
         }
     }
 }

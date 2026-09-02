@@ -1676,6 +1676,21 @@ extern "C" {
                                                      int32_t                        n_tokens,
                                                      int32_t                        request_id);
 
+    // Explicit server-side prompt retention contract. Set checkpoint_before_last
+    // when external state must be captured before the final prompt token. The
+    // default add/remove lifecycle remains unchanged for other scheduler users.
+    LLAMA_API bool llama_paged_scheduler_add_request_with_prefix(struct llama_paged_scheduler * sched,
+                                                                 const llama_token *            tokens,
+                                                                 int32_t                        n_tokens,
+                                                                 int32_t                        request_id,
+                                                                 int32_t                        n_prefix,
+                                                                 int32_t *                      n_prefix_used);
+    LLAMA_API bool llama_paged_scheduler_retain_request(struct llama_paged_scheduler * sched,
+                                                        int32_t                        request_id,
+                                                        bool                           checkpoint_before_last);
+    LLAMA_API bool llama_paged_scheduler_is_retained(const struct llama_paged_scheduler * sched,
+                                                      int32_t                              request_id);
+
     LLAMA_API bool llama_paged_scheduler_prepare_batch_ex(struct llama_paged_scheduler * sched,
                                                           struct llama_batch *           batch,
                                                           int32_t                        spec_n);
