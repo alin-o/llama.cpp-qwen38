@@ -185,6 +185,9 @@ public:
 
     const mtmd::input_chunk_ptr & find_chunk(size_t idx) const;
 
+    // find the media chunk containing idx and return its start index
+    std::pair<const mtmd::input_chunk_ptr *, size_t> find_media_chunk(size_t idx) const;
+
     // find next media chunk after idx
     // returns a pair of pointer to the chunk (nullptr if not found) and its start index in tokens
     std::pair<const mtmd::input_chunk_ptr *, size_t> find_next_media_chunk(size_t idx) const;
@@ -208,6 +211,10 @@ public:
     const llama_tokens & get_tokens() const;
 
     llama_tokens get_text_tokens() const;
+
+    // Replace each media chunk with a distinct negative marker so paged
+    // scheduling can keep embedding chunks separate from text batches.
+    llama_tokens get_paged_tokens() const;
 
     std::vector<char> serialize() const;
     static server_tokens deserialize(const llama_tokens & packed, bool has_mtmd);

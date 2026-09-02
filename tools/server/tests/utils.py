@@ -110,6 +110,7 @@ class ServerProcess:
     chat_template: str | None = None
     chat_template_file: str | None = None
     server_path: str | None = None
+    mmproj_file: str | None = None
     mmproj_url: str | None = None
     no_mmproj: bool | None = None
     media_path: str | None = None
@@ -273,6 +274,8 @@ class ServerProcess:
             server_args.extend(["--chat-template", self.chat_template])
         if self.chat_template_file:
             server_args.extend(["--chat-template-file", self.chat_template_file])
+        if self.mmproj_file:
+            server_args.extend(["--mmproj", self.mmproj_file])
         if self.mmproj_url:
             server_args.extend(["--mmproj-url", self.mmproj_url])
         if self.no_mmproj:

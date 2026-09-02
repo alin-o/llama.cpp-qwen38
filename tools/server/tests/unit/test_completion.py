@@ -1,3 +1,4 @@
+import base64
 import pytest
 import requests
 import time
@@ -565,24 +566,38 @@ def test_paged_attached_prefix_recompute_resets_server_accounting():
     assert "discarding cached prompt accounting after scheduler recomputation" in log
 
 
-def test_paged_multimodal_prompt_is_rejected_and_discards_retained_prefix():
+def test_paged_multimodal_prompt_bypasses_retained_prefix():
     repo = os.environ.get("LLAMA_SERVER_PAGED_MM_REPO")
+    model = os.environ.get("LLAMA_SERVER_PAGED_MM_MODEL")
+    mmproj = os.environ.get("LLAMA_SERVER_PAGED_MMPROJ")
     image = os.environ.get("LLAMA_SERVER_PAGED_MM_IMAGE")
-    if not repo or not image:
+    if not image or (not repo and not (model and mmproj)):
         pytest.skip(
-            "set LLAMA_SERVER_PAGED_MM_REPO and LLAMA_SERVER_PAGED_MM_IMAGE to run paged multimodal rejection"
+            "set LLAMA_SERVER_PAGED_MM_IMAGE and either LLAMA_SERVER_PAGED_MM_REPO or "
+            "LLAMA_SERVER_PAGED_MM_MODEL plus LLAMA_SERVER_PAGED_MMPROJ"
         )
 
     os.environ["LLAMA_MEDIA_MARKER"] = "<__media__>"
-    server.model_hf_repo = repo
+    if os.path.isfile(image):
+        with open(image, "rb") as image_file:
+            image = base64.b64encode(image_file.read()).decode("utf-8")
+    server.model_file = model
+    server.mmproj_file = mmproj
+    server.model_hf_repo = repo if not model else None
     server.model_hf_file = None
     server.offline = True
     server.kv_paged = True
+    server.server_port = 18090
+    server.n_gpu_layer = 99
     server.n_slots = 1
     server.n_batch = 512
     server.n_ubatch = 512
+    server.block_size = 16
+    server.n_gpu_blocks = 320
+    server.n_cpu_blocks = 64
     server.n_predict = 4
     server.server_slots = True
+    server.log_path = os.path.join(TMP_DIR, "paged-multimodal-fallback.log")
     server.start()
 
     retained = server.make_request("POST", "/completion", data={
@@ -604,19 +619,14 @@ def test_paged_multimodal_prompt_is_rejected_and_discards_retained_prefix():
         "temperature": 0.0,
         "return_tokens": True,
     }
-    rejected = server.make_request("POST", "/completion", data=request)
-    assert rejected.status_code == 501
-    assert rejected.body["error"]["type"] == "not_supported_error"
-    assert rejected.body["error"]["message"] == "Multimodal prompts are not supported with paged KV"
-
-    after_rejection = server.make_request("POST", "/completion", data={
-        "prompt": "Retain this text-only prompt.",
-        "id_slot": 0,
-        "cache_prompt": True,
-        "temperature": 0.0,
-    })
-    assert after_rejection.status_code == 200
-    assert after_rejection.body["timings"]["cache_n"] == 0
+    fallback = server.make_request("POST", "/completion", data=request)
+    oracle = server.make_request("POST", "/completion", data={**request, "cache_prompt": False})
+    assert fallback.status_code == 200
+    assert oracle.status_code == 200
+    assert fallback.body["tokens"] == oracle.body["tokens"]
+    assert fallback.body["timings"]["cache_n"] == 0
+    assert oracle.body["timings"]["cache_n"] == 0
+    assert fallback.body["timings"]["prompt_n"] == oracle.body["timings"]["prompt_n"]
 
 
 @pytest.mark.parametrize("n_slots,n_requests", [

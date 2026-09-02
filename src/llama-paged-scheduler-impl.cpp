@@ -84,6 +84,16 @@ int32_t llama_paged_scheduler_impl::get_curr_decode_tokens() const {
 int32_t llama_paged_scheduler_impl::get_scheduled_tokens(const llama_sequence_group & group) const {
     if (group.n_past < group.n_prompt) {
         int32_t remaining = group.n_prompt - group.n_past;
+        const llama_token first = group.logical_seq[group.n_past];
+        auto boundary = group.logical_seq.begin() + group.n_past + 1;
+        if (first < 0) {
+            boundary = std::find_if(boundary, group.logical_seq.begin() + group.n_prompt,
+                    [first](llama_token token) { return token != first; });
+        } else {
+            boundary = std::find_if(boundary, group.logical_seq.begin() + group.n_prompt,
+                    [](llama_token token) { return token < 0; });
+        }
+        remaining = std::min<int32_t>(remaining, boundary - (group.logical_seq.begin() + group.n_past));
         if (remaining > 1 && checkpoint_before_last.count(group.request_id)) {
             --remaining;
         }
@@ -103,6 +113,15 @@ llama_scheduler_status llama_paged_scheduler_impl::step(llama_batch & batch, int
 
     const int32_t remaining = n_batch - get_curr_decode_tokens();
     process_waiting_list(candidates, remaining);
+
+    // Embedding batches cannot share llama_batch with token batches. Negative
+    // prompt markers are reserved for server-owned multimodal chunks.
+    const auto media = std::find_if(candidates.begin(), candidates.end(), [](const llama_sequence_group * group) {
+        return group->n_past < group->n_prompt && group->logical_seq[group->n_past] < 0;
+    });
+    if (media != candidates.end()) {
+        candidates = { *media };
+    }
 
     while (!candidates.empty()) {
         int32_t total_tokens = 0;

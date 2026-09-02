@@ -16,6 +16,19 @@
 #include "speculative.h"
 #include "mtmd.h"
 #include "mtmd-helper.h"
+#pragma push_macro("LOG_DBG")
+#pragma push_macro("LOG_INF")
+#pragma push_macro("LOG_WRN")
+#pragma push_macro("LOG_ERR")
+#undef LOG_DBG
+#undef LOG_INF
+#undef LOG_WRN
+#undef LOG_ERR
+#include "mtmd-helper-common.h"
+#pragma pop_macro("LOG_ERR")
+#pragma pop_macro("LOG_WRN")
+#pragma pop_macro("LOG_INF")
+#pragma pop_macro("LOG_DBG")
 
 #include <algorithm>
 #include <array>
@@ -738,64 +751,21 @@ struct server_slot {
 // note: this is not a member of server_slot because we want to run it inside yield_to_queue
 //       slot is passed as const to avoid accidental modification of the slot state
 //       some pointers are allowed to be used, they are not used by to_json()
-static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch, size_t idx, size_t & n_tokens_out) {
+static float * encode_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch, size_t idx) {
     GGML_ASSERT(slot.mctx);
     const auto & mctx = slot.mctx;
     const auto & input_tokens = slot.task->tokens;
     const auto & chunk = input_tokens.find_chunk(idx);
-    int32_t res = 0;
-
-    auto try_decode = [&]() -> int32_t {
-        if (mbatch) {
-            float * embd = mtmd_batch_get_output_embd(mbatch.get(), chunk.get());
-            if (embd) {
-                void * cb_data = slot.spec;
-                static auto cb = [](llama_batch batch, void * user_data) {
-                    common_speculative * spec = static_cast<common_speculative *>(user_data);
-                    if (!common_speculative_process(spec, batch)) {
-                        return 1;
-                    }
-                    return 0;
-                };
-
-                llama_pos new_n_past; // unused for now
-                res = mtmd_helper_decode_image_chunk(
-                    mctx,
-                    slot.ctx_tgt,
-                    chunk.get(),
-                    embd,
-                    slot.prompt.tokens.pos_next(),
-                    slot.id,
-                    llama_n_batch(slot.ctx_tgt),
-                    &new_n_past,
-                    cb,
-                    cb_data
-                );
-                if (res != 0) {
-                    SLT_ERR(slot, "failed to decode mtmd chunk, idx = %zu, res = %d\n", idx, res);
-                    return -1;
-                }
-                n_tokens_out = mtmd_input_chunk_get_n_tokens(chunk.get());
-                return 0; // success
-            }
+    if (mbatch) {
+        if (float * embd = mtmd_batch_get_output_embd(mbatch.get(), chunk.get())) {
+            return embd;
         }
-        return 1; // (non-error) need to create & encode batch
-    };
-
-    // if the batch is already exist, try searching & encode
-    res = try_decode();
-    if (res == 0) {
-        return 0;
-    }
-    if (res < 0) {
-        // fatal error
-        return res;
     }
 
     // otherwise, the batch is either uninitialized or is used up
     // we need to create & encode a new batch
     mbatch.reset(mtmd_batch_init(mctx));
-    res = mtmd_batch_add_chunk(mbatch.get(), chunk.get());
+    int32_t res = mtmd_batch_add_chunk(mbatch.get(), chunk.get());
     GGML_ASSERT(res == 0); // we should never have an empty batch
 
     // try batching as much as possible
@@ -819,11 +789,67 @@ static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch
     res = mtmd_batch_encode(mbatch.get());
     if (res != 0) {
         SLT_ERR(slot, "failed to encode mtmd batch for chunk idx = %zu, res = %d\n", idx, res);
+        return nullptr;
+    }
+
+    return mtmd_batch_get_output_embd(mbatch.get(), chunk.get());
+}
+
+static int process_mtmd_chunk(const server_slot & slot, mtmd::batch_ptr & mbatch, size_t idx, size_t & n_tokens_out) {
+    const auto & chunk = slot.task->tokens.find_chunk(idx);
+    float * embd = encode_mtmd_chunk(slot, mbatch, idx);
+    if (embd == nullptr) {
         return -1;
     }
 
-    return try_decode();
+    void * cb_data = slot.spec;
+    static auto cb = [](llama_batch batch, void * user_data) {
+        common_speculative * spec = static_cast<common_speculative *>(user_data);
+        return common_speculative_process(spec, batch) ? 0 : 1;
+    };
+
+    llama_pos new_n_past; // unused for now
+    const int32_t res = mtmd_helper_decode_image_chunk(
+        slot.mctx,
+        slot.ctx_tgt,
+        chunk.get(),
+        embd,
+        slot.prompt.tokens.pos_next(),
+        slot.id,
+        llama_n_batch(slot.ctx_tgt),
+        &new_n_past,
+        cb,
+        cb_data
+    );
+    if (res != 0) {
+        SLT_ERR(slot, "failed to decode mtmd chunk, idx = %zu, res = %d\n", idx, res);
+        return -1;
+    }
+    n_tokens_out = mtmd_input_chunk_get_n_tokens(chunk.get());
+    return 0;
 }
+
+class server_causal_guard {
+public:
+    server_causal_guard(llama_context * ctx, bool non_causal) : ctx(ctx), non_causal(non_causal) {
+        if (non_causal) {
+            llama_set_causal_attn(ctx, false);
+        }
+    }
+
+    ~server_causal_guard() {
+        if (non_causal) {
+            llama_set_causal_attn(ctx, true);
+        }
+    }
+
+    server_causal_guard(const server_causal_guard &) = delete;
+    server_causal_guard & operator=(const server_causal_guard &) = delete;
+
+private:
+    llama_context * ctx;
+    bool non_causal;
+};
 
 //
 // server_context_impl (private implementation)
@@ -1020,7 +1046,7 @@ private:
             }
 
             slot.prompt.clear();
-            slot.prompt.tokens.insert(slot.task->tokens.get_text_tokens());
+            slot.prompt.tokens = slot.task->tokens.clone();
             slot.state = SLOT_STATE_PROCESSING_PROMPT;
             slot.stats.update_prompt_start();
             slot.init_sampler();
@@ -1034,12 +1060,85 @@ private:
             }
         }
 
+        std::vector<llama_paged_seq_state> seq_states(info->n_seq);
+        for (int i = 0; i < info->n_seq; ++i) {
+            const int offset = info->batch_offsets[i];
+            const int id_slot = paged_batch.seq_id[offset][0];
+            if (!llama_paged_scheduler_get_seq_state(paged_scheduler.get(), id_slot, &seq_states[i])) {
+                throw std::runtime_error("paged scheduler returned no sequence state");
+            }
+            server_slot & slot = slots[id_slot];
+            if (slot.task->tokens.has_media_chunks()) {
+                const bool is_prefill = seq_states[i].n_past < seq_states[i].n_prompt;
+                const llama_pos decode_pos = slot.prompt.tokens.pos_next();
+                for (int j = 0; j < info->batch_lens[i]; ++j) {
+                    paged_batch.pos[offset + j] = is_prefill ?
+                        slot.prompt.tokens.pos_next(seq_states[i].n_past + j) : decode_pos + j;
+                }
+            }
+        }
+
+        llama_batch media_batch = {};
+        std::unique_ptr<decode_embd_batch> media_source;
+        llama_batch * decode_batch = &paged_batch;
+        const bool is_media_batch = paged_batch.token[0] < 0;
+        const mtmd_input_chunk * media_chunk = nullptr;
+        if (is_media_batch) {
+            if (info->n_seq != 1) {
+                throw std::runtime_error("paged scheduler mixed a media embedding batch");
+            }
+            const int id_slot = paged_batch.seq_id[0][0];
+            server_slot & slot = slots[id_slot];
+            auto [chunk_ptr, chunk_start] = slot.task->tokens.find_media_chunk(seq_states[0].n_past);
+            if (chunk_ptr == nullptr) {
+                throw std::runtime_error("paged scheduler returned an invalid media prompt position");
+            }
+            media_chunk = chunk_ptr->get();
+            float * embd = nullptr;
+            queue_tasks.yield_to_queue([&]() {
+                embd = encode_mtmd_chunk(slot, slot.mbatch, chunk_start);
+            });
+            if (embd == nullptr) {
+                throw std::runtime_error("failed to encode paged multimodal chunk");
+            }
+
+            const int32_t n_chunk_tokens = mtmd_input_chunk_get_n_tokens(media_chunk);
+            const int32_t n_pos_per_embd = mtmd_decode_use_mrope(slot.mctx) ? 4 : 1;
+            media_source = std::make_unique<decode_embd_batch>(
+                embd, n_chunk_tokens, n_pos_per_embd, llama_model_n_embd_inp(model_tgt));
+            const llama_pos pos_0 = slot.task->tokens.pos_next(chunk_start);
+            if (n_pos_per_embd == 1) {
+                media_source->set_position_normal(pos_0, id_slot);
+            } else if (mtmd_input_chunk_get_type(media_chunk) == MTMD_INPUT_CHUNK_TYPE_IMAGE) {
+                const mtmd_image_tokens * image_tokens = mtmd_input_chunk_get_tokens_image(media_chunk);
+                if (image_tokens == nullptr) {
+                    throw std::runtime_error("paged multimodal image has no decoder positions");
+                }
+                std::vector<mtmd_decoder_pos> positions(n_chunk_tokens);
+                mtmd_helper_image_get_decoder_pos(image_tokens, pos_0, positions.data());
+                media_source->set_position_mrope_2d(positions, id_slot);
+            } else {
+                media_source->set_position_mrope_1d(pos_0, id_slot);
+            }
+
+            const int32_t chunk_offset = seq_states[0].n_past - chunk_start;
+            media_batch = media_source->get_view(chunk_offset, info->batch_lens[0]);
+            for (int j = 0; j < media_batch.n_tokens; ++j) {
+                media_batch.logits[j] = paged_batch.logits[j];
+            }
+            decode_batch = &media_batch;
+        }
+
         metrics_pre_decode();
-        if (llama_decode(ctx_tgt, paged_batch) != 0) {
-            throw std::runtime_error("paged scheduler decode failed");
+        {
+            server_causal_guard causal_guard(
+                ctx_tgt, is_media_batch && mtmd_decode_use_non_causal(mctx, media_chunk));
+            if (llama_decode(ctx_tgt, *decode_batch) != 0) {
+                throw std::runtime_error("paged scheduler decode failed");
+            }
         }
         llama_synchronize(ctx_tgt);
-        if (spec && !common_speculative_process(spec.get(), paged_batch)) {
+        if (spec && !common_speculative_process(spec.get(), *decode_batch)) {
             throw std::runtime_error("failed to process paged speculative batch");
         }
 
@@ -1054,9 +1153,9 @@ private:
         for (int i = 0; i < info->n_seq; ++i) {
             const int offset = info->batch_offsets[i];
             const server_slot & slot = slots[paged_batch.seq_id[offset][0]];
-            for (int j = 0; j < info->batch_lens[i]; ++j) {
-                n_prompt_tokens += paged_batch.pos[offset + j] < slot.task->n_tokens();
-            }
+            const uint32_t prompt_remaining = seq_states[i].n_past < (int32_t) slot.task->n_tokens() ?
+                slot.task->n_tokens() - seq_states[i].n_past : 0;
+            n_prompt_tokens += std::min<uint32_t>(info->batch_lens[i], prompt_remaining);
         }
         metrics_queue_prompt(n_prompt_tokens);
         metrics_flush_prompt();
@@ -1067,10 +1166,7 @@ private:
         for (int i = 0; i < info->n_seq; ++i) {
             const int offset = info->batch_offsets[i];
             auto & slot = slots[paged_batch.seq_id[offset][0]];
-            const int32_t prompt_tokens = slot.prompt.tokens.size();
-            const llama_pos batch_pos_last = paged_batch.pos[offset + info->batch_lens[i] - 1];
-
-            if (slot.stats.is_set() && batch_pos_last < prompt_tokens) {
+            if (slot.stats.is_set() && seq_states[i].n_past < seq_states[i].n_prompt) {
                 slot.stats.set_prompt_last(t_prompt_now);
             }
         }
@@ -1100,15 +1196,13 @@ private:
             const int offset = info->batch_offsets[i];
             const int slot_id = paged_batch.seq_id[offset][0];
             server_slot & slot = slots[slot_id];
-            const int32_t prompt_tokens = slot.prompt.tokens.size();
-            const llama_pos batch_pos_last = paged_batch.pos[offset + info->batch_lens[i] - 1];
-            const bool is_prefill = batch_pos_last < prompt_tokens;
-            const bool is_final_prefill = is_prefill && batch_pos_last + 1 == prompt_tokens;
+            const bool is_prefill = seq_states[i].n_past < seq_states[i].n_prompt;
+            const bool is_final_prefill = is_prefill &&
+                seq_states[i].n_past + info->batch_lens[i] == seq_states[i].n_prompt;
             if (is_prefill) {
-                const llama_pos batch_pos_first = paged_batch.pos[offset];
-                const llama_pos prompt_pos_end = std::min<llama_pos>(
-                    batch_pos_last + 1, slot.task->n_tokens());
-                slot.stats.n_prompt_processed += std::max<llama_pos>(0, prompt_pos_end - batch_pos_first);
+                const uint32_t prompt_remaining = seq_states[i].n_past < (int32_t) slot.task->n_tokens() ?
+                    slot.task->n_tokens() - seq_states[i].n_past : 0;
+                slot.stats.n_prompt_processed += std::min<uint32_t>(info->batch_lens[i], prompt_remaining);
             }
 
             if (is_prefill && !is_final_prefill) {
@@ -1212,20 +1306,19 @@ private:
         for (int i = 0; i < info->n_seq; ++i) {
             const int offset = info->batch_offsets[i];
             const server_slot & slot = slots[paged_batch.seq_id[offset][0]];
-            const int32_t prompt_tokens = slot.prompt.tokens.size();
-            const llama_pos batch_pos_last = paged_batch.pos[offset + info->batch_lens[i] - 1];
             const bool checkpoint_before_last =
                 llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt) ||
                 (ctx_dft && (ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
                              ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS));
             if (slot.task->params.cache_prompt && !slot.task->tokens.has_media_chunks() && checkpoint_before_last &&
-                prompt_tokens > 1 && batch_pos_last + 2 == prompt_tokens) {
+                seq_states[i].n_prompt > 1 &&
+                seq_states[i].n_past + info->batch_lens[i] + 1 == seq_states[i].n_prompt) {
                 checkpoint_slots.push_back(paged_batch.seq_id[offset][0]);
             }
         }
 
         llama_paged_scheduler_update_ex(
-                paged_scheduler.get(), &paged_batch, sampled_tokens.data(), accepted_counts.data(), stop_flags.data());
+                paged_scheduler.get(), decode_batch, sampled_tokens.data(), accepted_counts.data(), stop_flags.data());
         for (int id_slot : checkpoint_slots) {
             server_slot & slot = slots[id_slot];
             auto & checkpoint = slot.paged_prompt_ckpt;
@@ -2151,12 +2244,6 @@ private:
             return false;
         }
 
-        if (params_base.kv_paged && task.tokens.has_media_chunks()) {
-            slot.prompt_clear();
-            send_error(task, "Multimodal prompts are not supported with paged KV", ERROR_TYPE_NOT_SUPPORTED);
-            return false;
-        }
-
         SLT_DBG(slot, "launching slot : %s\n", safe_json_to_str(slot.to_json()).c_str());
 
         // initialize samplers
@@ -2207,8 +2294,16 @@ private:
                 return true;
             }
 
+            const bool has_media = task.tokens.has_media_chunks();
+            if (has_media) {
+                // Media embeddings are not stable prompt-cache keys. Discard
+                // any retained text state before scheduling the request cold.
+                slot.prompt_clear();
+            }
+
             int32_t n_prefix = 0;
             const bool can_reuse = task.type == SERVER_TASK_TYPE_COMPLETION && task.params.cache_prompt &&
+                !has_media &&
                 !slot.prompt.tokens.has_media_chunks() &&
                 llama_paged_scheduler_is_retained(paged_scheduler.get(), slot.id);
             if (can_reuse) {
@@ -2264,9 +2359,9 @@ private:
             }
 
             int32_t n_prefix_used = 0;
-            const llama_tokens text_tokens = task.tokens.get_text_tokens();
+            const llama_tokens paged_tokens = task.tokens.get_paged_tokens();
             if (!llama_paged_scheduler_add_request_with_prefix(
-                    paged_scheduler.get(), text_tokens.data(), text_tokens.size(), slot.id,
+                    paged_scheduler.get(), paged_tokens.data(), paged_tokens.size(), slot.id,
                     n_prefix, &n_prefix_used)) {
                 send_error(task, "failed to queue request in paged KV scheduler", ERROR_TYPE_SERVER);
                 slot.prompt_clear();
@@ -2276,6 +2371,7 @@ private:
                 llama_memory_seq_rm(llama_get_memory(ctx_dft), slot.id, -1, -1);
             }
             if (task.type == SERVER_TASK_TYPE_COMPLETION && task.params.cache_prompt &&
+                !has_media &&
                 (!ctx_dft || ctx_dft_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_NO)) {
                 const bool checkpoint_before_last =
                     llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt) ||

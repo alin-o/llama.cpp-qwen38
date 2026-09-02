@@ -1098,6 +1098,54 @@ TEST(test_scheduler_exact_hit_batches_with_cold_miss) {
     llama_batch_free(batch);
 }
 
+TEST(test_scheduler_separates_paged_media_markers_from_token_batches) {
+    auto fixture = make_fixture(/*n_ctx=*/128, /*block_size=*/16, /*n_batch=*/64,
+                                /*n_gpu_blocks=*/8, /*n_cpu_blocks=*/2);
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/0, /*n_prompt=*/4)));
+
+    llama_sequence_group media = make_group(/*id=*/1, /*n_prompt=*/8);
+    media.logical_seq = { 10, 11, -1, -1, 12, -2, -2, 13 };
+    EXPECT_TRUE(fixture.sched->queue_request(std::move(media)));
+
+    llama_batch batch = {};
+    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    const auto * info = fixture.sched->get_curr_batch_info();
+    EXPECT_EQ(info->n_seq, 2);
+    EXPECT_EQ(info->batch_lens[0], 4);
+    EXPECT_EQ(info->batch_lens[1], 2);
+    const int8_t continue_both[] = { 0, 0 };
+    fixture.sched->update(batch, { 20, 21 }, continue_both);
+
+    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    info = fixture.sched->get_curr_batch_info();
+    EXPECT_EQ(info->n_seq, 1);
+    EXPECT_EQ(batch.seq_id[0][0], 1);
+    EXPECT_EQ(batch.n_tokens, 2);
+    EXPECT_EQ(batch.token[0], -1);
+    EXPECT_EQ(batch.token[1], -1);
+    const int8_t continue_one[] = { 0 };
+    fixture.sched->update(batch, { 22 }, continue_one);
+
+    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    info = fixture.sched->get_curr_batch_info();
+    EXPECT_EQ(info->n_seq, 2);
+    EXPECT_EQ(info->batch_lens[0], 1);
+    EXPECT_EQ(info->batch_lens[1], 1);
+    fixture.sched->update(batch, { 23, 24 }, continue_both);
+
+    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    info = fixture.sched->get_curr_batch_info();
+    EXPECT_EQ(info->n_seq, 1);
+    EXPECT_EQ(batch.seq_id[0][0], 1);
+    EXPECT_EQ(batch.n_tokens, 2);
+    EXPECT_EQ(batch.token[0], -2);
+    EXPECT_EQ(batch.token[1], -2);
+
+    fixture.sched->remove_request(0);
+    fixture.sched->remove_request(1);
+    llama_batch_free(batch);
+}
+
 TEST(test_scheduler_evicts_retained_prefix_under_pressure) {
     auto fixture = make_fixture(/*n_ctx=*/128, /*block_size=*/16, /*n_batch=*/64,
                                 /*n_gpu_blocks=*/4, /*n_cpu_blocks=*/1);

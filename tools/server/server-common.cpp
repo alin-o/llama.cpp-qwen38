@@ -471,6 +471,19 @@ const mtmd::input_chunk_ptr & server_tokens::find_chunk(size_t idx) const {
     throw std::runtime_error("Chunk not found");
 }
 
+std::pair<const mtmd::input_chunk_ptr *, size_t> server_tokens::find_media_chunk(size_t idx) const {
+    auto it = map_idx_to_media.upper_bound(idx);
+    if (it == map_idx_to_media.begin()) {
+        return { nullptr, 0 };
+    }
+    --it;
+    const size_t n_tokens = mtmd_input_chunk_get_n_tokens(it->second.get());
+    if (idx >= it->first + n_tokens) {
+        return { nullptr, 0 };
+    }
+    return { &it->second, it->first };
+}
+
 std::pair<const mtmd::input_chunk_ptr *, size_t> server_tokens::find_next_media_chunk(size_t idx) const {
     auto it = map_idx_to_media.upper_bound(idx);
     if (it != map_idx_to_media.end()) {
@@ -625,6 +638,16 @@ llama_tokens server_tokens::get_text_tokens() const {
         if (t != LLAMA_TOKEN_NULL) {
             res.push_back(t);
         }
+    }
+    return res;
+}
+
+llama_tokens server_tokens::get_paged_tokens() const {
+    llama_tokens res = tokens;
+    llama_token marker = LLAMA_TOKEN_NULL;
+    for (const auto & item : map_idx_to_media) {
+        const size_t n_tokens = mtmd_input_chunk_get_n_tokens(item.second.get());
+        std::fill_n(res.begin() + item.first, n_tokens, marker--);
     }
     return res;
 }
