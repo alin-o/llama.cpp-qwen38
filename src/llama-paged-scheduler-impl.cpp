@@ -82,6 +82,7 @@ int32_t llama_paged_scheduler_impl::get_curr_decode_tokens() const {
 }
 
 int32_t llama_paged_scheduler_impl::get_scheduled_tokens(const llama_sequence_group & group) const {
+    int32_t result;
     if (group.n_past < group.n_prompt) {
         int32_t remaining = group.n_prompt - group.n_past;
         const llama_token first = group.logical_seq[group.n_past];
@@ -97,9 +98,16 @@ int32_t llama_paged_scheduler_impl::get_scheduled_tokens(const llama_sequence_gr
         if (remaining > 1 && checkpoint_before_last.count(group.request_id)) {
             --remaining;
         }
-        return std::min<int32_t>(remaining, n_batch);
+        result = std::min<int32_t>(remaining, n_batch);
+    } else {
+        result = 1 + spec_n;
     }
-    return 1 + spec_n;
+
+    if (token_limit_cb) {
+        result = std::clamp(token_limit_cb(
+            group.request_id, group.n_past, result, batch_policy_data), 1, result);
+    }
+    return result;
 }
 
 llama_scheduler_status llama_paged_scheduler_impl::step(llama_batch & batch, int32_t spec_n) {
@@ -121,6 +129,14 @@ llama_scheduler_status llama_paged_scheduler_impl::step(llama_batch & batch, int
     });
     if (media != candidates.end()) {
         candidates = { *media };
+    }
+
+    if (compatible_cb && !candidates.empty()) {
+        const llama_sequence_group * first = candidates.front();
+        candidates.erase(std::remove_if(std::next(candidates.begin()), candidates.end(), [&](const auto * group) {
+            return !compatible_cb(first->request_id, first->n_past,
+                                  group->request_id, group->n_past, batch_policy_data);
+        }), candidates.end());
     }
 
     while (!candidates.empty()) {
@@ -789,6 +805,15 @@ void llama_paged_scheduler_impl::set_on_finish(llama_paged_on_finish_cb cb, void
 void llama_paged_scheduler_impl::set_on_recompute(llama_paged_on_recompute_cb cb, void * user_data) {
     on_recompute_cb        = cb;
     on_recompute_user_data = user_data;
+}
+
+void llama_paged_scheduler_impl::set_batch_policy(
+        llama_paged_batch_token_limit_cb token_limit,
+        llama_paged_batch_compatible_cb  compatible,
+        void *                           user_data) {
+    token_limit_cb   = token_limit;
+    compatible_cb    = compatible;
+    batch_policy_data = user_data;
 }
 
 llama_sequence_group * llama_paged_scheduler_impl::get_group_from_id(int32_t request_id) const {

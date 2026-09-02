@@ -912,6 +912,34 @@ private:
     std::unique_ptr<llama_paged_scheduler, decltype(&llama_paged_scheduler_free)> paged_scheduler{nullptr, llama_paged_scheduler_free};
     llama_batch paged_batch = {};
 
+    std::vector<common_adapter_lora_info> paged_lora_for(
+            const server_slot & slot, int32_t n_past) const {
+        auto result = slot.lora;
+        if (lora_all_alora(result) && slot.alora_invocation_start - 1 > n_past) {
+            const auto & enabled_ids = lora_get_enabled_ids(result);
+            GGML_ASSERT(enabled_ids.size() == 1);
+            result[enabled_ids[0]].scale = 0.0f;
+        }
+        return result;
+    }
+
+    int32_t paged_lora_token_limit(int32_t request_id, int32_t n_past, int32_t n_tokens) const {
+        const server_slot & slot = slots.at(request_id);
+        const int32_t boundary = slot.alora_invocation_start - 1;
+        if (lora_all_alora(slot.lora) && boundary > n_past) {
+            return std::min(n_tokens, boundary - n_past);
+        }
+        return n_tokens;
+    }
+
+    bool paged_lora_compatible(
+            int32_t request_id_a, int32_t n_past_a,
+            int32_t request_id_b, int32_t n_past_b) const {
+        return are_lora_equal(
+            paged_lora_for(slots.at(request_id_a), n_past_a),
+            paged_lora_for(slots.at(request_id_b), n_past_b));
+    }
+
     bool update_slots_paged() {
         int32_t spec_n = 0;
         std::vector<server_slot *> drafting;
@@ -1077,6 +1105,17 @@ private:
                 }
             }
         }
+
+        const int first_id_slot = paged_batch.seq_id[info->batch_offsets[0]][0];
+        auto batch_lora = paged_lora_for(slots[first_id_slot], seq_states[0].n_past);
+        for (int i = 1; i < info->n_seq; ++i) {
+            const int offset = info->batch_offsets[i];
+            const int id_slot = paged_batch.seq_id[offset][0];
+            if (!are_lora_equal(batch_lora, paged_lora_for(slots[id_slot], seq_states[i].n_past))) {
+                throw std::runtime_error("paged scheduler mixed incompatible LoRA configurations");
+            }
+        }
+        common_set_adapter_lora(ctx_tgt, batch_lora);
 
         llama_batch media_batch = {};
         std::unique_ptr<decode_embd_batch> media_source;
@@ -1731,6 +1770,19 @@ private:
                     server->send_partial_response(*slot, {}, true);
                 }
             }, this);
+            llama_paged_scheduler_set_batch_policy(
+                paged_scheduler.get(),
+                [](int32_t request_id, int32_t n_past, int32_t n_tokens, void * user_data) {
+                    const auto * server = static_cast<const server_context_impl *>(user_data);
+                    return server->paged_lora_token_limit(request_id, n_past, n_tokens);
+                },
+                [](int32_t request_id_a, int32_t n_past_a,
+                   int32_t request_id_b, int32_t n_past_b, void * user_data) {
+                    const auto * server = static_cast<const server_context_impl *>(user_data);
+                    return server->paged_lora_compatible(
+                        request_id_a, n_past_a, request_id_b, n_past_b);
+                },
+                this);
         }
 
         // try speculative decoding

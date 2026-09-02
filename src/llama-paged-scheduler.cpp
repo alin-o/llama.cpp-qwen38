@@ -177,6 +177,16 @@ LLAMA_API bool llama_paged_scheduler_is_retained(
     return sched && sched->impl.is_retained(request_id);
 }
 
+LLAMA_API void llama_paged_scheduler_set_batch_policy(
+        struct llama_paged_scheduler *      sched,
+        llama_paged_batch_token_limit_cb    token_limit_cb,
+        llama_paged_batch_compatible_cb     compatible_cb,
+        void *                              user_data) {
+    if (sched) {
+        sched->impl.set_batch_policy(token_limit_cb, compatible_cb, user_data);
+    }
+}
+
 LLAMA_API void llama_paged_scheduler_update(struct llama_paged_scheduler * sched,
                                             struct llama_batch *           batch,
                                             const llama_token *            tokens,

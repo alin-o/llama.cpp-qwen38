@@ -41,6 +41,9 @@ class llama_paged_scheduler_impl {
     void                   remove_request(int32_t request_id);
     void                   set_on_finish(llama_paged_on_finish_cb cb, void * user_data);
     void                   set_on_recompute(llama_paged_on_recompute_cb cb, void * user_data);
+    void                   set_batch_policy(llama_paged_batch_token_limit_cb token_limit_cb,
+                                            llama_paged_batch_compatible_cb  compatible_cb,
+                                            void *                           user_data);
     llama_sequence_group *         get_group_from_id(int32_t request_id) const;
     const llama_paged_batch_info * get_curr_batch_info() const;
     llama_paged_cache_stats        get_cache_stats() const;
@@ -104,4 +107,7 @@ class llama_paged_scheduler_impl {
     void *                      on_finish_user_data   = nullptr;
     llama_paged_on_recompute_cb on_recompute_cb        = nullptr;
     void *                      on_recompute_user_data = nullptr;
+    llama_paged_batch_token_limit_cb token_limit_cb      = nullptr;
+    llama_paged_batch_compatible_cb  compatible_cb       = nullptr;
+    void *                           batch_policy_data    = nullptr;
 };

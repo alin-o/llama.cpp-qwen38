@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from utils import *
 
@@ -64,6 +66,167 @@ def test_lora_per_request():
     assert all([res.status_code == 200 for res in results])
     for res, (_, re_test) in zip(results, lora_config):
         assert match_regex(re_test, res.body["content"])
+
+
+def test_paged_lora_per_request_and_cache_invalidation():
+    global server
+    model = os.environ.get("LLAMA_SERVER_PAGED_LORA_MODEL")
+    adapter = os.environ.get("LLAMA_SERVER_PAGED_LORA_FILE")
+    if not model or not adapter:
+        pytest.skip("set LLAMA_SERVER_PAGED_LORA_MODEL and LLAMA_SERVER_PAGED_LORA_FILE to run paged LoRA coverage")
+
+    server = ServerProcess()
+    server.model_file = model
+    server.model_hf_repo = None
+    server.model_hf_file = None
+    server.offline = True
+    server.lora_files = [adapter]
+    server.kv_paged = True
+    server.n_slots = 2
+    server.n_ctx = 1024
+    server.n_batch = 128
+    server.n_ubatch = 128
+    server.block_size = 16
+    server.n_gpu_blocks = 128
+    server.n_cpu_blocks = 16
+    server.n_predict = 8
+    server.temperature = 0.0
+    server.seed = 42
+    server.start()
+
+    request = {
+        "prompt": "A deterministic adapter isolation prompt. " * 8,
+        "n_predict": 8,
+        "temperature": 0.0,
+        "seed": 42,
+        "return_tokens": True,
+    }
+    cold = {}
+    for scale in (0.0, 1.0):
+        response = server.make_request("POST", "/completion", data={
+            **request,
+            "lora": [{"id": 0, "scale": scale}],
+            "cache_prompt": False,
+        })
+        assert response.status_code == 200
+        cold[scale] = response.body["tokens"]
+    assert cold[0.0] != cold[1.0]
+
+    tasks = [(
+        server.make_request,
+        ("POST", "/completion", {
+            **request,
+            "lora": [{"id": 0, "scale": scale}],
+            "cache_prompt": False,
+            "id_slot": id_slot,
+        })
+    ) for id_slot, scale in enumerate((0.0, 1.0))]
+    results = parallel_function_calls(tasks)
+    assert all(response.status_code == 200 for response in results)
+    assert results[0].body["tokens"] == cold[0.0]
+    assert results[1].body["tokens"] == cold[1.0]
+
+    warm_request = {
+        **request,
+        "lora": [{"id": 0, "scale": 1.0}],
+        "cache_prompt": True,
+        "id_slot": 0,
+    }
+    prime = server.make_request("POST", "/completion", data=warm_request)
+    warm = server.make_request("POST", "/completion", data=warm_request)
+    assert prime.status_code == 200
+    assert warm.status_code == 200
+    assert prime.body["tokens"] == cold[1.0]
+    assert warm.body["tokens"] == cold[1.0]
+    assert warm.body["timings"]["cache_n"] == prime.body["timings"]["prompt_n"] - 1
+    assert warm.body["timings"]["prompt_n"] == 1
+
+    switched = server.make_request("POST", "/completion", data={
+        **warm_request,
+        "lora": [{"id": 0, "scale": 0.0}],
+    })
+    assert switched.status_code == 200
+    assert switched.body["tokens"] == cold[0.0]
+    assert switched.body["timings"]["cache_n"] == 0
+
+
+def test_paged_alora_pre_invocation_and_batch_isolation():
+    global server
+    model = os.environ.get("LLAMA_SERVER_ALORA_MODEL")
+    adapter = os.environ.get("LLAMA_SERVER_ALORA_FILE")
+    if not model or not adapter:
+        pytest.skip("set LLAMA_SERVER_ALORA_MODEL and LLAMA_SERVER_ALORA_FILE to run paged aLoRA coverage")
+
+    server = ServerProcess()
+    server.model_file = model
+    server.model_hf_repo = None
+    server.model_hf_file = None
+    server.offline = True
+    server.lora_files = [adapter]
+    server.kv_paged = True
+    server.n_slots = 2
+    server.n_ctx = 1024
+    server.n_batch = 128
+    server.n_ubatch = 128
+    server.block_size = 16
+    server.n_gpu_blocks = 128
+    server.n_cpu_blocks = 16
+    server.n_predict = 8
+    server.temperature = 0.0
+    server.seed = 42
+    server.start()
+
+    adapters = server.make_request("GET", "/lora-adapters")
+    assert adapters.status_code == 200
+    invocation = adapters.body[0]["alora_invocation_string"]
+    prompt = ("The stable prefix is evaluated without the adapter. " * 8).rstrip() + invocation + " Continue the story."
+    request = {
+        "prompt": prompt,
+        "n_predict": 8,
+        "temperature": 0.0,
+        "seed": 42,
+        "return_tokens": True,
+    }
+
+    cold = {}
+    for scale in (0.0, 1.0):
+        response = server.make_request("POST", "/completion", data={
+            **request,
+            "lora": [{"id": 0, "scale": scale}],
+            "cache_prompt": False,
+        })
+        assert response.status_code == 200
+        cold[scale] = response.body["tokens"]
+    assert cold[0.0] != cold[1.0]
+
+    warm_request = {
+        **request,
+        "lora": [{"id": 0, "scale": 1.0}],
+        "cache_prompt": True,
+        "id_slot": 0,
+    }
+    prime = server.make_request("POST", "/completion", data=warm_request)
+    warm = server.make_request("POST", "/completion", data=warm_request)
+    assert prime.status_code == 200
+    assert warm.status_code == 200
+    assert prime.body["tokens"] == cold[1.0]
+    assert warm.body["tokens"] == cold[1.0]
+    assert 0 < warm.body["timings"]["cache_n"] < prime.body["timings"]["prompt_n"]
+    assert warm.body["timings"]["cache_n"] + warm.body["timings"]["prompt_n"] == prime.body["timings"]["prompt_n"]
+
+    tasks = [(
+        server.make_request,
+        ("POST", "/completion", {
+            **request,
+            "lora": [{"id": 0, "scale": scale}],
+            "cache_prompt": False,
+            "id_slot": id_slot,
+        })
+    ) for id_slot, scale in enumerate((0.0, 1.0))]
+    results = parallel_function_calls(tasks)
+    assert all(response.status_code == 200 for response in results)
+    assert results[0].body["tokens"] == cold[0.0]
+    assert results[1].body["tokens"] == cold[1.0]
 
 
 @pytest.mark.skipif(not is_slow_test_allowed(), reason="skipping slow test")

@@ -1677,6 +1677,15 @@ extern "C" {
                                              int32_t             n_tokens,
                                              void *              user_data);
     typedef void (*llama_paged_on_recompute_cb)(int32_t request_id, void * user_data);
+    typedef int32_t (*llama_paged_batch_token_limit_cb)(int32_t request_id,
+                                                        int32_t n_past,
+                                                        int32_t n_tokens,
+                                                        void *  user_data);
+    typedef bool (*llama_paged_batch_compatible_cb)(int32_t request_id_a,
+                                                    int32_t n_past_a,
+                                                    int32_t request_id_b,
+                                                    int32_t n_past_b,
+                                                    void *  user_data);
     LLAMA_API struct llama_paged_scheduler * llama_paged_scheduler_init(struct llama_context * ctx);
     LLAMA_API void llama_paged_scheduler_free(struct llama_paged_scheduler * sched);
 
@@ -1700,6 +1709,15 @@ extern "C" {
                                                         bool                           checkpoint_before_last);
     LLAMA_API bool llama_paged_scheduler_is_retained(const struct llama_paged_scheduler * sched,
                                                       int32_t                              request_id);
+
+    // Optional server-side batch policy. The token limit can split a request's
+    // next scheduler step at a state boundary. The compatibility callback
+    // prevents requests with incompatible context-global state from sharing a
+    // batch. Other scheduler users retain the default unrestricted behavior.
+    LLAMA_API void llama_paged_scheduler_set_batch_policy(struct llama_paged_scheduler *       sched,
+                                                           llama_paged_batch_token_limit_cb      token_limit_cb,
+                                                           llama_paged_batch_compatible_cb       compatible_cb,
+                                                           void *                                user_data);
 
     LLAMA_API bool llama_paged_scheduler_prepare_batch_ex(struct llama_paged_scheduler * sched,
                                                           struct llama_batch *           batch,

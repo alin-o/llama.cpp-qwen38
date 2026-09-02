@@ -1098,6 +1098,67 @@ TEST(test_scheduler_exact_hit_batches_with_cold_miss) {
     llama_batch_free(batch);
 }
 
+struct test_paged_batch_policy {
+    int32_t split_request_id = 0;
+    int32_t split_pos        = 4;
+};
+
+static int32_t test_paged_batch_token_limit(
+        int32_t request_id, int32_t n_past, int32_t n_tokens, void * user_data) {
+    const auto * policy = static_cast<const test_paged_batch_policy *>(user_data);
+    if (request_id == policy->split_request_id && n_past < policy->split_pos) {
+        return std::min(n_tokens, policy->split_pos - n_past);
+    }
+    return n_tokens;
+}
+
+static bool test_paged_batch_compatible(
+        int32_t request_id_a, int32_t n_past_a,
+        int32_t request_id_b, int32_t n_past_b, void * user_data) {
+    const auto * policy = static_cast<const test_paged_batch_policy *>(user_data);
+    const auto batch_class = [&](int32_t request_id, int32_t n_past) {
+        if (request_id == policy->split_request_id) {
+            return n_past < policy->split_pos ? 0 : 1;
+        }
+        return request_id == 1 ? 2 : 1;
+    };
+    return batch_class(request_id_a, n_past_a) == batch_class(request_id_b, n_past_b);
+}
+
+TEST(test_scheduler_batch_policy_splits_state_boundary_and_isolates_incompatible_requests) {
+    auto fixture = make_fixture(/*n_ctx=*/128, /*block_size=*/16, /*n_batch=*/64,
+                                /*n_gpu_blocks=*/8, /*n_cpu_blocks=*/2);
+    test_paged_batch_policy policy;
+    fixture.sched->set_batch_policy(
+        test_paged_batch_token_limit, test_paged_batch_compatible, &policy);
+
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/0, /*n_prompt=*/10)));
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/1, /*n_prompt=*/10)));
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/2, /*n_prompt=*/10)));
+
+    llama_batch batch = {};
+    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    const auto * info = fixture.sched->get_curr_batch_info();
+    EXPECT_EQ(info->n_seq, 1);
+    EXPECT_EQ(info->batch_lens[0], 4);
+    EXPECT_EQ(batch.seq_id[0][0], 0);
+    const int8_t continue_one[] = { 0 };
+    fixture.sched->update(batch, { 42 }, continue_one);
+
+    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    info = fixture.sched->get_curr_batch_info();
+    EXPECT_EQ(info->n_seq, 2);
+    EXPECT_EQ(info->batch_lens[0], 6);
+    EXPECT_EQ(info->batch_lens[1], 10);
+    EXPECT_EQ(batch.seq_id[info->batch_offsets[0]][0], 0);
+    EXPECT_EQ(batch.seq_id[info->batch_offsets[1]][0], 2);
+
+    fixture.sched->remove_request(0);
+    fixture.sched->remove_request(1);
+    fixture.sched->remove_request(2);
+    llama_batch_free(batch);
+}
+
 TEST(test_scheduler_separates_paged_media_markers_from_token_batches) {
     auto fixture = make_fixture(/*n_ctx=*/128, /*block_size=*/16, /*n_batch=*/64,
                                 /*n_gpu_blocks=*/8, /*n_cpu_blocks=*/2);
