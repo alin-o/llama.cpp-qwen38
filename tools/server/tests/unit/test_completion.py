@@ -420,12 +420,12 @@ def test_paged_slot_reuse_pressure():
     assert "HTTP 500" not in log
 
 
-def test_paged_multimodal_prompt_bypasses_retained_prefix():
+def test_paged_multimodal_prompt_is_rejected_and_discards_retained_prefix():
     repo = os.environ.get("LLAMA_SERVER_PAGED_MM_REPO")
     image = os.environ.get("LLAMA_SERVER_PAGED_MM_IMAGE")
     if not repo or not image:
         pytest.skip(
-            "set LLAMA_SERVER_PAGED_MM_REPO and LLAMA_SERVER_PAGED_MM_IMAGE to run paged multimodal fallback"
+            "set LLAMA_SERVER_PAGED_MM_REPO and LLAMA_SERVER_PAGED_MM_IMAGE to run paged multimodal rejection"
         )
 
     os.environ["LLAMA_MEDIA_MARKER"] = "<__media__>"
@@ -459,14 +459,19 @@ def test_paged_multimodal_prompt_bypasses_retained_prefix():
         "temperature": 0.0,
         "return_tokens": True,
     }
-    fallback = server.make_request("POST", "/completion", data=request)
-    oracle = server.make_request("POST", "/completion", data={**request, "cache_prompt": False})
-    assert fallback.status_code == 200
-    assert oracle.status_code == 200
-    assert fallback.body["tokens"] == oracle.body["tokens"]
-    assert fallback.body["timings"]["cache_n"] == 0
-    assert oracle.body["timings"]["cache_n"] == 0
-    assert fallback.body["timings"]["prompt_n"] == oracle.body["timings"]["prompt_n"]
+    rejected = server.make_request("POST", "/completion", data=request)
+    assert rejected.status_code == 501
+    assert rejected.body["error"]["type"] == "not_supported_error"
+    assert rejected.body["error"]["message"] == "Multimodal prompts are not supported with paged KV"
+
+    after_rejection = server.make_request("POST", "/completion", data={
+        "prompt": "Retain this text-only prompt.",
+        "id_slot": 0,
+        "cache_prompt": True,
+        "temperature": 0.0,
+    })
+    assert after_rejection.status_code == 200
+    assert after_rejection.body["timings"]["cache_n"] == 0
 
 
 @pytest.mark.parametrize("n_slots,n_requests", [

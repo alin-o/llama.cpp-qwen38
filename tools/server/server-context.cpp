@@ -2116,6 +2116,12 @@ private:
             return false;
         }
 
+        if (params_base.kv_paged && task.tokens.has_media_chunks()) {
+            slot.prompt_clear();
+            send_error(task, "Multimodal prompts are not supported with paged KV", ERROR_TYPE_NOT_SUPPORTED);
+            return false;
+        }
+
         SLT_DBG(slot, "launching slot : %s\n", safe_json_to_str(slot.to_json()).c_str());
 
         // initialize samplers
@@ -2166,10 +2172,9 @@ private:
                 return true;
             }
 
-            const bool has_media = task.tokens.has_media_chunks();
             int32_t n_prefix = 0;
             const bool can_reuse = task.type == SERVER_TASK_TYPE_COMPLETION && task.params.cache_prompt &&
-                !has_media && !slot.prompt.tokens.has_media_chunks() &&
+                !slot.prompt.tokens.has_media_chunks() &&
                 llama_paged_scheduler_is_retained(paged_scheduler.get(), slot.id);
             if (can_reuse) {
                 n_prefix = slot.prompt.tokens.get_common_prefix(task.tokens);
@@ -2225,17 +2230,9 @@ private:
 
             int32_t n_prefix_used = 0;
             const llama_tokens text_tokens = task.tokens.get_text_tokens();
-            bool request_queued = false;
-            if (has_media) {
-                slot.prompt_clear();
-                request_queued = llama_paged_scheduler_add_request(
-                        paged_scheduler.get(), text_tokens.data(), text_tokens.size(), slot.id);
-            } else {
-                request_queued = llama_paged_scheduler_add_request_with_prefix(
-                        paged_scheduler.get(), text_tokens.data(), text_tokens.size(), slot.id,
-                        n_prefix, &n_prefix_used);
-            }
-            if (!request_queued) {
+            if (!llama_paged_scheduler_add_request_with_prefix(
+                    paged_scheduler.get(), text_tokens.data(), text_tokens.size(), slot.id,
+                    n_prefix, &n_prefix_used)) {
                 send_error(task, "failed to queue request in paged KV scheduler", ERROR_TYPE_SERVER);
                 slot.prompt_clear();
                 return false;
@@ -2244,7 +2241,6 @@ private:
                 llama_memory_seq_rm(llama_get_memory(ctx_dft), slot.id, -1, -1);
             }
             if (task.type == SERVER_TASK_TYPE_COMPLETION && task.params.cache_prompt &&
-                !has_media &&
                 (!ctx_dft || ctx_dft_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_NO)) {
                 const bool checkpoint_before_last =
                     llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt) ||
