@@ -44,7 +44,7 @@ services:
       - ${QWEN38_CACHE_ROOT:-/mnt/S/.cache/llama.cpp/qwen38}:/qwen38-cache:ro
       - ./scripts/qwen38:/qwen38:ro
       - ./docker/run-model-server.sh:/docker/run-model-server.sh:ro
-      - qwen38_upstream_state:/state
+      - ./docker/state:/state
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
@@ -52,6 +52,9 @@ services:
       MODEL_GGUF: ${MODEL_GGUF:-}
       MTP_GGUF: ${MTP_GGUF:-}
       MMPROJ_GGUF: ${MMPROJ_GGUF:-}
+      CHAT_TEMPLATE_FILE: ${CHAT_TEMPLATE_FILE:-}
+      REASONING_FORMAT: ${REASONING_FORMAT:-}
+      PROMPT_LOG_DIR: ${PROMPT_LOG_DIR:-}
       CACHE_ROOT: ${CACHE_ROOT:-/qwen38-cache}
       CACHE_PROFILE: ${CACHE_PROFILE:-turbo4}
       SPEC: ${SPEC:-mtp}
@@ -73,27 +76,3 @@ services:
     # MODEL_ENTRYPOINT switches launchers: the qwen38 script is the default,
     # model configs for other models point at /docker/run-model-server.sh.
     entrypoint: ["/bin/bash", "${MODEL_ENTRYPOINT:-/qwen38/run-upstream-server.sh}"]
-
-  fork-candidate:
-    <<: *runtime
-    profiles: [fork]
-    build:
-      context: ../atomic-llama-cpp-turboquant
-      dockerfile: ../llama.cpp-qwen38/qwen38/Dockerfile.fork
-    image: qwen38-turboquant:d7179ba3c
-    ports:
-      - "${QWEN38_FORK_PORT:-8883}:8080"
-    volumes:
-      - ${QWEN38_MODEL_DIR:-/mnt/S/.cache/llama.cpp}:/models:ro
-      - ${QWEN38_CACHE_ROOT:-/mnt/S/.cache/llama.cpp/qwen38}:/qwen38-cache:ro
-      - ./scripts/qwen38:/qwen38:ro
-      - qwen38_fork_state:/state
-    environment:
-      SPEC: ${SPEC:-off}
-      CTX: ${CTX:-102400}
-      DRAFT_MAX: ${DRAFT_MAX:-4}
-    entrypoint: ["/bin/bash", "/qwen38/run-fork-server.sh"]
-
-volumes:
-  qwen38_upstream_state:
-  qwen38_fork_state:

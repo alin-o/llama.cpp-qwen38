@@ -12,7 +12,7 @@ PROFILE_SET="${PROFILE_SET:-all}"
 mkdir -p "$RESULTS_DIR"
 
 cleanup() {
-    "${COMPOSE[@]}" stop upstream-candidate fork-candidate >/dev/null 2>&1 || true
+    "${COMPOSE[@]}" stop upstream-candidate >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -55,8 +55,6 @@ selected() {
     [[ "$PROFILE_SET" == all || ",${PROFILE_SET}," == *",$1,"* ]]
 }
 
-selected fork-turbo3-base && run_one fork fork-candidate "${QWEN38_FORK_PORT:-8883}" fork-turbo3-base unused off
-selected fork-turbo3-nextn && run_one fork fork-candidate "${QWEN38_FORK_PORT:-8883}" fork-turbo3-nextn unused nextn
 selected upstream-q8q5-base && run_one upstream upstream-candidate "${QWEN38_UPSTREAM_PORT:-8882}" upstream-q8q5-base q8q5 off
 selected upstream-q8q5-mtp && run_one upstream upstream-candidate "${QWEN38_UPSTREAM_PORT:-8882}" upstream-q8q5-mtp q8q5 mtp
 selected upstream-iq4nl-base && run_one upstream upstream-candidate "${QWEN38_UPSTREAM_PORT:-8882}" upstream-iq4nl-base iq4nl off

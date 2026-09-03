@@ -6,7 +6,8 @@
 #
 # Required: MODEL_GGUF (in-container path, e.g. /qwen38-cache/<file>.gguf).
 # Optional: CTX NP CACHE_PROFILE CACHE_REUSE THREADS THREADS_HTTP HOST PORT
-#           SLOT_PROMPT_CACHE_THRESHOLD SLOT_SAVE_PATH
+#           SLOT_PROMPT_CACHE_THRESHOLD SLOT_SAVE_PATH CHAT_TEMPLATE_FILE
+#           REASONING_FORMAT PROMPT_LOG_DIR FIT
 #           MMPROJ_GGUF   attach a vision tower when the file exists
 #           SPEC=mtp      run the MTP head: a separate file from MTP_GGUF,
 #                         or the head embedded in MODEL_GGUF (nextn.* tensors)
@@ -74,6 +75,11 @@ ARGS=(
     --threads-http "${THREADS_HTTP:-4}"
 )
 
+[[ -n "${CHAT_TEMPLATE_FILE:-}" ]] && ARGS+=(--chat-template-file "$CHAT_TEMPLATE_FILE")
+[[ -n "${REASONING_FORMAT:-}" ]]   && ARGS+=(--reasoning-format "$REASONING_FORMAT")
+[[ -n "${PROMPT_LOG_DIR:-}" ]]     && ARGS+=(--log-prompts-dir "$PROMPT_LOG_DIR")
+[[ -n "${FIT:-}" ]]                && ARGS+=(--fit "$FIT")
+
 # KV cache backend: unified buffer by default, paged block pool when KV_PAGED.
 if [[ "${KV_PAGED:-0}" == "1" || "${KV_PAGED:-0}" == "on" ]]; then
     KV_MODE="paged"
@@ -118,5 +124,5 @@ elif [[ "${SPEC:-off}" != "off" ]]; then
     exit 2
 fi
 
-echo "model: engine=generic profile=${PROFILE} spec=${SPEC:-off} ctx=${CTX:-32768} np=${NP:-1} kv=${KV_MODE} model=${MODEL}" >&2
+echo "model: engine=generic profile=${PROFILE} spec=${SPEC:-off} ctx=${CTX:-32768} np=${NP:-1} kv=${KV_MODE} model=${MODEL} prompt_log=${PROMPT_LOG_DIR:-off}" >&2
 exec "$SERVER" "${ARGS[@]}" "$@"

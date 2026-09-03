@@ -32,6 +32,7 @@ DEFAULT_MODEL="qwen38-xl"
 CONTAINER_NAME="qwen38-evaluation-${SERVICE}-1"
 # Vars the compose service interpolates; the config file sets these.
 MANAGED_VARS="MODEL_GGUF MTP_GGUF MMPROJ_GGUF DRAFT_GGUF MODEL_ENTRYPOINT CACHE_ROOT CACHE_PROFILE \
+CHAT_TEMPLATE_FILE REASONING_FORMAT PROMPT_LOG_DIR \
 SPEC CTX DRAFT_MAX DRAFT_CACHE_K DRAFT_CACHE_V NP CACHE_REUSE \
 SLOT_PROMPT_CACHE_THRESHOLD QWEN38_UPSTREAM_PORT QWEN38_MODEL_DIR QWEN38_CACHE_ROOT \
 KV_PAGED KV_BLOCK_SIZE N_GPU_BLOCKS N_CPU_BLOCKS KV_PAGED_WATERMARK FIT"
@@ -40,6 +41,28 @@ die() { echo "error: $*" >&2; exit 1; }
 
 container_id() {
     docker ps -aq --filter "name=^/${CONTAINER_NAME}$" | head -n1
+}
+
+report_container_exit() {
+    local cid="$1" exit_code oom_killed signal_number signal_name
+
+    docker inspect -f 'container exit: exit={{.State.ExitCode}} oom={{.State.OOMKilled}} error={{.State.Error}}' "$cid" >&2 || return
+
+    exit_code="$(docker inspect -f '{{.State.ExitCode}}' "$cid" 2>/dev/null || true)"
+    oom_killed="$(docker inspect -f '{{.State.OOMKilled}}' "$cid" 2>/dev/null || true)"
+    if [ "$oom_killed" = "true" ]; then
+        echo "cause: Docker reports that the container was OOM-killed" >&2
+    elif [[ "$exit_code" =~ ^[0-9]+$ ]] && [ "$exit_code" -gt 128 ] && [ "$exit_code" -lt 256 ]; then
+        signal_number=$(( exit_code - 128 ))
+        signal_name="$(kill -l "$signal_number" 2>/dev/null || true)"
+        if [ -n "$signal_name" ]; then
+            [[ "$signal_name" == SIG* ]] || signal_name="SIG${signal_name}"
+            echo "cause: process terminated by signal $signal_number ($signal_name)" >&2
+        else
+            echo "cause: process terminated by signal $signal_number" >&2
+        fi
+        echo "note: Docker records the signal but not a native stack trace" >&2
+    fi
 }
 
 usage() {
@@ -121,8 +144,10 @@ wait_healthy() {
         fi
         state="$(docker inspect -f '{{.State.Status}}' "$cid" 2>/dev/null || true)"
         if [ "$state" != "running" ]; then
-            echo "error: container stopped before the server came up (state: ${state:-gone}); recent logs:" >&2
-            docker logs --tail 40 "$cid" >&2
+            echo "error: container stopped before the server came up (state: ${state:-gone})" >&2
+            report_container_exit "$cid"
+            echo "recent logs:" >&2
+            docker logs --tail 200 "$cid" >&2
             exit 1
         fi
         if [ "$(date +%s)" -ge "$deadline" ]; then
