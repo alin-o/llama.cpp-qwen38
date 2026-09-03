@@ -1201,7 +1201,8 @@ TEST(test_cumulative_checkpoint_cross_slot_sharing_and_cow) {
     payload.recurrent = { 1, 2, 3 };
     payload.draft = { 4, 5 };
     payload.speculative = { 6 };
-    EXPECT_TRUE(fixture.sched->publish_checkpoint(0, 18, "test-fingerprint", payload));
+    llama_checkpoint_key root_key = {};
+    EXPECT_TRUE(fixture.sched->publish_checkpoint(0, 18, "test-fingerprint", payload, &root_key));
     source_group = fixture.sched->get_group_from_id(0);
     EXPECT_TRUE(source_group->block_table[0] == parent_source_blocks[0]);
     EXPECT_TRUE(source_group->block_table[1] != parent_source_blocks[1]);
@@ -1210,7 +1211,9 @@ TEST(test_cumulative_checkpoint_cross_slot_sharing_and_cow) {
     EXPECT_EQ(batch.pos[0], 18);
     EXPECT_EQ(batch.n_tokens, 14);
     fixture.sched->update(batch, { 43 }, { 14 }, keep_running);
-    EXPECT_TRUE(fixture.sched->publish_checkpoint(0, 32, "test-fingerprint", payload));
+    EXPECT_TRUE(fixture.sched->publish_checkpoint(
+        0, 32, "test-fingerprint", payload, nullptr,
+        llama_checkpoint_publish_fault::NONE, &root_key));
 
     llama_sequence_group partial_a = make_group(/*id=*/1, /*n_prompt=*/24);
     llama_sequence_group partial_b = make_group(/*id=*/2, /*n_prompt=*/24);
@@ -1269,15 +1272,13 @@ TEST(test_cumulative_checkpoint_cross_slot_sharing_and_cow) {
     EXPECT_TRUE(attached_a->block_table[1] == attached_b->block_table[1]);
     EXPECT_TRUE(attached_a->block_table[2] != attached_b->block_table[2]);
 
-    fixture.sched->record_graph_decision(false);
-    fixture.sched->record_graph_decision(true);
     const llama_checkpoint_metrics metrics = fixture.sched->get_checkpoint_metrics();
     EXPECT_EQ(metrics.hits, 4u);
     EXPECT_EQ(metrics.hit_tokens, 100u);
     EXPECT_EQ(metrics.suffix_tokens, 20u);
     EXPECT_TRUE(metrics.cow_copies >= 3);
-    EXPECT_EQ(metrics.graph_rebuilds, 1u);
-    EXPECT_EQ(metrics.graph_reuses, 1u);
+    EXPECT_EQ(metrics.graph_rebuilds, 0u);
+    EXPECT_EQ(metrics.graph_reuses, 0u);
 
     fixture.sched->remove_request(3);
     fixture.sched->remove_request(4);
@@ -1535,7 +1536,8 @@ TEST(test_cumulative_checkpoint_overlapping_lineage_and_builder_cancellation) {
     EXPECT_TRUE(concurrent.sched->wait_for_checkpoint_builders_for_test(1, 1000));
     std::thread long_builder([&] {
         long_published = concurrent.sched->publish_checkpoint(
-            0, 32, "overlapping-lineage", payload, &concurrent_long);
+            0, 32, "overlapping-lineage", payload, &concurrent_long,
+            llama_checkpoint_publish_fault::NONE, &concurrent_short);
     });
     EXPECT_TRUE(concurrent.sched->wait_for_checkpoint_builders_for_test(2, 1000));
     concurrent.sched->set_checkpoint_build_gate_for_test(false);
@@ -1552,7 +1554,8 @@ TEST(test_cumulative_checkpoint_overlapping_lineage_and_builder_cancellation) {
     EXPECT_TRUE(sequential.sched->publish_checkpoint(
         0, 16, "overlapping-lineage", payload, &sequential_short));
     EXPECT_TRUE(sequential.sched->publish_checkpoint(
-        0, 32, "overlapping-lineage", payload, &sequential_long));
+        0, 32, "overlapping-lineage", payload, &sequential_long,
+        llama_checkpoint_publish_fault::NONE, &sequential_short));
     EXPECT_TRUE(concurrent_short == sequential_short);
     EXPECT_TRUE(concurrent_long == sequential_long);
 
@@ -1565,6 +1568,45 @@ TEST(test_cumulative_checkpoint_overlapping_lineage_and_builder_cancellation) {
         std::move(attached), "overlapping-lineage", nullptr, &used));
     EXPECT_EQ(used, 32u);
     concurrent.sched->remove_request(1);
+
+    llama_checkpoint_key wrong_predecessor = {};
+    EXPECT_TRUE(sequential.sched->publish_checkpoint(
+        0, 18, "overlapping-lineage", payload, &wrong_predecessor));
+    EXPECT_FALSE(sequential.sched->publish_checkpoint(
+        0, 16, "overlapping-lineage", payload, nullptr,
+        llama_checkpoint_publish_fault::NONE, &wrong_predecessor));
+
+    auto failed_lineage = make_fixture(/*n_ctx=*/128, /*block_size=*/16, /*n_batch=*/64,
+                                       /*n_gpu_blocks=*/16, /*n_cpu_blocks=*/2);
+    evaluate_source(failed_lineage, 0, 40);
+    failed_lineage.sched->set_checkpoint_build_gate_for_test(true);
+    llama_checkpoint_key failed_short = {};
+    llama_checkpoint_key failed_long = {};
+    bool failed_short_published = true;
+    bool failed_long_published = true;
+    std::thread failed_short_builder([&] {
+        failed_short_published = failed_lineage.sched->publish_checkpoint(
+            0, 16, "failed-overlap", payload, &failed_short,
+            llama_checkpoint_publish_fault::TARGET);
+    });
+    EXPECT_TRUE(failed_lineage.sched->wait_for_checkpoint_builders_for_test(1, 1000));
+    std::thread failed_long_builder([&] {
+        failed_long_published = failed_lineage.sched->publish_checkpoint(
+            0, 32, "failed-overlap", payload, &failed_long,
+            llama_checkpoint_publish_fault::NONE, &failed_short);
+    });
+    EXPECT_TRUE(failed_lineage.sched->wait_for_checkpoint_builders_for_test(2, 1000));
+    failed_lineage.sched->set_checkpoint_build_gate_for_test(false);
+    failed_short_builder.join();
+    failed_long_builder.join();
+    EXPECT_FALSE(failed_short_published);
+    EXPECT_FALSE(failed_long_published);
+    EXPECT_TRUE(failed_lineage.sched->get_checkpoint_metrics().records == 0);
+    EXPECT_TRUE(failed_lineage.sched->publish_checkpoint(
+        0, 16, "failed-overlap", payload, &failed_short));
+    EXPECT_TRUE(failed_lineage.sched->publish_checkpoint(
+        0, 32, "failed-overlap", payload, &failed_long,
+        llama_checkpoint_publish_fault::NONE, &failed_short));
 
     auto cancelled = make_fixture(/*n_ctx=*/128, /*block_size=*/16, /*n_batch=*/64,
                                   /*n_gpu_blocks=*/8, /*n_cpu_blocks=*/2);

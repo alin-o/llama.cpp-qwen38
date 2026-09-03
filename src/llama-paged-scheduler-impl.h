@@ -123,7 +123,8 @@ class llama_paged_scheduler_impl {
                             const std::string & fingerprint,
                             const llama_checkpoint_payload & payload,
                             llama_checkpoint_key * key_out = nullptr,
-                            llama_checkpoint_publish_fault fault = llama_checkpoint_publish_fault::NONE);
+                            llama_checkpoint_publish_fault fault = llama_checkpoint_publish_fault::NONE,
+                            const llama_checkpoint_key * intended_predecessor = nullptr);
     bool queue_request_cached(llama_sequence_group group,
                               const std::string & fingerprint,
                               llama_checkpoint_view * view,

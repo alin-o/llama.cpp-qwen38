@@ -311,6 +311,10 @@ static path_result run_paged(const std::string & model_path,
         EXPECT_TRUE(reused_after_forced_remap);
     }
     const llama_perf_context_data perf = llama_perf_context(ctx);
+    llama_paged_cache_stats cache_stats = {};
+    EXPECT_TRUE(llama_paged_scheduler_get_cache_stats(sched, &cache_stats));
+    EXPECT_TRUE(cache_stats.checkpoint_graph_reuses == (uint64_t) perf.n_reused);
+    EXPECT_TRUE(cache_stats.checkpoint_graph_reuses + cache_stats.checkpoint_graph_rebuilds == result.logits.size());
     fprintf(stderr, "  paged graph reuse: n_reused=%d\n", perf.n_reused);
     if (graph_reuse_disable) {
         EXPECT_TRUE(perf.n_reused == 0);
@@ -359,6 +363,10 @@ static void run_paged_incompatible_shape_probe(const std::string & model_path) {
     EXPECT_TRUE(llama_decode(ctx, batch) == 0);
     llama_synchronize(ctx);
     EXPECT_TRUE(llama_perf_context(ctx).n_reused == reused_before);
+    llama_paged_cache_stats cache_stats = {};
+    EXPECT_TRUE(llama_paged_scheduler_get_cache_stats(sched, &cache_stats));
+    EXPECT_TRUE(cache_stats.checkpoint_graph_rebuilds >= 2);
+    EXPECT_TRUE(cache_stats.checkpoint_graph_reuses == (uint64_t) llama_perf_context(ctx).n_reused);
     fprintf(stderr, "  multi-sequence rebuild: n_reused=%d -> %d\n", reused_before, llama_perf_context(ctx).n_reused);
     llama_paged_scheduler_free(sched);
     llama_batch_free(batch);

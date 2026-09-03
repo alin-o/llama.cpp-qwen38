@@ -760,7 +760,8 @@ bool llama_paged_scheduler_impl::publish_checkpoint(
         const std::string & fingerprint,
         const llama_checkpoint_payload & payload,
         llama_checkpoint_key * key_out,
-        llama_checkpoint_publish_fault fault) {
+        llama_checkpoint_publish_fault fault,
+        const llama_checkpoint_key * intended_predecessor) {
     if (n_tokens == 0 || fingerprint.empty() || !payload.recurrent_complete ||
         !payload.draft_complete || !payload.speculative_complete) {
         std::lock_guard<std::mutex> lock(checkpoint_mutex);
@@ -787,15 +788,44 @@ bool llama_paged_scheduler_impl::publish_checkpoint(
     const checkpoint_bucket_ptr bucket = get_checkpoint_bucket(fingerprint, true);
     checkpoint_record_ptr record;
     checkpoint_record_ptr predecessor_record;
+    if (intended_predecessor) {
+        {
+            std::lock_guard<std::mutex> lock(checkpoint_mutex);
+            const auto found = checkpoint_keys.find(checkpoint_key_string(*intended_predecessor));
+            if (found != checkpoint_keys.end()) {
+                predecessor_record = found->second;
+            }
+        }
+        bool predecessor_matches = false;
+        if (predecessor_record) {
+            std::lock_guard<std::mutex> predecessor_lock(predecessor_record->mutex);
+            predecessor_matches = predecessor_record->state != checkpoint_state::FAILED &&
+                predecessor_record->key == *intended_predecessor &&
+                predecessor_record->fingerprint == fingerprint &&
+                predecessor_record->tokens.size() < tokens.size() &&
+                std::equal(predecessor_record->tokens.begin(), predecessor_record->tokens.end(), tokens.begin());
+        }
+        if (!predecessor_matches) {
+            std::lock_guard<std::mutex> lock(checkpoint_mutex);
+            checkpoint_metrics.equality_mismatches++;
+            checkpoint_metrics.publication_failures++;
+            return false;
+        }
+    }
+
+    llama_checkpoint_key key = make_checkpoint_key(fingerprint, tokens, intended_predecessor);
+    {
+        std::lock_guard<std::mutex> lock(checkpoint_mutex);
+        if (force_digest_collision) {
+            key.fill(0x5a);
+        }
+    }
     bool new_record = false;
     bool key_collision = false;
     {
         std::lock_guard<std::mutex> bucket_lock(bucket->mutex);
         checkpoint_prefix_node * node = &bucket->root;
         for (llama_token token : tokens) {
-            if (node->record) {
-                predecessor_record = node->record;
-            }
             auto & child = node->children[token];
             if (!child) {
                 child = std::make_unique<checkpoint_prefix_node>();
@@ -811,15 +841,11 @@ bool llama_paged_scheduler_impl::publish_checkpoint(
             record->predecessor_record = predecessor_record;
             record->depth = predecessor_record ? predecessor_record->depth + 1 : 1;
             if (predecessor_record) {
-                record->predecessor = predecessor_record->key;
+                record->predecessor = *intended_predecessor;
             }
-            record->key = make_checkpoint_key(
-                fingerprint, tokens, predecessor_record ? &record->predecessor : nullptr);
+            record->key = key;
             {
                 std::lock_guard<std::mutex> lock(checkpoint_mutex);
-                if (force_digest_collision) {
-                    record->key.fill(0x5a);
-                }
                 const std::string key_string = checkpoint_key_string(record->key);
                 if (checkpoint_keys.count(key_string)) {
                     checkpoint_metrics.equality_mismatches++;
@@ -835,6 +861,12 @@ bool llama_paged_scheduler_impl::publish_checkpoint(
                 node->record = record;
                 new_record = true;
             }
+        } else if (record->key != key || record->has_predecessor != (intended_predecessor != nullptr) ||
+                   (intended_predecessor && record->predecessor != *intended_predecessor)) {
+            std::lock_guard<std::mutex> lock(checkpoint_mutex);
+            checkpoint_metrics.equality_mismatches++;
+            checkpoint_metrics.publication_failures++;
+            key_collision = true;
         }
     }
 
