@@ -10,6 +10,10 @@ DRAFT_MODEL="${DRAFT_GGUF:-${MODEL_DIR}/DSpark/Qwen3.8-27B-DSpark-Q8_0.gguf}"
 MMPROJ="${MMPROJ_GGUF:-${MODEL_DIR}/mmproj-BF16.gguf}"
 PROFILE="${CACHE_PROFILE:-q8q5}"
 
+# Optional post-template prompt capture. These files contain raw system
+# instructions, tools, and conversation content and must remain local.
+PROMPT_LOG_DIR="${PROMPT_LOG_DIR:-}"
+
 # A main GGUF either embeds its MTP head (blk.64.* tensors, e.g. the unsloth
 # Q4_K_XL) or not (e.g. the ggml-org Q4_K_M trunk). Detect by scanning the file.
 has_embedded_mtp_head() {
@@ -118,6 +122,7 @@ else
 fi
 
 [[ -n "${FIT:-}" ]] && ARGS+=(--fit "$FIT")
+[[ -n "$PROMPT_LOG_DIR" ]] && ARGS+=(--log-prompts-dir "$PROMPT_LOG_DIR")
 
 if [[ "$SPEC" == "mtp" ]]; then
     ARGS+=(
@@ -143,5 +148,5 @@ elif [[ "$SPEC" != "off" ]]; then
     exit 2
 fi
 
-echo "qwen38: engine=upstream profile=${PROFILE} spec=${SPEC} ctx=${CTX:-102400} np=${NP:-1} kv=${KV_MODE} cache_reuse=${CACHE_REUSE:-256}" >&2
+echo "qwen38: engine=upstream profile=${PROFILE} spec=${SPEC} ctx=${CTX:-102400} np=${NP:-1} kv=${KV_MODE} cache_reuse=${CACHE_REUSE:-256} prompt_log=${PROMPT_LOG_DIR:-off}" >&2
 exec "$SERVER" "${ARGS[@]}" "$@"
