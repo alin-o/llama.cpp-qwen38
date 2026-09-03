@@ -211,7 +211,17 @@ LLAMA_API bool llama_paged_scheduler_publish_checkpoint(
     payload.recurrent_complete = data->recurrent_complete;
     payload.draft_complete = data->draft_complete;
     payload.speculative_complete = data->speculative_complete;
-    return sched->impl.publish_checkpoint(request_id, n_tokens, fingerprint, payload);
+    return sched->impl.publish_checkpoint(request_id, n_tokens, fingerprint, std::move(payload));
+}
+
+bool llama_paged_scheduler_publish_checkpoint_move(
+        llama_paged_scheduler * sched,
+        int32_t request_id,
+        uint32_t n_tokens,
+        const std::string & fingerprint,
+        llama_checkpoint_payload payload) {
+    return sched && sched->impl.publish_checkpoint(
+        request_id, n_tokens, fingerprint, std::move(payload));
 }
 
 LLAMA_API bool llama_paged_scheduler_add_request_cached(
@@ -268,6 +278,11 @@ LLAMA_API void llama_paged_scheduler_set_request_paused(
     }
 }
 
+LLAMA_API bool llama_paged_scheduler_checkpoint_due(
+        const struct llama_paged_scheduler * sched, int32_t request_id) {
+    return sched && sched->impl.checkpoint_due(request_id);
+}
+
 LLAMA_API int32_t llama_paged_scheduler_checkpoint_pin_depth(
         const struct llama_paged_scheduler * sched, int32_t request_id) {
     return sched ? (int32_t) sched->impl.checkpoint_pin_depth(request_id) : 0;
@@ -284,6 +299,11 @@ LLAMA_API int32_t llama_paged_scheduler_get_request_block_ids(
         std::copy_n(ids.begin(), std::min<size_t>(ids.size(), capacity), block_ids);
     }
     return (int32_t) ids.size();
+}
+
+LLAMA_API uint32_t llama_paged_scheduler_get_block_ref_count(
+        const struct llama_paged_scheduler * sched, uint32_t block_id) {
+    return sched ? sched->impl.block_ref_count(block_id) : 0;
 }
 
 LLAMA_API void llama_paged_scheduler_set_batch_policy(

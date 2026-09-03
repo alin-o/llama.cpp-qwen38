@@ -8408,6 +8408,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             }
         }
     }
+    for (ggml_type type : {GGML_TYPE_TURBO3_0, GGML_TYPE_TURBO4_0}) {
+        test_cases.emplace_back(new test_get_rows(type, 256, 5, 4, 7, 1, false));
+    }
     for (int b : {1, 7}) {
         for (bool v : {false, true}) {
             test_cases.emplace_back(new test_get_rows(GGML_TYPE_I32, 256, 5, 4, b, 1, v));

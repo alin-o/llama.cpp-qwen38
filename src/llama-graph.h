@@ -587,6 +587,8 @@ public:
 
     ggml_tensor * paged_write_slots   = nullptr;
     ggml_tensor * paged_write_rows    = nullptr;
+    ggml_tensor * paged_read_rows     = nullptr;
+    ggml_tensor * paged_kq_mask       = nullptr;
 
     ggml_tensor * paged_block_table   = nullptr;
     ggml_tensor * paged_context_lens  = nullptr;
@@ -1229,6 +1231,8 @@ struct llm_graph_context {
              ggml_tensor * v_cache,         // master V buffer
              ggml_tensor * block_table,     // [max_blocks, batch_size]
              ggml_tensor * write_slots,     // [n_tokens]
+             ggml_tensor * read_rows,       // [n_kv * n_head_kv]
+             ggml_tensor * kq_mask,         // [n_kv, n_tokens]
              ggml_tensor * context_lens,    // [batch_size]
              ggml_tensor * batch_offsets,   // [batch_size]
              ggml_tensor * batch_lens,      // [batch_size]

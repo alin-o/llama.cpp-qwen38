@@ -8,6 +8,8 @@
 extern "C" {
 #include "../vendor/hash/sha256/sha256.h"
 }
+#define XXH_INLINE_ALL
+#include "../vendor/hash/xxhash/xxhash.h"
 
 #include <chrono>
 #include <cstring>
@@ -28,6 +30,13 @@ static void checkpoint_hash_bytes(sha256_t & hash, const void * data, size_t siz
     if (size > 0) {
         sha256_update(&hash, static_cast<const uint8_t *>(data), size);
     }
+}
+
+static void checkpoint_hash_payload(sha256_t & hash, const std::vector<uint8_t> & data) {
+    checkpoint_hash_u32(hash, (uint32_t) data.size());
+    const XXH128_hash_t digest = XXH3_128bits(data.data(), data.size());
+    const uint64_t words[] = { digest.low64, digest.high64 };
+    sha256_update(&hash, reinterpret_cast<const uint8_t *>(words), sizeof(words));
 }
 
 static llama_checkpoint_key make_checkpoint_key(
@@ -64,9 +73,9 @@ static llama_checkpoint_key make_checkpoint_integrity(
     for (uint32_t block : blocks) {
         checkpoint_hash_u32(hash, block);
     }
-    checkpoint_hash_bytes(hash, payload.recurrent.data(), payload.recurrent.size());
-    checkpoint_hash_bytes(hash, payload.draft.data(), payload.draft.size());
-    checkpoint_hash_bytes(hash, payload.speculative.data(), payload.speculative.size());
+    checkpoint_hash_payload(hash, payload.recurrent);
+    checkpoint_hash_payload(hash, payload.draft);
+    checkpoint_hash_payload(hash, payload.speculative);
     llama_checkpoint_key result;
     sha256_final(&hash, result.data());
     return result;
@@ -172,8 +181,11 @@ int32_t llama_paged_scheduler_impl::get_scheduled_tokens(const llama_sequence_gr
                     [](llama_token token) { return token < 0; });
         }
         remaining = std::min<int32_t>(remaining, boundary - (group.logical_seq.begin() + group.n_past));
-        if (remaining > 1 && checkpoint_before_last.count(group.request_id)) {
-            --remaining;
+        if (checkpoint_before_last.count(group.request_id)) {
+            const uint32_t checkpoint_boundary = next_checkpoint_boundary(group);
+            if (checkpoint_boundary > group.n_past) {
+                remaining = std::min<int32_t>(remaining, checkpoint_boundary - group.n_past);
+            }
         }
         result = std::min<int32_t>(remaining, n_batch);
     } else {
@@ -185,6 +197,25 @@ int32_t llama_paged_scheduler_impl::get_scheduled_tokens(const llama_sequence_gr
             group.request_id, group.n_past, result, batch_policy_data), 1, result);
     }
     return result;
+}
+
+uint32_t llama_paged_scheduler_impl::next_checkpoint_boundary(const llama_sequence_group & group) const {
+    if (group.n_prompt <= 1 || group.n_past >= group.n_prompt - 1) {
+        return 0;
+    }
+
+    const uint32_t endpoint = group.n_prompt - 1;
+    const uint32_t last_complete = endpoint / block_size * block_size;
+    if (last_complete > 0) {
+        const uint32_t lookback = 3 * block_size;
+        const uint32_t first_complete = last_complete > lookback ? last_complete - lookback : block_size;
+        for (uint32_t boundary = first_complete; boundary <= last_complete; boundary += block_size) {
+            if (boundary > group.n_past) {
+                return boundary;
+            }
+        }
+    }
+    return endpoint;
 }
 
 llama_scheduler_status llama_paged_scheduler_impl::step(llama_batch & batch, int32_t spec_n) {
@@ -561,6 +592,24 @@ void llama_paged_scheduler_impl::set_request_paused(int32_t request_id, bool pau
     }
 }
 
+bool llama_paged_scheduler_impl::checkpoint_due(int32_t request_id) const {
+    const auto found = id_to_group.find(request_id);
+    if (found == id_to_group.end() || !checkpoint_before_last.count(request_id)) {
+        return false;
+    }
+    const llama_sequence_group & group = *found->second;
+    if (group.n_past == 0 || group.n_past >= group.n_prompt) {
+        return false;
+    }
+    if (group.n_past == group.n_prompt - 1) {
+        return true;
+    }
+    const uint32_t last_complete = (group.n_prompt - 1) / block_size * block_size;
+    const uint32_t lookback = 3 * block_size;
+    const uint32_t first_complete = last_complete > lookback ? last_complete - lookback : block_size;
+    return group.n_past % block_size == 0 && group.n_past >= first_complete && group.n_past <= last_complete;
+}
+
 uint32_t llama_paged_scheduler_impl::checkpoint_pin_depth(int32_t request_id) const {
     checkpoint_record_ptr record;
     {
@@ -578,6 +627,10 @@ uint32_t llama_paged_scheduler_impl::checkpoint_pin_depth(int32_t request_id) co
 llama_block_ids llama_paged_scheduler_impl::request_block_ids(int32_t request_id) const {
     const llama_sequence_group * group = get_group_from_id(request_id);
     return group ? group->block_table : llama_block_ids{};
+}
+
+uint32_t llama_paged_scheduler_impl::block_ref_count(uint32_t block_id) const {
+    return kv_cache_manager->get_block_ref_count(block_id);
 }
 
 void llama_paged_scheduler_impl::release_checkpoint_pin(int32_t request_id) {
@@ -775,7 +828,7 @@ bool llama_paged_scheduler_impl::wait_for_checkpoint_metrics_for_test(
 bool llama_paged_scheduler_impl::publish_checkpoint(
         int32_t request_id, uint32_t n_tokens,
         const std::string & fingerprint,
-        const llama_checkpoint_payload & payload,
+        llama_checkpoint_payload payload,
         llama_checkpoint_key * key_out,
         llama_checkpoint_publish_fault fault,
         const llama_checkpoint_key * intended_predecessor) {
@@ -1140,7 +1193,7 @@ bool llama_paged_scheduler_impl::publish_checkpoint(
         std::lock_guard<std::mutex> record_lock(record->mutex);
         record->blocks = blocks;
         record->terminal_extent = terminal_extent;
-        record->payload = payload;
+        record->payload = std::move(payload);
         record->integrity = integrity;
         record->host_bytes = host_bytes;
         record->resident = true;

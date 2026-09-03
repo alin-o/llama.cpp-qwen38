@@ -1055,20 +1055,33 @@ bool llm_graph_input_dsv4::can_reuse(const llm_graph_params & params) {
 void llm_graph_input_attn_kv_paged::set_input(const llama_ubatch* ubatch) {
     GGML_ASSERT(ubatch != nullptr);
 
-    if (paged_write_rows) {
+    if (paged_write_rows && paged_write_rows->buffer) {
         ggml_backend_tensor_set(paged_write_rows, mctx->get_write_rows(), 0, ggml_nbytes(paged_write_rows));
     }
+    if (paged_read_rows && paged_read_rows->buffer) {
+        ggml_backend_tensor_set(paged_read_rows, mctx->get_read_rows(), 0, ggml_nbytes(paged_read_rows));
+    }
+    if (paged_kq_mask && paged_kq_mask->buffer) {
+        const int64_t n_kv = paged_kq_mask->ne[0];
+        const int64_t n_tokens = paged_kq_mask->ne[1];
+        std::vector<ggml_fp16_t> mask(ggml_nelements(paged_kq_mask), ggml_fp32_to_fp16(-INFINITY));
+        for (int64_t token = 0; token < n_tokens; ++token) {
+            const int64_t n_visible = std::min<int64_t>(n_kv, ubatch->pos[token] + 1);
+            std::fill_n(mask.data() + token * n_kv, n_visible, ggml_fp32_to_fp16(0.0f));
+        }
+        ggml_backend_tensor_set(paged_kq_mask, mask.data(), 0, ggml_nbytes(paged_kq_mask));
+    }
 
-    if (paged_block_table) {
+    if (paged_block_table && paged_block_table->buffer) {
         ggml_backend_tensor_set(paged_block_table, mctx->get_block_table(), 0, ggml_nbytes(paged_block_table));
     }
-    if (paged_context_lens) {
+    if (paged_context_lens && paged_context_lens->buffer) {
         ggml_backend_tensor_set(paged_context_lens, mctx->get_context_lens(), 0, ggml_nbytes(paged_context_lens));
     }
-    if (paged_batch_offsets) {
+    if (paged_batch_offsets && paged_batch_offsets->buffer) {
         ggml_backend_tensor_set(paged_batch_offsets, mctx->get_batch_offsets(), 0, ggml_nbytes(paged_batch_offsets));
     }
-    if (paged_batch_lens) {
+    if (paged_batch_lens && paged_batch_lens->buffer) {
         ggml_backend_tensor_set(paged_batch_lens, mctx->get_batch_lens(), 0, ggml_nbytes(paged_batch_lens));
     }
 }
@@ -1118,6 +1131,7 @@ static bool can_reuse_paged_attention(
     const int64_t n_tokens = params.ubatch.n_tokens;
     const int64_t max_blocks = new_mctx->get_max_blocks();
     const int64_t batch_size = new_mctx->get_batch_size();
+    const bool use_flash_prefill = params.cparams.flash_attn && new_mctx->can_use_flash_prefill();
     const auto check_1d = [](const ggml_tensor * tensor, int64_t n) {
         return tensor && tensor->type == GGML_TYPE_I32 && tensor->ne[0] == n;
     };
@@ -1128,6 +1142,17 @@ static bool can_reuse_paged_attention(
         !check_1d(inp->paged_context_lens, batch_size) ||
         !check_1d(inp->paged_batch_offsets, batch_size) ||
         !check_1d(inp->paged_batch_lens, batch_size)) {
+        return false;
+    }
+
+    if (use_flash_prefill) {
+        const int64_t n_kv = new_mctx->get_padded_context_len();
+        if (!check_1d(inp->paged_read_rows, n_kv * params.hparams.n_head_kv()) ||
+            !inp->paged_kq_mask || inp->paged_kq_mask->type != GGML_TYPE_F16 ||
+            inp->paged_kq_mask->ne[0] != n_kv || inp->paged_kq_mask->ne[1] != n_tokens) {
+            return false;
+        }
+    } else if (inp->paged_read_rows || inp->paged_kq_mask) {
         return false;
     }
 
@@ -2699,6 +2724,8 @@ ggml_tensor * llm_graph_context::build_attn_mha_paged(
          ggml_tensor * v_cache,         // master V buffer
          ggml_tensor * block_table,     // [max_blocks, batch_size]
          ggml_tensor * write_rows,      // [n_heads_kv * n_tokens]
+         ggml_tensor * read_rows,       // [n_kv * n_head_kv]
+         ggml_tensor * kq_mask,         // [n_kv, n_tokens]
          ggml_tensor * context_lens,    // [batch_size]
          ggml_tensor * batch_offsets,   // [batch_size]
          ggml_tensor * batch_lens,      // [batch_size]
@@ -2718,6 +2745,8 @@ ggml_tensor * llm_graph_context::build_attn_mha_paged(
     ggml_tensor * v_flat = ggml_reshape_2d(ctx0, v_cache, v_cache->ne[0], n_rows_v);
     ggml_tensor * k_rows = ggml_reshape_2d(ctx0, k_cur, k_cur->ne[0], k_cur->ne[1] * k_cur->ne[2]);
     ggml_tensor * v_rows = ggml_reshape_2d(ctx0, v_cur, v_cur->ne[0], v_cur->ne[1] * v_cur->ne[2]);
+    const bool flash_prefill = read_rows && kq_mask;
+    GGML_ASSERT((read_rows == nullptr) == (kq_mask == nullptr));
     const bool token_sequential = llm_arch_is_recurrent(arch) || llm_arch_is_hybrid(arch);
 #if defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
     const bool fuse_turbo_wht = false;
@@ -2728,7 +2757,8 @@ ggml_tensor * llm_graph_context::build_attn_mha_paged(
         k_cache->type, v_cache->type);
 #endif
     const char * combined_write_env = getenv("LLAMA_PAGED_Q8_COMBINED_WRITE");
-    const bool combined_q8_write = (combined_write_env == nullptr || strcmp(combined_write_env, "0") != 0) &&
+    const bool combined_q8_write = !flash_prefill &&
+        (combined_write_env == nullptr || strcmp(combined_write_env, "0") != 0) &&
         k_cache->type == GGML_TYPE_Q8_0 && v_cache->type == GGML_TYPE_Q8_0 &&
         k_cur->type == GGML_TYPE_F32 && v_cur->type == GGML_TYPE_F32 && ggml_are_same_shape(k_cur, v_cur) &&
         ggml_are_same_shape(k_cache, v_cache) && k_cur->ne[0] == q->ne[0] && k_cache->ne[0] == q->ne[0] &&
@@ -2736,7 +2766,7 @@ ggml_tensor * llm_graph_context::build_attn_mha_paged(
         ggml_is_contiguous(v_cur) && ggml_is_contiguous(k_cache) && ggml_is_contiguous(v_cache) &&
         write_rows->type == GGML_TYPE_I32 && ggml_is_contiguous(write_rows) &&
         ggml_nelements(write_rows) == k_rows->ne[1];
-    const bool combined_turbo_write = fuse_turbo_wht &&
+    const bool combined_turbo_write = !flash_prefill && fuse_turbo_wht &&
         k_cur->type == GGML_TYPE_F32 && v_cur->type == GGML_TYPE_F32 && ggml_are_same_shape(k_cur, v_cur) &&
         ggml_are_same_shape(k_cache, v_cache) && ggml_is_contiguous(k_cur) && ggml_is_contiguous(v_cur) &&
         ggml_is_contiguous(k_cache) && ggml_is_contiguous(v_cache) &&
@@ -2747,6 +2777,25 @@ ggml_tensor * llm_graph_context::build_attn_mha_paged(
                                    k_cache->ne[0], k_cache->ne[1], k_cache->ne[2], k_cache->ne[3]);
         v_cache = ggml_reshape_4d(ctx0, ggml_set_rows(ctx0, v_flat, v_rows, write_rows),
                                    v_cache->ne[0], v_cache->ne[1], v_cache->ne[2], v_cache->ne[3]);
+    }
+
+    if (flash_prefill) {
+        const int64_t n_kv = kq_mask->ne[0];
+        const int64_t n_head_kv = k_cur->ne[1];
+        k_flat = ggml_reshape_2d(ctx0, k_cache, k_cache->ne[0], n_rows_k);
+        v_flat = ggml_reshape_2d(ctx0, v_cache, v_cache->ne[0], n_rows_v);
+        ggml_tensor * k = ggml_get_rows(ctx0, k_flat, read_rows);
+        ggml_tensor * v = ggml_get_rows(ctx0, v_flat, read_rows);
+        k = ggml_reshape_3d(ctx0, k, k->ne[0], n_head_kv, n_kv);
+        v = ggml_reshape_3d(ctx0, v, v->ne[0], n_head_kv, n_kv);
+        if (k_cache->type == GGML_TYPE_TURBO3_0 || k_cache->type == GGML_TYPE_TURBO4_0) {
+            k = ggml_turbo_wht(ctx0, k, 1);
+        }
+        if (v_cache->type == GGML_TYPE_TURBO3_0 || v_cache->type == GGML_TYPE_TURBO4_0) {
+            v = ggml_turbo_wht(ctx0, v, 1);
+        }
+        ggml_tensor * cur = build_attn_mha(q, k, v, nullptr, kq_mask, nullptr, nullptr, kq_scale, -1);
+        return ggml_reshape_3d(ctx0, cur, v_cur->ne[0], q->ne[1], q->ne[2]);
     }
 
     if (!fuse_turbo_wht && (k_cache->type == GGML_TYPE_TURBO3_0 || k_cache->type == GGML_TYPE_TURBO4_0)) {
@@ -3483,6 +3532,8 @@ ggml_tensor * llm_graph_context::build_attn(
         q_cur, k_cur, v_cur, k_physical, v_physical,
         inp->paged_block_table,
         inp->paged_write_rows,
+        inp->paged_read_rows,
+        inp->paged_kq_mask,
         inp->paged_context_lens,
         inp->paged_batch_offsets,
         inp->paged_batch_lens,
@@ -3658,6 +3709,14 @@ static std::unique_ptr<llm_graph_input_attn_kv_paged> build_attn_inp_kv_paged_im
     const int32_t batch_size = mctx_paged->get_batch_size();
     const int32_t max_blocks = mctx_paged->get_max_blocks();
     inp->paged_write_rows    = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_tokens * hparams.n_head_kv());
+
+    if (cparams.flash_attn && mctx_paged->can_use_flash_prefill()) {
+        const int32_t n_kv = mctx_paged->get_padded_context_len();
+        inp->paged_read_rows = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, n_kv * hparams.n_head_kv());
+        inp->paged_kq_mask   = ggml_new_tensor_2d(ctx0, GGML_TYPE_F16, n_kv, n_tokens);
+        ggml_set_input(inp->paged_read_rows);
+        ggml_set_input(inp->paged_kq_mask);
+    }
 
     inp->paged_block_table   = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, max_blocks, batch_size);
     inp->paged_context_lens  = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, batch_size);

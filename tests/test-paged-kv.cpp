@@ -1018,20 +1018,28 @@ TEST(test_scheduler_reports_cache_capacity_and_retention) {
     EXPECT_EQ(stats.n_retained, 0u);
 }
 
-TEST(test_scheduler_splits_for_retained_checkpoint) {
+TEST(test_scheduler_splits_for_recent_retained_checkpoints) {
     auto fixture = make_fixture(/*n_ctx=*/128, /*block_size=*/16, /*n_batch=*/64,
-                                /*n_gpu_blocks=*/8, /*n_cpu_blocks=*/2);
-    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/0, /*n_prompt=*/35)));
+                                /*n_gpu_blocks=*/16, /*n_cpu_blocks=*/2);
+    EXPECT_TRUE(fixture.sched->queue_request(make_group(/*id=*/0, /*n_prompt=*/100)));
     EXPECT_TRUE(fixture.sched->retain_request(0, true));
 
     llama_batch batch = {};
-    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
-    EXPECT_EQ(batch.n_tokens, 34);
     const int8_t continue_flag[] = { 0 };
-    fixture.sched->update(batch, { 42 }, { 34 }, continue_flag);
+    const uint32_t boundaries[] = { 48, 64, 80, 96, 99 };
+    uint32_t previous = 0;
+    for (uint32_t boundary : boundaries) {
+        EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+        EXPECT_EQ(batch.n_tokens, (int32_t) (boundary - previous));
+        EXPECT_EQ(batch.pos[0], (llama_pos) previous);
+        fixture.sched->update(batch, { 42 }, { boundary - previous }, continue_flag);
+        EXPECT_TRUE(fixture.sched->checkpoint_due(0));
+        previous = boundary;
+    }
+
     EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
     EXPECT_EQ(batch.n_tokens, 1);
-    EXPECT_EQ(batch.pos[0], 34);
+    EXPECT_EQ(batch.pos[0], 99);
     const int8_t stop_flag[] = { 1 };
     fixture.sched->update(batch, { 43 }, { 1 }, stop_flag);
     EXPECT_TRUE(fixture.sched->is_retained(0));
@@ -1214,6 +1222,25 @@ TEST(test_cumulative_checkpoint_cross_slot_sharing_and_cow) {
     EXPECT_TRUE(fixture.sched->publish_checkpoint(
         0, 32, "test-fingerprint", payload, nullptr,
         llama_checkpoint_publish_fault::NONE, &root_key));
+
+    // A paused cold request is registered before it owns any pages. Replacing
+    // it with a checkpoint attachment must clear that empty registration.
+    llama_sequence_group cold_waiter = make_group(/*id=*/5, /*n_prompt=*/24);
+    for (uint32_t i = 0; i < 18; ++i) {
+        cold_waiter.logical_seq[i] = i;
+    }
+    EXPECT_TRUE(fixture.sched->queue_request(std::move(cold_waiter)));
+    llama_sequence_group coalesced_waiter = make_group(/*id=*/5, /*n_prompt=*/24);
+    for (uint32_t i = 0; i < 18; ++i) {
+        coalesced_waiter.logical_seq[i] = i;
+    }
+    uint32_t used_waiter = 0;
+    EXPECT_TRUE(fixture.sched->queue_request_cached(
+        std::move(coalesced_waiter), "test-fingerprint", nullptr, &used_waiter));
+    EXPECT_EQ(used_waiter, 18u);
+    EXPECT_TRUE(fixture.sched->commit_cached_request(5));
+    EXPECT_EQ(fixture.sched->request_block_ids(5)[0], source_group->block_table[0]);
+    fixture.sched->remove_request(5);
 
     llama_sequence_group partial_a = make_group(/*id=*/1, /*n_prompt=*/24);
     llama_sequence_group partial_b = make_group(/*id=*/2, /*n_prompt=*/24);
@@ -3596,7 +3623,7 @@ int main(int argc, char ** argv) {
     RUN(test_scheduler_teardown_unregisters_groups);
     RUN(test_scheduler_retains_and_attaches_prompt_prefix);
     RUN(test_scheduler_reports_cache_capacity_and_retention);
-    RUN(test_scheduler_splits_for_retained_checkpoint);
+    RUN(test_scheduler_splits_for_recent_retained_checkpoints);
     RUN(test_scheduler_prefix_mismatch_fails_open_cold);
     RUN(test_scheduler_uncached_replacement_discards_retained_prefix);
     RUN(test_scheduler_exact_hit_batches_with_cold_miss);

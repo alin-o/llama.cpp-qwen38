@@ -28,6 +28,14 @@ if [[ -z "${MTP_GGUF:-}" ]] && ! has_embedded_mtp_head "$MODEL"; then
 fi
 SPEC="${SPEC:-off}"
 CHAT_TEMPLATE_FILE="${CHAT_TEMPLATE_FILE:-/qwen38/Qwen3.8-developer.jinja}"
+KV_PAGED_ENABLED=0
+if [[ "${KV_PAGED:-0}" == "1" || "${KV_PAGED:-0}" == "on" ]]; then
+    KV_PAGED_ENABLED=1
+fi
+CACHE_REUSE_EFFECTIVE="${CACHE_REUSE:-256}"
+if [[ "$KV_PAGED_ENABLED" == "1" ]]; then
+    CACHE_REUSE_EFFECTIVE=0
+fi
 
 case "$PROFILE" in
     q8q5)
@@ -87,7 +95,7 @@ ARGS=(
     --n-gpu-layers "${NGL:-99}"
     --cache-type-k "$CACHE_K"
     --cache-type-v "$CACHE_V"
-    --cache-reuse "${CACHE_REUSE:-256}"
+    --cache-reuse "$CACHE_REUSE_EFFECTIVE"
     --flash-attn on
     -b 2048
     -ub 2048
@@ -109,7 +117,7 @@ ARGS=(
 #--cache-idle-slots
 
 # KV cache backend: unified buffer by default, paged block pool when KV_PAGED.
-if [[ "${KV_PAGED:-0}" == "1" || "${KV_PAGED:-0}" == "on" ]]; then
+if [[ "$KV_PAGED_ENABLED" == "1" ]]; then
     KV_MODE="paged"
     ARGS+=(--kv-paged)
     [[ -n "${KV_BLOCK_SIZE:-}" ]]      && ARGS+=(--kv-block-size "$KV_BLOCK_SIZE")
@@ -148,5 +156,5 @@ elif [[ "$SPEC" != "off" ]]; then
     exit 2
 fi
 
-echo "qwen38: engine=upstream profile=${PROFILE} spec=${SPEC} ctx=${CTX:-102400} np=${NP:-1} kv=${KV_MODE} cache_reuse=${CACHE_REUSE:-256} prompt_log=${PROMPT_LOG_DIR:-off}" >&2
+echo "qwen38: engine=upstream profile=${PROFILE} spec=${SPEC} ctx=${CTX:-102400} np=${NP:-1} kv=${KV_MODE} cache_reuse=${CACHE_REUSE_EFFECTIVE} prompt_log=${PROMPT_LOG_DIR:-off}" >&2
 exec "$SERVER" "${ARGS[@]}" "$@"

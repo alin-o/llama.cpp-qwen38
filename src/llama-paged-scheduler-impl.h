@@ -1,6 +1,7 @@
 #pragma once
 
 #include "llama-kv-cache-paged.h"
+#include "llama-paged-scheduler-internal.h"
 
 #include <clocale>
 #include <array>
@@ -21,15 +22,6 @@ enum class llama_scheduler_status {
 };
 
 using llama_checkpoint_key = std::array<uint8_t, 32>;
-
-struct llama_checkpoint_payload {
-    std::vector<uint8_t> recurrent;
-    std::vector<uint8_t> draft;
-    std::vector<uint8_t> speculative;
-    bool recurrent_complete  = true;
-    bool draft_complete      = true;
-    bool speculative_complete = true;
-};
 
 struct llama_checkpoint_view {
     const uint8_t * recurrent   = nullptr;
@@ -121,7 +113,7 @@ class llama_paged_scheduler_impl {
 
     bool publish_checkpoint(int32_t request_id, uint32_t n_tokens,
                             const std::string & fingerprint,
-                            const llama_checkpoint_payload & payload,
+                            llama_checkpoint_payload payload,
                             llama_checkpoint_key * key_out = nullptr,
                             llama_checkpoint_publish_fault fault = llama_checkpoint_publish_fault::NONE,
                             const llama_checkpoint_key * intended_predecessor = nullptr);
@@ -142,8 +134,10 @@ class llama_paged_scheduler_impl {
                                               uint32_t timeout_ms);
     void record_graph_decision(bool reused);
     void set_request_paused(int32_t request_id, bool paused);
+    bool checkpoint_due(int32_t request_id) const;
     uint32_t checkpoint_pin_depth(int32_t request_id) const;
     llama_block_ids request_block_ids(int32_t request_id) const;
+    uint32_t block_ref_count(uint32_t block_id) const;
 
   private:
     void insert_sorted_by_arrival_time(llama_sequence_group_ptr new_group, llama_sequence_group_list & list);
@@ -163,6 +157,7 @@ class llama_paged_scheduler_impl {
 
     int32_t get_curr_decode_tokens() const;
     int32_t get_scheduled_tokens(const llama_sequence_group & group) const;
+    uint32_t next_checkpoint_boundary(const llama_sequence_group & group) const;
 
     void activate_priority_request(llama_sequence_group_raw_list & candidates);
     void process_running_list(llama_sequence_group_raw_list & candidates);

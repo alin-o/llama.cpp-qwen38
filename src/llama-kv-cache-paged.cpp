@@ -1,5 +1,6 @@
 #include "llama-kv-cache-paged.h"
 
+#include "ggml-paged-attn.h"
 #include "llama-impl.h"
 #include "llama-io.h"
 
@@ -236,7 +237,8 @@ void llama_kv_cache_paged::release_block_ids(const llama_block_ids & block_ids) 
 }
 
 void llama_kv_cache_paged::free_blocks(llama_sequence_group & group) {
-    if (sequence_blocks.count(group.request_id)) {
+    if (sequence_blocks.count(group.request_id) || sequence_groups.count(group.request_id) ||
+        sequence_positions.count(group.request_id) || restored_groups.count(group.request_id)) {
         seq_rm(group.request_id, -1, -1);
     } else {
         release_block_ids(group.block_table);
@@ -1019,6 +1021,7 @@ void llama_kv_cache_paged_context::select_ubatch() {
                     (int32_t) head * manager->block_size + token_in_block;
             }
         }
+        build_read_rows();
         return;
     }
     GGML_ASSERT(ubatch.equal_seqs());
@@ -1068,6 +1071,30 @@ void llama_kv_cache_paged_context::select_ubatch() {
         for (uint32_t head = 0; head < manager->n_heads_kv; ++head) {
             paged_write_rows[(size_t) token * manager->n_heads_kv + head] =
                 block * (int32_t) (manager->block_size * manager->n_heads_kv) +
+                (int32_t) head * manager->block_size + token_in_block;
+        }
+    }
+
+    build_read_rows();
+}
+
+void llama_kv_cache_paged_context::build_read_rows() {
+    paged_read_rows.clear();
+    if (!can_use_flash_prefill()) {
+        return;
+    }
+
+    const int32_t context_len = paged_context_lens[0];
+    const int32_t padded_len = get_padded_context_len();
+    paged_read_rows.resize((size_t) padded_len * manager->n_heads_kv);
+
+    for (int32_t token = 0; token < padded_len; ++token) {
+        const int32_t source_token = token < context_len ? token : 0;
+        const int32_t physical_block = paged_block_table[source_token / manager->block_size];
+        const int32_t token_in_block = source_token % manager->block_size;
+        for (uint32_t head = 0; head < manager->n_heads_kv; ++head) {
+            paged_read_rows[(size_t) token * manager->n_heads_kv + head] =
+                physical_block * (int32_t) (manager->block_size * manager->n_heads_kv) +
                 (int32_t) head * manager->block_size + token_in_block;
         }
     }
@@ -1123,12 +1150,25 @@ int32_t llama_kv_cache_paged_context::get_max_context_len() const {
     return result;
 }
 
+int32_t llama_kv_cache_paged_context::get_padded_context_len() const {
+    return ggml_paged_attn_bucket_upper_bound(ggml_paged_attn_context_bucket(get_max_context_len()));
+}
+
+bool llama_kv_cache_paged_context::can_use_flash_prefill() const {
+    return batch_size == 1 && n_tokens > 1 && !paged_context_lens.empty() && !paged_block_table.empty() &&
+        ggml_paged_attn_context_bucket(get_max_context_len()) != GGML_PAGED_ATTN_CONTEXT_LONG;
+}
+
 const int32_t * llama_kv_cache_paged_context::get_write_slots() const {
     return paged_write_slots.data();
 }
 
 const int32_t * llama_kv_cache_paged_context::get_write_rows() const {
     return paged_write_rows.data();
+}
+
+const int32_t * llama_kv_cache_paged_context::get_read_rows() const {
+    return paged_read_rows.data();
 }
 
 

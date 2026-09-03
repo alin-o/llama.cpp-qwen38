@@ -1785,6 +1785,10 @@ extern "C" {
             struct llama_paged_scheduler * sched,
             int32_t                        request_id,
             bool                           paused);
+
+    LLAMA_API bool llama_paged_scheduler_checkpoint_due(
+            const struct llama_paged_scheduler * sched,
+            int32_t                              request_id);
     LLAMA_API int32_t llama_paged_scheduler_checkpoint_pin_depth(
             const struct llama_paged_scheduler * sched,
             int32_t                              request_id);
@@ -1793,6 +1797,9 @@ extern "C" {
             int32_t                              request_id,
             uint32_t *                           block_ids,
             int32_t                              capacity);
+    LLAMA_API uint32_t llama_paged_scheduler_get_block_ref_count(
+            const struct llama_paged_scheduler * sched,
+            uint32_t                             block_id);
 
     // Optional server-side batch policy. The token limit can split a request's
     // next scheduler step at a state boundary. The compatibility callback

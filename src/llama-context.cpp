@@ -13,6 +13,7 @@
 #include "llama-sampler.h"
 #include "llama.h"
 
+#include <algorithm>
 #include <cinttypes>
 #include <cmath>
 #include <cstring>
@@ -2660,12 +2661,33 @@ private:
 class llama_io_write_host : public llama_io_write_i {
 public:
     llama_io_write_host(
-            uint8_t * p, size_t len) : ptr(p), buf_size(len) {}
+            uint8_t * p, size_t len,
+            const std::vector<ggml_backend_t> * backends = nullptr) : ptr(p), buf_size(len), backends(backends) {}
 
     ~llama_io_write_host() {
-        // TODO: add backend support to batch tensor_get? or some other way to speed this up
+        std::vector<ggml_backend_t> pending;
         for (const auto & winfo : winfos) {
-            ggml_backend_tensor_get(winfo.tensor, winfo.ptr, winfo.offset, winfo.size);
+            ggml_backend_t backend = nullptr;
+            if (backends && !ggml_backend_buffer_is_host(winfo.tensor->buffer)) {
+                const ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(winfo.tensor->buffer);
+                const auto found = std::find_if(backends->begin(), backends->end(), [buft](ggml_backend_t candidate) {
+                    return ggml_backend_get_default_buffer_type(candidate) == buft;
+                });
+                if (found != backends->end()) {
+                    backend = *found;
+                }
+            }
+            if (backend) {
+                ggml_backend_tensor_get_async(backend, winfo.tensor, winfo.ptr, winfo.offset, winfo.size);
+                if (std::find(pending.begin(), pending.end(), backend) == pending.end()) {
+                    pending.push_back(backend);
+                }
+            } else {
+                ggml_backend_tensor_get(winfo.tensor, winfo.ptr, winfo.offset, winfo.size);
+            }
+        }
+        for (ggml_backend_t backend : pending) {
+            ggml_backend_synchronize(backend);
         }
     }
 
@@ -2708,16 +2730,39 @@ private:
         size_t offset;
     };
     std::vector<write_info> winfos;
+    const std::vector<ggml_backend_t> * backends;
 };
 
 class llama_io_read_host : public llama_io_read_i {
 public:
-    llama_io_read_host(const uint8_t * p, size_t len) : ptr(p), buf_size(len) {}
+    llama_io_read_host(
+            const uint8_t * p, size_t len,
+            const std::vector<ggml_backend_t> * backends = nullptr) : ptr(p), buf_size(len), backends(backends) {}
 
     ~llama_io_read_host() {
-        // flush the reads
+        std::vector<ggml_backend_t> pending;
         for (const auto & rinfo : rinfos) {
-            ggml_backend_tensor_set(rinfo.tensor, rinfo.ptr, rinfo.offset, rinfo.size);
+            ggml_backend_t backend = nullptr;
+            if (backends && !ggml_backend_buffer_is_host(rinfo.tensor->buffer)) {
+                const ggml_backend_buffer_type_t buft = ggml_backend_buffer_get_type(rinfo.tensor->buffer);
+                const auto found = std::find_if(backends->begin(), backends->end(), [buft](ggml_backend_t candidate) {
+                    return ggml_backend_get_default_buffer_type(candidate) == buft;
+                });
+                if (found != backends->end()) {
+                    backend = *found;
+                }
+            }
+            if (backend) {
+                ggml_backend_tensor_set_async(backend, rinfo.tensor, rinfo.ptr, rinfo.offset, rinfo.size);
+                if (std::find(pending.begin(), pending.end(), backend) == pending.end()) {
+                    pending.push_back(backend);
+                }
+            } else {
+                ggml_backend_tensor_set(rinfo.tensor, rinfo.ptr, rinfo.offset, rinfo.size);
+            }
+        }
+        for (ggml_backend_t backend : pending) {
+            ggml_backend_synchronize(backend);
         }
     }
 
@@ -2760,6 +2805,7 @@ private:
         size_t offset;
     };
     std::vector<read_info> rinfos;
+    const std::vector<ggml_backend_t> * backends;
 };
 
 class llama_io_write_file : public llama_io_write_i {
@@ -3083,7 +3129,7 @@ size_t llama_context::state_seq_get_data(llama_seq_id seq_id, uint8_t * dst, siz
     if (flags & LLAMA_STATE_SEQ_FLAGS_ON_DEVICE) {
         io = std::make_unique<llama_io_write_device>(dst, size, mem_storage[seq_id]);
     } else {
-        io = std::make_unique<llama_io_write_host>(dst, size);
+        io = std::make_unique<llama_io_write_host>(dst, size, &backend_ptrs);
     }
 
     try {
@@ -3101,7 +3147,7 @@ size_t llama_context::state_seq_set_data(llama_seq_id seq_id, const uint8_t * sr
     std::unique_ptr<llama_io_read_i> io;
     if (flags & LLAMA_STATE_SEQ_FLAGS_ON_DEVICE) {
         // create a temporary io to read the magic and the src seq_id
-        io = std::make_unique<llama_io_read_host>(src, size);
+        io = std::make_unique<llama_io_read_host>(src, size, &backend_ptrs);
 
         uint32_t magic_read;
         io->read(&magic_read, sizeof(magic_read));

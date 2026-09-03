@@ -191,10 +191,13 @@ class llama_kv_cache_paged_context : public llama_memory_context_i {
     int32_t get_batch_size() const;
     int32_t get_max_blocks() const;
     int32_t get_max_context_len() const;
+    int32_t get_padded_context_len() const;
+    bool    can_use_flash_prefill() const;
 
     const int32_t * get_write_slots() const;
     const int32_t * get_block_table() const;
     const int32_t * get_write_rows() const;
+    const int32_t * get_read_rows() const;
 
     const int32_t * get_context_lens() const;
     const int32_t * get_batch_offsets() const;
@@ -226,6 +229,7 @@ class llama_kv_cache_paged_context : public llama_memory_context_i {
     size_t                    i_cur = 0;      // index of ubatch to process
 
     void select_ubatch();
+    void build_read_rows();
 
     const llama_paged_batch_info * full_info = nullptr;
     std::vector<int32_t> paged_write_slots;
@@ -234,6 +238,7 @@ class llama_kv_cache_paged_context : public llama_memory_context_i {
     std::vector<int32_t> paged_batch_offsets;
     std::vector<int32_t> paged_batch_lens;
     std::vector<int32_t> paged_write_rows;
+    std::vector<int32_t> paged_read_rows;
 
 
     int32_t n_tokens   = 0;
