@@ -2489,7 +2489,10 @@ private:
                             }
                             common_speculative_set_state(spec.get(), slot.id, speculative);
                         }
-                    } else {
+                        checkpoint_queued = llama_paged_scheduler_commit_cached_request(
+                            paged_scheduler.get(), slot.id);
+                    }
+                    if (!checkpoint_queued) {
                         llama_paged_scheduler_remove_request(paged_scheduler.get(), slot.id);
                         llama_memory_seq_rm(llama_get_memory(ctx_tgt), slot.id, -1, -1);
                         if (ctx_dft) {

@@ -297,7 +297,8 @@ void llama_kv_cache_paged::do_gpu_block_copy(uint32_t src_id, uint32_t dst_id) {
     }
 }
 
-bool llama_kv_cache_paged::cow_partial_tail(llama_sequence_group & group, uint32_t n_tokens) {
+bool llama_kv_cache_paged::cow_partial_tail(
+        llama_sequence_group & group, uint32_t n_tokens, uint32_t * replaced_block) {
     if (n_tokens == 0 || n_tokens % block_size == 0) {
         return true;
     }
@@ -320,6 +321,28 @@ bool llama_kv_cache_paged::cow_partial_tail(llama_sequence_group & group, uint32
     group.block_table[logical_block] = replacement[0];
     sequence_blocks[group.request_id] = group.block_table;
     release_block_ids({ shared });
+    if (replaced_block) {
+        *replaced_block = shared;
+    }
+    return true;
+}
+
+bool llama_kv_cache_paged::rollback_partial_tail(
+        llama_sequence_group & group, uint32_t n_tokens, uint32_t replaced_block) {
+    if (n_tokens == 0 || n_tokens % block_size == 0) {
+        return true;
+    }
+    const size_t logical_block = n_tokens / block_size;
+    const auto sequence = sequence_blocks.find(group.request_id);
+    if (sequence == sequence_blocks.end() || logical_block >= group.block_table.size() ||
+        sequence->second != group.block_table || group.block_table[logical_block] == replaced_block ||
+        !block_manager.retain_blocks({ replaced_block })) {
+        return false;
+    }
+    const uint32_t replacement = group.block_table[logical_block];
+    group.block_table[logical_block] = replaced_block;
+    sequence_blocks[group.request_id] = group.block_table;
+    release_block_ids({ replacement });
     return true;
 }
 

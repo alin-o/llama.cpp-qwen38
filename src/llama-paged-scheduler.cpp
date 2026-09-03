@@ -256,6 +256,11 @@ LLAMA_API bool llama_paged_scheduler_add_request_cached(
     return true;
 }
 
+LLAMA_API bool llama_paged_scheduler_commit_cached_request(
+        struct llama_paged_scheduler * sched, int32_t request_id) {
+    return sched && sched->impl.commit_cached_request(request_id);
+}
+
 LLAMA_API void llama_paged_scheduler_set_request_paused(
         struct llama_paged_scheduler * sched, int32_t request_id, bool paused) {
     if (sched) {

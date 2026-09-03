@@ -129,11 +129,14 @@ class llama_paged_scheduler_impl {
                               const std::string & fingerprint,
                               llama_checkpoint_view * view,
                               uint32_t * n_prefix_used);
+    bool commit_cached_request(int32_t request_id);
     void evict_unpinned_checkpoints(uint32_t pages_needed = 0, uint64_t host_bytes_needed = 0);
     void force_checkpoint_digest_for_test(bool enabled);
     void set_checkpoint_quotas_for_test(uint32_t page_quota, uint64_t host_quota);
     void set_checkpoint_build_gate_for_test(bool closed);
+    void set_checkpoint_cow_gate_for_test(bool closed);
     bool wait_for_checkpoint_build_gate_for_test(uint32_t timeout_ms);
+    bool wait_for_checkpoint_cow_gate_for_test(uint32_t timeout_ms);
     bool wait_for_checkpoint_builders_for_test(uint32_t builders, uint32_t timeout_ms);
     bool wait_for_checkpoint_metrics_for_test(uint64_t build_waiters, uint64_t wait_timeouts,
                                               uint32_t timeout_ms);
@@ -156,6 +159,7 @@ class llama_paged_scheduler_impl {
     void complete_request(int32_t request_id);
     void evict_retained_requests();
     void release_checkpoint_pin(int32_t request_id);
+    void abort_cached_request(int32_t request_id);
 
     int32_t get_curr_decode_tokens() const;
     int32_t get_scheduled_tokens(const llama_sequence_group & group) const;
@@ -238,6 +242,11 @@ class llama_paged_scheduler_impl {
     std::unordered_map<std::string, checkpoint_record_ptr> checkpoint_keys;
     std::unordered_set<checkpoint_record_ptr> checkpoint_records;
     std::unordered_map<int32_t, checkpoint_record_ptr> request_checkpoint_pins;
+    struct checkpoint_restore_transaction {
+        uint32_t prefix_tokens = 0;
+        uint32_t suffix_tokens = 0;
+    };
+    std::unordered_map<int32_t, checkpoint_restore_transaction> pending_checkpoint_restores;
     std::unordered_set<int32_t> paused_requests;
     std::unordered_map<uint32_t, uint32_t> checkpoint_page_refs;
     llama_checkpoint_metrics checkpoint_metrics;
@@ -248,6 +257,8 @@ class llama_paged_scheduler_impl {
     bool force_digest_collision = false;
     bool checkpoint_build_gate_closed = false;
     uint32_t checkpoint_builders_at_gate = 0;
+    bool checkpoint_cow_gate_closed = false;
+    uint32_t checkpoint_builders_at_cow_gate = 0;
     std::condition_variable checkpoint_test_cv;
 
     mutable std::recursive_mutex request_mutex;

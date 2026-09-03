@@ -45,7 +45,10 @@ class llama_kv_cache_paged : public llama_memory_i {
     bool checkpoint_blocks(llama_seq_id seq_id, uint32_t n_tokens, llama_block_ids & block_ids) const;
     bool attach_checkpoint(llama_sequence_group & group, const llama_block_ids & block_ids,
                            uint32_t n_tokens, bool private_writer, bool * did_cow = nullptr);
-    bool cow_partial_tail(llama_sequence_group & group, uint32_t n_tokens);
+    bool cow_partial_tail(llama_sequence_group & group, uint32_t n_tokens,
+                          uint32_t * replaced_block = nullptr);
+    bool rollback_partial_tail(llama_sequence_group & group, uint32_t n_tokens,
+                               uint32_t replaced_block);
     uint32_t get_block_ref_count(uint32_t block_id) const;
     bool swap_in(llama_sequence_group & group, int32_t num_tokens = 1);
     bool swap_out(llama_sequence_group & group);

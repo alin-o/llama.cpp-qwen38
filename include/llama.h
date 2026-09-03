@@ -1763,6 +1763,7 @@ extern "C" {
 
     // Internal server boundary for the process-local cumulative checkpoint store.
     // The returned view remains valid while request_id is attached to the scheduler.
+    // Commit a cached request only after all external state restoration succeeds.
     LLAMA_API bool llama_paged_scheduler_publish_checkpoint(
             struct llama_paged_scheduler *             sched,
             int32_t                                    request_id,
@@ -1777,6 +1778,9 @@ extern "C" {
             const char *                               fingerprint,
             struct llama_paged_checkpoint_view *       view,
             int32_t *                                  n_prefix_used);
+    LLAMA_API bool llama_paged_scheduler_commit_cached_request(
+            struct llama_paged_scheduler * sched,
+            int32_t                        request_id);
     LLAMA_API void llama_paged_scheduler_set_request_paused(
             struct llama_paged_scheduler * sched,
             int32_t                        request_id,

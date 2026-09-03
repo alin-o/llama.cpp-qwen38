@@ -386,6 +386,7 @@ bool llama_paged_scheduler_impl::finish(llama_sequence_group & group) {
         LLAMA_LOG_DEBUG("%s: Request: %d generated %d tokens.\n", __func__, group.request_id, group.n_decoded);
     }
     group.status = llama_sequence_group_status::FINISHED;
+    abort_cached_request(group.request_id);
     release_checkpoint_pin(group.request_id);
     checkpoint_before_last.erase(group.request_id);
     if (retain_on_finish.erase(group.request_id) > 0) {
@@ -449,6 +450,7 @@ void llama_paged_scheduler_impl::remove_request(int32_t request_id) {
     }
     retain_on_finish.erase(request_id);
     checkpoint_before_last.erase(request_id);
+    abort_cached_request(request_id);
     release_checkpoint_pin(request_id);
     set_request_paused(request_id, false);
     if (const auto it = retained.find(request_id); it != retained.end()) {
@@ -731,10 +733,25 @@ void llama_paged_scheduler_impl::set_checkpoint_build_gate_for_test(bool closed)
     }
 }
 
+void llama_paged_scheduler_impl::set_checkpoint_cow_gate_for_test(bool closed) {
+    std::lock_guard<std::mutex> lock(checkpoint_mutex);
+    checkpoint_cow_gate_closed = closed;
+    if (!closed) {
+        checkpoint_test_cv.notify_all();
+    }
+}
+
 bool llama_paged_scheduler_impl::wait_for_checkpoint_build_gate_for_test(uint32_t timeout_ms) {
     std::unique_lock<std::mutex> lock(checkpoint_mutex);
     return checkpoint_test_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&] {
         return checkpoint_builders_at_gate != 0;
+    });
+}
+
+bool llama_paged_scheduler_impl::wait_for_checkpoint_cow_gate_for_test(uint32_t timeout_ms) {
+    std::unique_lock<std::mutex> lock(checkpoint_mutex);
+    return checkpoint_test_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&] {
+        return checkpoint_builders_at_cow_gate != 0;
     });
 }
 
@@ -948,8 +965,21 @@ bool llama_paged_scheduler_impl::publish_checkpoint(
     llama_block_ids blocks;
     bool retained_pages = false;
     bool quota_reserved = false;
+    bool cow_applied = false;
+    uint32_t cow_replaced_block = 0;
     uint64_t host_bytes = 0;
     const auto fail_publication = [&]() {
+        if (cow_applied) {
+            std::lock_guard<std::recursive_mutex> request_lock(request_mutex);
+            const auto source_it = id_to_group.find(request_id);
+            const auto lifetime_it = request_build_sources.find(request_id);
+            if (source_it != id_to_group.end() && lifetime_it != request_build_sources.end() &&
+                lifetime_it->second == source_lifetime) {
+                GGML_ASSERT(kv_cache_manager->rollback_partial_tail(
+                    *source_it->second, n_tokens, cow_replaced_block));
+            }
+            cow_applied = false;
+        }
         if (quota_reserved) {
             std::lock_guard<std::mutex> lock(checkpoint_mutex);
             for (uint32_t block : blocks) {
@@ -1032,15 +1062,27 @@ bool llama_paged_scheduler_impl::publish_checkpoint(
         retained_pages = true;
         if (n_tokens % block_size != 0 && source_it->second->n_past == n_tokens &&
             source_it->second->n_prompt > n_tokens) {
-            if (!kv_cache_manager->cow_partial_tail(*source_it->second, n_tokens)) {
+            if (!kv_cache_manager->cow_partial_tail(
+                    *source_it->second, n_tokens, &cow_replaced_block)) {
                 {
                     std::lock_guard<std::mutex> lock(checkpoint_mutex);
                     checkpoint_metrics.cow_failures++;
                 }
                 return fail_publication();
             }
+            cow_applied = true;
             std::lock_guard<std::mutex> lock(checkpoint_mutex);
             checkpoint_metrics.cow_copies++;
+        }
+    }
+
+    if (cow_applied) {
+        std::unique_lock<std::mutex> lock(checkpoint_mutex);
+        if (checkpoint_cow_gate_closed) {
+            checkpoint_builders_at_cow_gate++;
+            checkpoint_test_cv.notify_all();
+            checkpoint_test_cv.wait(lock, [&] { return !checkpoint_cow_gate_closed; });
+            checkpoint_builders_at_cow_gate--;
         }
     }
 
@@ -1217,6 +1259,8 @@ bool llama_paged_scheduler_impl::queue_request_cached(
         request_build_sources[group_ptr->request_id] = std::make_shared<checkpoint_build_source>();
     }
     const int32_t request_id = group_ptr->request_id;
+    const uint32_t prefix_tokens = selected->tokens.size();
+    const uint32_t suffix_tokens = group_ptr->n_prompt - prefix_tokens;
     set_waiting(std::move(group_ptr));
     if (view) {
         view->recurrent = selected->payload.recurrent.data();
@@ -1232,13 +1276,34 @@ bool llama_paged_scheduler_impl::queue_request_cached(
     }
     {
         std::lock_guard<std::mutex> lock(checkpoint_mutex);
-        checkpoint_metrics.hits++;
-        checkpoint_metrics.hit_tokens += selected->tokens.size();
-        checkpoint_metrics.suffix_tokens += get_group_from_id(request_id)->n_prompt - selected->tokens.size();
+        pending_checkpoint_restores[request_id] = { prefix_tokens, suffix_tokens };
         checkpoint_metrics.cow_copies += did_cow;
-        checkpoint_metrics.restore_successes++;
     }
     return true;
+}
+
+bool llama_paged_scheduler_impl::commit_cached_request(int32_t request_id) {
+    std::lock_guard<std::mutex> lock(checkpoint_mutex);
+    const auto pending = pending_checkpoint_restores.find(request_id);
+    if (pending == pending_checkpoint_restores.end()) {
+        return false;
+    }
+    checkpoint_metrics.hits++;
+    checkpoint_metrics.hit_tokens += pending->second.prefix_tokens;
+    checkpoint_metrics.suffix_tokens += pending->second.suffix_tokens;
+    checkpoint_metrics.restore_successes++;
+    pending_checkpoint_restores.erase(pending);
+    return true;
+}
+
+void llama_paged_scheduler_impl::abort_cached_request(int32_t request_id) {
+    std::lock_guard<std::mutex> lock(checkpoint_mutex);
+    if (pending_checkpoint_restores.erase(request_id) == 0) {
+        return;
+    }
+    checkpoint_metrics.restore_failures++;
+    checkpoint_metrics.rollbacks++;
+    checkpoint_metrics.fallbacks++;
 }
 
 void llama_paged_scheduler_impl::evict_retained_requests() {
