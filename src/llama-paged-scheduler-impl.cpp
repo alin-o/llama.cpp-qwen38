@@ -604,6 +604,30 @@ void llama_paged_scheduler_impl::set_checkpoint_quotas_for_test(uint32_t page_qu
     checkpoint_host_quota = host_quota;
 }
 
+void llama_paged_scheduler_impl::set_checkpoint_build_gate_for_test(bool closed) {
+    std::lock_guard<std::mutex> lock(checkpoint_mutex);
+    checkpoint_build_gate_closed = closed;
+    if (!closed) {
+        checkpoint_test_cv.notify_all();
+    }
+}
+
+bool llama_paged_scheduler_impl::wait_for_checkpoint_build_gate_for_test(uint32_t timeout_ms) {
+    std::unique_lock<std::mutex> lock(checkpoint_mutex);
+    return checkpoint_test_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&] {
+        return checkpoint_builders_at_gate != 0;
+    });
+}
+
+bool llama_paged_scheduler_impl::wait_for_checkpoint_metrics_for_test(
+        uint64_t build_waiters, uint64_t wait_timeouts, uint32_t timeout_ms) {
+    std::unique_lock<std::mutex> lock(checkpoint_mutex);
+    return checkpoint_test_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&] {
+        return checkpoint_metrics.build_waiters >= build_waiters &&
+               checkpoint_metrics.wait_timeouts >= wait_timeouts;
+    });
+}
+
 bool llama_paged_scheduler_impl::publish_checkpoint(
         int32_t request_id, uint32_t n_tokens,
         const std::string & fingerprint,
@@ -663,11 +687,13 @@ bool llama_paged_scheduler_impl::publish_checkpoint(
             record = existing->second;
             if (record->state == checkpoint_state::BUILDING) {
                 checkpoint_metrics.build_waiters++;
+                checkpoint_test_cv.notify_all();
                 if (!record->ready_cv.wait_for(lock, std::chrono::milliseconds(50), [&] {
                         return record->state != checkpoint_state::BUILDING;
                     })) {
                     checkpoint_metrics.wait_timeouts++;
                     checkpoint_metrics.fallbacks++;
+                    checkpoint_test_cv.notify_all();
                     return false;
                 }
             }
@@ -692,6 +718,16 @@ bool llama_paged_scheduler_impl::publish_checkpoint(
         record->depth = depth;
         checkpoints.emplace(key_string, record);
         checkpoint_metrics.build_winners++;
+    }
+
+    {
+        std::unique_lock<std::mutex> lock(checkpoint_mutex);
+        if (checkpoint_build_gate_closed) {
+            checkpoint_builders_at_gate++;
+            checkpoint_test_cv.notify_all();
+            checkpoint_test_cv.wait(lock, [&] { return !checkpoint_build_gate_closed; });
+            checkpoint_builders_at_gate--;
+        }
     }
 
     llama_block_ids blocks;

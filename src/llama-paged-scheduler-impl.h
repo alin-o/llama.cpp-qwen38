@@ -129,6 +129,10 @@ class llama_paged_scheduler_impl {
     void evict_unpinned_checkpoints(uint32_t pages_needed = 0, uint64_t host_bytes_needed = 0);
     void force_checkpoint_digest_for_test(bool enabled);
     void set_checkpoint_quotas_for_test(uint32_t page_quota, uint64_t host_quota);
+    void set_checkpoint_build_gate_for_test(bool closed);
+    bool wait_for_checkpoint_build_gate_for_test(uint32_t timeout_ms);
+    bool wait_for_checkpoint_metrics_for_test(uint64_t build_waiters, uint64_t wait_timeouts,
+                                              uint32_t timeout_ms);
     void set_request_paused(int32_t request_id, bool paused);
     uint32_t checkpoint_pin_depth(int32_t request_id) const;
     llama_block_ids request_block_ids(int32_t request_id) const;
@@ -213,6 +217,9 @@ class llama_paged_scheduler_impl {
     uint64_t checkpoint_resident_host_bytes = 0;
     uint64_t checkpoint_clock = 0;
     bool force_digest_collision = false;
+    bool checkpoint_build_gate_closed = false;
+    uint32_t checkpoint_builders_at_gate = 0;
+    std::condition_variable checkpoint_test_cv;
     std::array<int32_t, 3> graph_signature = { -1, -1, -1 };
 
 

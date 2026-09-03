@@ -9,6 +9,7 @@
 #include <stdexcept>
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -1319,21 +1320,66 @@ TEST(test_cumulative_checkpoint_atomic_publication_faults_and_single_flight) {
             std::move(miss), fingerprint, nullptr, nullptr));
     }
 
+    llama_checkpoint_metrics metrics = fixture.sched->get_checkpoint_metrics();
+    EXPECT_TRUE(metrics.build_winners == 7u);
+    EXPECT_TRUE(metrics.build_waiters == 0u);
+    EXPECT_TRUE(metrics.wait_timeouts == 0u);
+    EXPECT_TRUE(metrics.publication_failures == 7u);
+
+    fixture.sched->set_checkpoint_build_gate_for_test(true);
     std::vector<uint8_t> published(8);
     std::vector<std::thread> builders;
-    for (size_t i = 0; i < published.size(); ++i) {
+    builders.emplace_back([&] {
+        published[0] = fixture.sched->publish_checkpoint(0, 18, "single-flight", payload);
+    });
+    EXPECT_TRUE(fixture.sched->wait_for_checkpoint_build_gate_for_test(1000));
+    for (size_t i = 1; i < published.size(); ++i) {
         builders.emplace_back([&, i] {
             published[i] = fixture.sched->publish_checkpoint(0, 18, "single-flight", payload);
         });
     }
+    EXPECT_TRUE(fixture.sched->wait_for_checkpoint_metrics_for_test(7, 0, 1000));
+    fixture.sched->set_checkpoint_build_gate_for_test(false);
     for (std::thread & builder : builders) {
         builder.join();
     }
     EXPECT_TRUE(std::all_of(published.begin(), published.end(), [](bool value) { return value; }));
-    llama_checkpoint_metrics metrics = fixture.sched->get_checkpoint_metrics();
-    EXPECT_TRUE(metrics.build_winners >= 8);
-    EXPECT_TRUE(metrics.builds_coalesced >= 7);
-    EXPECT_TRUE(metrics.publication_failures >= 7);
+    metrics = fixture.sched->get_checkpoint_metrics();
+    EXPECT_TRUE(metrics.build_winners == 8u);
+    EXPECT_TRUE(metrics.build_waiters == 7u);
+    EXPECT_TRUE(metrics.builds_coalesced == 7u);
+    EXPECT_TRUE(metrics.wait_timeouts == 0u);
+    EXPECT_TRUE(metrics.publications == 1u);
+    EXPECT_TRUE(metrics.publication_failures == 7u);
+
+    fixture.sched->set_checkpoint_build_gate_for_test(true);
+    bool timeout_winner = false;
+    std::vector<uint8_t> timed_out(3);
+    std::thread winner([&] {
+        timeout_winner = fixture.sched->publish_checkpoint(0, 18, "single-flight-timeout", payload);
+    });
+    EXPECT_TRUE(fixture.sched->wait_for_checkpoint_build_gate_for_test(1000));
+    std::vector<std::thread> followers;
+    for (size_t i = 0; i < timed_out.size(); ++i) {
+        followers.emplace_back([&, i] {
+            timed_out[i] = fixture.sched->publish_checkpoint(0, 18, "single-flight-timeout", payload);
+        });
+    }
+    EXPECT_TRUE(fixture.sched->wait_for_checkpoint_metrics_for_test(10, 3, 1000));
+    fixture.sched->set_checkpoint_build_gate_for_test(false);
+    winner.join();
+    for (std::thread & follower : followers) {
+        follower.join();
+    }
+    EXPECT_TRUE(timeout_winner);
+    EXPECT_TRUE(std::none_of(timed_out.begin(), timed_out.end(), [](bool value) { return value; }));
+    metrics = fixture.sched->get_checkpoint_metrics();
+    EXPECT_TRUE(metrics.build_winners == 9u);
+    EXPECT_TRUE(metrics.build_waiters == 10u);
+    EXPECT_TRUE(metrics.builds_coalesced == 7u);
+    EXPECT_TRUE(metrics.wait_timeouts == 3u);
+    EXPECT_TRUE(metrics.publications == 2u);
+    EXPECT_TRUE(metrics.publication_failures == 7u);
 
     fixture.sched->force_checkpoint_digest_for_test(true);
     EXPECT_TRUE(fixture.sched->publish_checkpoint(0, 18, "collision", payload));
@@ -1363,6 +1409,92 @@ TEST(test_cumulative_checkpoint_atomic_publication_faults_and_single_flight) {
     fixture.sched->remove_request(0);
     fixture.sched->evict_unpinned_checkpoints(fixture.kv->get_num_gpu_blocks());
     EXPECT_EQ(fixture.sched->get_checkpoint_metrics().resident_pages, 0u);
+    llama_batch_free(batch);
+}
+
+TEST(test_cumulative_checkpoint_pin_evict_cancel_race) {
+    auto fixture = make_fixture(/*n_ctx=*/128, /*block_size=*/16, /*n_batch=*/64,
+                                /*n_gpu_blocks=*/8, /*n_cpu_blocks=*/2);
+    llama_sequence_group source = make_group(/*id=*/0, /*n_prompt=*/18);
+    for (uint32_t i = 0; i < source.n_prompt; ++i) {
+        source.logical_seq[i] = i;
+    }
+    EXPECT_TRUE(fixture.sched->queue_request(std::move(source)));
+    llama_batch batch = {};
+    EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+    const int8_t keep_running[] = { 0 };
+    fixture.sched->update(batch, { 42 }, { 18 }, keep_running);
+
+    llama_checkpoint_payload payload;
+    payload.recurrent = { 1 };
+    payload.draft = { 2 };
+    payload.speculative = { 3 };
+    EXPECT_TRUE(fixture.sched->publish_checkpoint(0, 18, "pin-race", payload));
+    const llama_block_ids source_blocks = fixture.sched->request_block_ids(0);
+    EXPECT_TRUE(source_blocks.size() == 2u);
+
+    llama_sequence_group first = make_group(/*id=*/1, /*n_prompt=*/24);
+    llama_sequence_group second = make_group(/*id=*/2, /*n_prompt=*/24);
+    for (uint32_t i = 0; i < 18; ++i) {
+        first.logical_seq[i] = i;
+        second.logical_seq[i] = i;
+    }
+    EXPECT_TRUE(fixture.sched->queue_request_cached(std::move(first), "pin-race", nullptr, nullptr));
+    fixture.sched->set_checkpoint_quotas_for_test(0, 1024 * 1024);
+
+    std::atomic<bool> stop_eviction = false;
+    std::atomic<uint32_t> eviction_attempts = 0;
+    std::thread evictor([&] {
+        while (!stop_eviction.load()) {
+            fixture.sched->evict_unpinned_checkpoints();
+            eviction_attempts++;
+            std::this_thread::yield();
+        }
+    });
+    while (eviction_attempts.load() == 0) {
+        std::this_thread::yield();
+    }
+
+    EXPECT_TRUE(fixture.sched->queue_request_cached(std::move(second), "pin-race", nullptr, nullptr));
+    const llama_block_ids second_blocks = fixture.sched->request_block_ids(2);
+    EXPECT_TRUE(fixture.sched->checkpoint_pin_depth(1) == 18u);
+    EXPECT_TRUE(fixture.sched->checkpoint_pin_depth(2) == 18u);
+    EXPECT_TRUE(fixture.sched->get_checkpoint_metrics().resident_pages == 2u);
+    EXPECT_TRUE(second_blocks[0] == source_blocks[0]);
+
+    fixture.sched->remove_request(1);
+    EXPECT_TRUE(fixture.sched->checkpoint_pin_depth(1) == 0u);
+    EXPECT_TRUE(fixture.sched->checkpoint_pin_depth(2) == 18u);
+    EXPECT_TRUE(fixture.sched->get_checkpoint_metrics().resident_pages == 2u);
+    EXPECT_TRUE(fixture.kv->get_block_ref_count(source_blocks[0]) > 1);
+
+    fixture.sched->remove_request(2);
+    while (fixture.sched->get_checkpoint_metrics().resident_pages != 0) {
+        std::this_thread::yield();
+    }
+    stop_eviction = true;
+    evictor.join();
+    EXPECT_TRUE(eviction_attempts.load() > 1);
+    EXPECT_TRUE(fixture.kv->get_block_ref_count(source_blocks[0]) == 1u);
+    EXPECT_TRUE(fixture.kv->get_block_ref_count(source_blocks[1]) == 1u);
+
+    llama_sequence_group probe = make_group(/*id=*/3, /*n_prompt=*/96);
+    EXPECT_TRUE(fixture.kv->allocate(0, probe));
+    EXPECT_TRUE(std::find(probe.block_table.begin(), probe.block_table.end(), source_blocks[0]) ==
+                probe.block_table.end());
+    EXPECT_TRUE(std::find(probe.block_table.begin(), probe.block_table.end(), source_blocks[1]) ==
+                probe.block_table.end());
+    fixture.sched->remove_request(0);
+
+    llama_sequence_group reclaimed = make_group(/*id=*/4, /*n_prompt=*/32);
+    EXPECT_TRUE(fixture.kv->allocate(0, reclaimed));
+    EXPECT_TRUE(std::find(reclaimed.block_table.begin(), reclaimed.block_table.end(), source_blocks[0]) !=
+                reclaimed.block_table.end());
+    EXPECT_TRUE(std::find(reclaimed.block_table.begin(), reclaimed.block_table.end(), source_blocks[1]) !=
+                reclaimed.block_table.end());
+    fixture.kv->free_blocks(probe);
+    fixture.kv->free_blocks(reclaimed);
+    EXPECT_TRUE(fixture.kv->get_num_free_gpu_blocks() == 8u);
     llama_batch_free(batch);
 }
 
@@ -3239,6 +3371,7 @@ int main(int argc, char ** argv) {
     RUN(test_scheduler_exact_hit_batches_with_cold_miss);
     RUN(test_cumulative_checkpoint_cross_slot_sharing_and_cow);
     RUN(test_cumulative_checkpoint_atomic_publication_faults_and_single_flight);
+    RUN(test_cumulative_checkpoint_pin_evict_cancel_race);
     RUN(test_cumulative_checkpoint_cow_failure_and_repeated_residency_cycles);
     RUN(test_scheduler_evicts_retained_prefix_under_pressure);
     RUN(test_scheduler_reports_active_prefix_recomputation);
