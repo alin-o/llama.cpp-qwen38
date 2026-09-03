@@ -484,8 +484,9 @@ content, must cover:
   recompute;
 - restore winner/waiter/result/integrity rejection;
 - graph reuse/rebuild/update reason and final populated-depth bucket; and
-- per-slot logical limit, active overlap, prompt/decode tokens, TTFT, makespan,
-  and busy slots per decode.
+- per-slot logical limit, active overlap, actual emitted-token count,
+  after-TTFT decode tokens and decode-window duration, TTFT, makespan, and busy
+  slots per decode.
 
 No metric or log may contain raw prompt text, token arrays, segment content, or
 unbounded client-controlled identifiers.
@@ -495,6 +496,9 @@ unbounded client-controlled identifiers.
 - Phase 2 owns dynamic context semantics, the in-memory cumulative record/page
   store, exact identity/equality, MTP-complete capture/restore, COW,
   single-flight, quotas, pins, publication, graph refresh, and fail-open paths.
+  It also owns the disabled-by-default, loopback-only pressure-test latch that
+  parks a pinned slot before generation; this is deterministic test
+  instrumentation and is not part of the production API.
 - Phase 3 owns the three API schemas, boundary provenance through conversion,
   streaming/non-streaming responses, and cross-API exact-token tests.
 - Phase 4 owns CAS replacement, retirement, in-flight old readers, idempotency,
@@ -512,6 +516,15 @@ without retaining the original gate and documenting new measured evidence.
 
 ## 14. Binding concurrent fixture selection
 
+Every timing runner records `timings.predicted_n` as the actual emitted-token
+count plus first and last token-bearing event times. Aggregate after-TTFT decode
+TPS is
+`sum(max(actual_generated_tokens - 1, 0)) / (latest last-token time - earliest
+first-token time)` across the synchronized run. The first token ends TTFT;
+requested `n_predict` and full request makespan are forbidden substitutes.
+Both this aggregate metric and the server's per-request decode TPS must meet
+the Phase 6 regression gate.
+
 Fixture selection is explicit by slot count and is recorded in every raw row.
 Mixed hit/miss inputs alternate roles, and version-change inputs alternate old
 and replacement roots. Thus NP=4 selects two requests of each class, NP=8 four
@@ -525,18 +538,34 @@ complete pages and one partial allocated page. For NP=4 and NP=8 also seed
 three 64-page disjoint checkpoints, filling 494 of the 512-page quota. For the
 measured feasible NP=10 1,024-block profile seed one 64-page disjoint
 checkpoint, filling 366 of its 384-page quota. Start and hold `NP-2` requests
-that pin the common checkpoint, verify all holders are active, then use the two
-remaining slots for disjoint 4,096-token admission waves. Wait for each wave
-before launching the next and release holders only after all waves finish.
+that pin the common checkpoint. Each holder carries the test-only
+`checkpoint_test_latch` request field. With `--checkpoint-test-controls`
+enabled on a loopback listener, the server parks the slot after its checkpoint
+pin and private prompt prefill but before its first generated token. A parked
+slot remains active and retains the pin while being omitted from decode batch
+construction. The harness continuously reads every stream and must observe
+both `/slots` state `checkpoint_test_latched` and
+each holder's `checkpoint_pin_held` field at depth 19,322,
+`llamacpp:checkpoint_active_pins >= NP-2`, and
+`llamacpp:checkpoint_test_latched_slots{latch=...} == NP-2` before using the
+two remaining slots for disjoint 4,096-token admission waves. It fails
+immediately if a holder or pin disappears. After all waves finish, the harness
+POSTs the declared `/checkpoint-test/latches/<id>/release` endpoint and
+verifies that every holder emits exactly its one requested token and completes.
+The flag, field, state, metric, and endpoint are test controls, disabled by
+default, and must not be exposed on a non-loopback listener.
 
-The feature's conservative maximum target residency is 642 pages at NP=4, 678
-at NP=8, and 568 at NP=10. Each holder needs nine private pages: its copied
-terminal prefix page contains 58 tokens, then the 256-token prompt tail and
-256-token generation headroom extend through that page and eight more. Each
-active churn request needs 65 pages for its 4,096-token prompt plus 16-token
-generation headroom. Thus the maxima are `494 + 2*9 + 2*65`,
-`494 + 6*9 + 2*65`, and `366 + 8*9 + 2*65`. Generated tokens are part of the
-target-KV residency oracle even though the generation may stop early. These
-working sets fit the declared pools. The matched uncached arm uses identical
-requests and arrivals; inability of NP=10 to hold duplicated prefix pages is
-recorded as its expected physical-capacity control.
+The holder request sets `n_predict=1` and `ignore_eos=true`; parking before
+generation makes EOS and client/socket buffering irrelevant, and the
+post-release one-token completion proves the latch resumes normally. The
+feature's conservative maximum target residency is 634 pages at NP=4, 654 at
+NP=8, and 536 at NP=10. Each holder needs five private pages: its copied
+terminal prefix page contains 58 tokens, and the 256-token prompt tail plus one
+generated-token headroom occupy that page and four more. Each active churn
+request needs 65 pages for its 4,096-token prompt plus 16-token generation
+headroom. Thus the maxima are `494 + 2*5 + 2*65`,
+`494 + 6*5 + 2*65`, and `366 + 8*5 + 2*65`. These working sets fit the declared
+pools. The matched uncached arm uses the same latch, requests, and arrivals but
+has no checkpoint pin; inability of NP=10 to hold duplicated prefix pages is
+recorded as its expected physical-capacity control. An unread HTTP stream is
+never an active-holder oracle.
