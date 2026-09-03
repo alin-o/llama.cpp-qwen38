@@ -529,9 +529,14 @@ that pin the common checkpoint, verify all holders are active, then use the two
 remaining slots for disjoint 4,096-token admission waves. Wait for each wave
 before launching the next and release holders only after all waves finish.
 
-The feature's maximum target residency is 632 pages at NP=4, 652 at NP=8, and
-534 at NP=10: seeded pages plus five private pages per holder (terminal-page
-COW and four new tail pages) plus two 64-page churn requests. These fit the
-declared pools. The matched uncached arm uses identical requests and arrivals;
-inability of NP=10 to hold duplicated prefix pages is recorded as its expected
-physical-capacity control.
+The feature's conservative maximum target residency is 642 pages at NP=4, 678
+at NP=8, and 568 at NP=10. Each holder needs nine private pages: its copied
+terminal prefix page contains 58 tokens, then the 256-token prompt tail and
+256-token generation headroom extend through that page and eight more. Each
+active churn request needs 65 pages for its 4,096-token prompt plus 16-token
+generation headroom. Thus the maxima are `494 + 2*9 + 2*65`,
+`494 + 6*9 + 2*65`, and `366 + 8*9 + 2*65`. Generated tokens are part of the
+target-KV residency oracle even though the generation may stop early. These
+working sets fit the declared pools. The matched uncached arm uses identical
+requests and arrivals; inability of NP=10 to hold duplicated prefix pages is
+recorded as its expected physical-capacity control.
