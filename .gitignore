@@ -85,6 +85,7 @@
 /tools/server/*.js.hpp
 /tools/server/*.mjs.hpp
 /tools/server/*.gz.hpp
+!/build.sh
 !/build_64.sh
 !/examples/*.bat
 !/examples/*/*.kts
@@ -95,6 +96,8 @@
 # Python
 
 /.venv
+docker/.venv-speed-bench/
+docker/results/
 __pycache__/
 */poetry.lock
 poetry.toml
@@ -152,4 +155,8 @@ a.out.*
 # AGENTS
 
 AGENTS.local.md
+AGENTS.override.md
 .pi/SYSTEM.md
+.hf-cache
+
+/benchmark-results/
