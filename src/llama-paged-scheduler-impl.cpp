@@ -104,9 +104,9 @@ llama_paged_scheduler_impl::~llama_paged_scheduler_impl() {
             recurrent_manager->seq_rm(item.first, -1, -1);
         }
     }
-    for (auto & item : checkpoints) {
-        if (item.second->resident) {
-            kv_cache_manager->release_retained_block_ids(item.second->blocks);
+    for (const checkpoint_record_ptr & record : checkpoint_records) {
+        if (record->resident) {
+            kv_cache_manager->release_retained_block_ids(record->blocks);
         }
     }
 }
@@ -325,7 +325,11 @@ bool llama_paged_scheduler_impl::queue_request(llama_sequence_group group, uint3
         return false;
     }
 
-    id_to_group[group_ptr->request_id] = group_ptr.get();
+    {
+        std::lock_guard<std::recursive_mutex> request_lock(request_mutex);
+        id_to_group[group_ptr->request_id] = group_ptr.get();
+        request_build_sources[group_ptr->request_id] = std::make_shared<checkpoint_build_source>();
+    }
     group_ptr->status = llama_sequence_group_status::PENDING;
     if (restored && restored_status == llama_sequence_group_status::RUNNING) {
         set_running(std::move(group_ptr));
@@ -389,7 +393,15 @@ bool llama_paged_scheduler_impl::finish(llama_sequence_group & group) {
             return true;
         }
         LLAMA_LOG_WARN("%s: request %d could not retain its paged state; discarding it.\n",
-                       __func__, group.request_id);
+                      __func__, group.request_id);
+    }
+    {
+        std::lock_guard<std::recursive_mutex> request_lock(request_mutex);
+        if (const auto source = request_build_sources.find(group.request_id);
+            source != request_build_sources.end()) {
+            source->second->cancelled.store(true);
+            request_build_sources.erase(source);
+        }
     }
     kv_cache_manager->free_blocks(group);
     if (recurrent_manager) {
@@ -430,6 +442,11 @@ void llama_paged_scheduler_impl::complete_request(int32_t request_id) {
 }
 
 void llama_paged_scheduler_impl::remove_request(int32_t request_id) {
+    std::lock_guard<std::recursive_mutex> request_lock(request_mutex);
+    if (const auto source = request_build_sources.find(request_id); source != request_build_sources.end()) {
+        source->second->cancelled.store(true);
+        request_build_sources.erase(source);
+    }
     retain_on_finish.erase(request_id);
     checkpoint_before_last.erase(request_id);
     release_checkpoint_pin(request_id);
@@ -502,20 +519,35 @@ llama_paged_cache_stats llama_paged_scheduler_impl::get_cache_stats() const {
 }
 
 llama_checkpoint_metrics llama_paged_scheduler_impl::get_checkpoint_metrics() const {
-    std::lock_guard<std::mutex> lock(checkpoint_mutex);
-    llama_checkpoint_metrics result = checkpoint_metrics;
-    result.records = checkpoints.size();
-    result.resident_pages = checkpoint_page_refs.size();
-    result.pins = request_checkpoint_pins.size();
-    result.resident_host_bytes = checkpoint_resident_host_bytes;
-    result.host_quota_bytes = checkpoint_host_quota;
+    llama_checkpoint_metrics result;
+    std::vector<checkpoint_record_ptr> records;
+    {
+        std::lock_guard<std::mutex> lock(checkpoint_mutex);
+        result = checkpoint_metrics;
+        result.records = checkpoint_records.size();
+        result.resident_pages = checkpoint_page_refs.size();
+        result.pins = request_checkpoint_pins.size();
+        result.resident_host_bytes = checkpoint_resident_host_bytes;
+        result.host_quota_bytes = checkpoint_host_quota;
+        records.assign(checkpoint_records.begin(), checkpoint_records.end());
+    }
     result.logical_page_refs = 0;
-    for (const auto & item : checkpoints) {
-        if (item.second->resident) {
-            result.logical_page_refs += item.second->blocks.size();
+    for (const checkpoint_record_ptr & record : records) {
+        std::lock_guard<std::mutex> record_lock(record->mutex);
+        if (record->resident) {
+            result.logical_page_refs += record->blocks.size();
         }
     }
     return result;
+}
+
+void llama_paged_scheduler_impl::record_graph_decision(bool reused) {
+    std::lock_guard<std::mutex> lock(checkpoint_mutex);
+    if (reused) {
+        checkpoint_metrics.graph_reuses++;
+    } else {
+        checkpoint_metrics.graph_rebuilds++;
+    }
 }
 
 void llama_paged_scheduler_impl::set_request_paused(int32_t request_id, bool paused) {
@@ -528,9 +560,17 @@ void llama_paged_scheduler_impl::set_request_paused(int32_t request_id, bool pau
 }
 
 uint32_t llama_paged_scheduler_impl::checkpoint_pin_depth(int32_t request_id) const {
-    std::lock_guard<std::mutex> lock(checkpoint_mutex);
-    const auto it = request_checkpoint_pins.find(request_id);
-    return it == request_checkpoint_pins.end() ? 0 : (uint32_t) it->second->tokens.size();
+    checkpoint_record_ptr record;
+    {
+        std::lock_guard<std::mutex> lock(checkpoint_mutex);
+        const auto it = request_checkpoint_pins.find(request_id);
+        if (it == request_checkpoint_pins.end()) {
+            return 0;
+        }
+        record = it->second;
+    }
+    std::lock_guard<std::mutex> record_lock(record->mutex);
+    return (uint32_t) record->tokens.size();
 }
 
 llama_block_ids llama_paged_scheduler_impl::request_block_ids(int32_t request_id) const {
@@ -539,57 +579,136 @@ llama_block_ids llama_paged_scheduler_impl::request_block_ids(int32_t request_id
 }
 
 void llama_paged_scheduler_impl::release_checkpoint_pin(int32_t request_id) {
-    std::lock_guard<std::mutex> lock(checkpoint_mutex);
-    const auto it = request_checkpoint_pins.find(request_id);
-    if (it == request_checkpoint_pins.end()) {
-        return;
+    checkpoint_record_ptr record;
+    {
+        std::lock_guard<std::mutex> lock(checkpoint_mutex);
+        const auto it = request_checkpoint_pins.find(request_id);
+        if (it == request_checkpoint_pins.end()) {
+            return;
+        }
+        record = it->second;
+        request_checkpoint_pins.erase(it);
     }
-    GGML_ASSERT(it->second->pins > 0);
-    it->second->pins--;
-    request_checkpoint_pins.erase(it);
+    std::lock_guard<std::mutex> record_lock(record->mutex);
+    GGML_ASSERT(record->pins > 0);
+    record->pins--;
 }
 
 void llama_paged_scheduler_impl::evict_unpinned_checkpoints(uint32_t pages_needed, uint64_t host_bytes_needed) {
     std::vector<llama_block_ids> released;
-    std::unique_lock<std::mutex> lock(checkpoint_mutex);
-    while ((checkpoint_page_refs.size() + pages_needed > checkpoint_page_quota ||
-            checkpoint_resident_host_bytes + host_bytes_needed > checkpoint_host_quota)) {
+    std::vector<llama_checkpoint_payload> released_payloads;
+    while (true) {
+        std::vector<checkpoint_record_ptr> records;
+        {
+            std::lock_guard<std::mutex> lock(checkpoint_mutex);
+            if (checkpoint_page_refs.size() + pages_needed <= checkpoint_page_quota &&
+                checkpoint_resident_host_bytes + host_bytes_needed <= checkpoint_host_quota) {
+                break;
+            }
+            records.assign(checkpoint_records.begin(), checkpoint_records.end());
+        }
+
         checkpoint_record_ptr victim;
-        for (const auto & item : checkpoints) {
-            const checkpoint_record_ptr & candidate = item.second;
+        uint64_t victim_access = 0;
+        uint32_t victim_depth = 0;
+        for (const checkpoint_record_ptr & candidate : records) {
+            std::lock_guard<std::mutex> record_lock(candidate->mutex);
             if (candidate->state != checkpoint_state::READY || !candidate->resident || candidate->pins != 0) {
                 continue;
             }
-            if (!victim || candidate->last_access < victim->last_access ||
-                (candidate->last_access == victim->last_access && candidate->depth > victim->depth)) {
+            if (!victim || candidate->last_access < victim_access ||
+                (candidate->last_access == victim_access && candidate->depth > victim_depth)) {
                 victim = candidate;
+                victim_access = candidate->last_access;
+                victim_depth = candidate->depth;
             }
         }
         if (!victim) {
             break;
         }
-        released.push_back(victim->blocks);
-        for (uint32_t block : victim->blocks) {
-            auto page = checkpoint_page_refs.find(block);
-            GGML_ASSERT(page != checkpoint_page_refs.end() && page->second > 0);
-            if (--page->second == 0) {
-                checkpoint_page_refs.erase(page);
-                if (kv_cache_manager->get_block_ref_count(block) == 1) {
-                    checkpoint_metrics.page_reclamations++;
+
+        llama_block_ids victim_blocks;
+        llama_checkpoint_payload victim_payload;
+        {
+            std::lock_guard<std::mutex> lock(checkpoint_mutex);
+            std::lock_guard<std::mutex> record_lock(victim->mutex);
+            if (victim->state != checkpoint_state::READY || !victim->resident || victim->pins != 0) {
+                continue;
+            }
+            victim_blocks = std::move(victim->blocks);
+            victim_payload = std::move(victim->payload);
+            for (uint32_t block : victim_blocks) {
+                auto page = checkpoint_page_refs.find(block);
+                GGML_ASSERT(page != checkpoint_page_refs.end() && page->second > 0);
+                if (--page->second == 0) {
+                    checkpoint_page_refs.erase(page);
+                    if (kv_cache_manager->get_block_ref_count(block) == 1) {
+                        checkpoint_metrics.page_reclamations++;
+                    }
                 }
             }
+            victim->resident = false;
+            GGML_ASSERT(checkpoint_resident_host_bytes >= victim->host_bytes);
+            checkpoint_resident_host_bytes -= victim->host_bytes;
+            victim->host_bytes = 0;
+            checkpoint_metrics.evictions++;
         }
-        victim->resident = false;
-        GGML_ASSERT(checkpoint_resident_host_bytes >= victim->host_bytes);
-        checkpoint_resident_host_bytes -= victim->host_bytes;
-        victim->blocks.clear();
-        victim->payload = {};
-        victim->host_bytes = 0;
-        checkpoint_metrics.evictions++;
+        released.push_back(std::move(victim_blocks));
+        released_payloads.push_back(std::move(victim_payload));
     }
-    lock.unlock();
     for (const llama_block_ids & blocks : released) {
         kv_cache_manager->release_retained_block_ids(blocks);
+    }
+}
+
+llama_paged_scheduler_impl::checkpoint_bucket_ptr llama_paged_scheduler_impl::get_checkpoint_bucket(
+        const std::string & fingerprint, bool create) {
+    std::lock_guard<std::mutex> lock(checkpoint_mutex);
+    const auto found = checkpoint_buckets.find(fingerprint);
+    if (found != checkpoint_buckets.end()) {
+        return found->second;
+    }
+    if (!create) {
+        return nullptr;
+    }
+    checkpoint_bucket_ptr bucket = std::make_shared<checkpoint_bucket>();
+    checkpoint_buckets.emplace(fingerprint, bucket);
+    return bucket;
+}
+
+std::vector<llama_paged_scheduler_impl::checkpoint_record_ptr>
+llama_paged_scheduler_impl::find_checkpoint_prefixes(
+        const checkpoint_bucket_ptr & bucket, const std::vector<llama_token> & tokens) const {
+    std::vector<checkpoint_record_ptr> result;
+    std::lock_guard<std::mutex> lock(bucket->mutex);
+    const checkpoint_prefix_node * node = &bucket->root;
+    for (llama_token token : tokens) {
+        const auto child = node->children.find(token);
+        if (child == node->children.end()) {
+            break;
+        }
+        node = child->second.get();
+        if (node->record) {
+            result.push_back(node->record);
+        }
+    }
+    std::reverse(result.begin(), result.end());
+    return result;
+}
+
+void llama_paged_scheduler_impl::remove_checkpoint_record(
+        const checkpoint_bucket_ptr & bucket, const checkpoint_record_ptr & record) {
+    std::lock_guard<std::mutex> lock(bucket->mutex);
+    checkpoint_prefix_node * node = &bucket->root;
+    for (llama_token token : record->tokens) {
+        const auto child = node->children.find(token);
+        if (child == node->children.end()) {
+            return;
+        }
+        node = child->second.get();
+    }
+    if (node->record == record) {
+        node->record.reset();
     }
 }
 
@@ -619,6 +738,14 @@ bool llama_paged_scheduler_impl::wait_for_checkpoint_build_gate_for_test(uint32_
     });
 }
 
+bool llama_paged_scheduler_impl::wait_for_checkpoint_builders_for_test(
+        uint32_t builders, uint32_t timeout_ms) {
+    std::unique_lock<std::mutex> lock(checkpoint_mutex);
+    return checkpoint_test_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&] {
+        return checkpoint_builders_at_gate >= builders;
+    });
+}
+
 bool llama_paged_scheduler_impl::wait_for_checkpoint_metrics_for_test(
         uint64_t build_waiters, uint64_t wait_timeouts, uint32_t timeout_ms) {
     std::unique_lock<std::mutex> lock(checkpoint_mutex);
@@ -634,90 +761,146 @@ bool llama_paged_scheduler_impl::publish_checkpoint(
         const llama_checkpoint_payload & payload,
         llama_checkpoint_key * key_out,
         llama_checkpoint_publish_fault fault) {
-    llama_sequence_group * source = get_group_from_id(request_id);
-    if (!source || n_tokens == 0 || source->n_past < n_tokens || source->logical_seq.size() < n_tokens ||
-        fingerprint.empty() || !payload.recurrent_complete || !payload.draft_complete ||
-        !payload.speculative_complete) {
+    if (n_tokens == 0 || fingerprint.empty() || !payload.recurrent_complete ||
+        !payload.draft_complete || !payload.speculative_complete) {
         std::lock_guard<std::mutex> lock(checkpoint_mutex);
         checkpoint_metrics.publication_failures++;
         return false;
     }
 
-    std::vector<llama_token> tokens(source->logical_seq.begin(), source->logical_seq.begin() + n_tokens);
-    llama_checkpoint_key predecessor = {};
-    bool has_predecessor = false;
-    uint32_t depth = 1;
+    std::vector<llama_token> tokens;
+    checkpoint_build_source_ptr source_lifetime;
     {
-        std::lock_guard<std::mutex> lock(checkpoint_mutex);
-        checkpoint_record_ptr parent;
-        for (const auto & item : checkpoints) {
-            const checkpoint_record_ptr & candidate = item.second;
-            if (candidate->state != checkpoint_state::READY || candidate->fingerprint != fingerprint ||
-                candidate->tokens.size() >= tokens.size() ||
-                !std::equal(candidate->tokens.begin(), candidate->tokens.end(), tokens.begin())) {
-                continue;
-            }
-            if (!parent || candidate->tokens.size() > parent->tokens.size()) {
-                parent = candidate;
-            }
+        std::lock_guard<std::recursive_mutex> request_lock(request_mutex);
+        const auto source_it = id_to_group.find(request_id);
+        const auto lifetime_it = request_build_sources.find(request_id);
+        if (source_it == id_to_group.end() || lifetime_it == request_build_sources.end() ||
+            source_it->second->n_past < n_tokens || source_it->second->logical_seq.size() < n_tokens) {
+            std::lock_guard<std::mutex> lock(checkpoint_mutex);
+            checkpoint_metrics.publication_failures++;
+            return false;
         }
-        if (parent) {
-            predecessor = parent->key;
-            has_predecessor = true;
-            depth = parent->depth + 1;
+        source_lifetime = lifetime_it->second;
+        tokens.assign(source_it->second->logical_seq.begin(), source_it->second->logical_seq.begin() + n_tokens);
+    }
+
+    const checkpoint_bucket_ptr bucket = get_checkpoint_bucket(fingerprint, true);
+    checkpoint_record_ptr record;
+    checkpoint_record_ptr predecessor_record;
+    bool new_record = false;
+    bool key_collision = false;
+    {
+        std::lock_guard<std::mutex> bucket_lock(bucket->mutex);
+        checkpoint_prefix_node * node = &bucket->root;
+        for (llama_token token : tokens) {
+            if (node->record) {
+                predecessor_record = node->record;
+            }
+            auto & child = node->children[token];
+            if (!child) {
+                child = std::make_unique<checkpoint_prefix_node>();
+            }
+            node = child.get();
+        }
+        record = node->record;
+        if (!record) {
+            record = std::make_shared<checkpoint_record>();
+            record->tokens = tokens;
+            record->fingerprint = fingerprint;
+            record->has_predecessor = predecessor_record != nullptr;
+            record->predecessor_record = predecessor_record;
+            record->depth = predecessor_record ? predecessor_record->depth + 1 : 1;
+            if (predecessor_record) {
+                record->predecessor = predecessor_record->key;
+            }
+            record->key = make_checkpoint_key(
+                fingerprint, tokens, predecessor_record ? &record->predecessor : nullptr);
+            {
+                std::lock_guard<std::mutex> lock(checkpoint_mutex);
+                if (force_digest_collision) {
+                    record->key.fill(0x5a);
+                }
+                const std::string key_string = checkpoint_key_string(record->key);
+                if (checkpoint_keys.count(key_string)) {
+                    checkpoint_metrics.equality_mismatches++;
+                    checkpoint_metrics.publication_failures++;
+                    key_collision = true;
+                } else {
+                    checkpoint_keys.emplace(key_string, record);
+                    checkpoint_records.insert(record);
+                    checkpoint_metrics.build_winners++;
+                }
+            }
+            if (!key_collision) {
+                node->record = record;
+                new_record = true;
+            }
         }
     }
 
-    llama_checkpoint_key key = make_checkpoint_key(fingerprint, tokens, has_predecessor ? &predecessor : nullptr);
-    {
-        std::lock_guard<std::mutex> lock(checkpoint_mutex);
-        if (force_digest_collision) {
-            key.fill(0x5a);
+    if (key_collision) {
+        if (key_out) {
+            *key_out = record->key;
         }
+        return false;
     }
+
     if (key_out) {
-        *key_out = key;
+        *key_out = record->key;
     }
-    const std::string key_string = checkpoint_key_string(key);
-    checkpoint_record_ptr record;
-    {
-        std::unique_lock<std::mutex> lock(checkpoint_mutex);
-        const auto existing = checkpoints.find(key_string);
-        if (existing != checkpoints.end()) {
-            record = existing->second;
-            if (record->state == checkpoint_state::BUILDING) {
+
+    if (!new_record) {
+        bool waited = false;
+        {
+            std::lock_guard<std::mutex> record_lock(record->mutex);
+            waited = record->state == checkpoint_state::BUILDING;
+        }
+        if (waited) {
+            {
+                std::lock_guard<std::mutex> lock(checkpoint_mutex);
                 checkpoint_metrics.build_waiters++;
                 checkpoint_test_cv.notify_all();
-                if (!record->ready_cv.wait_for(lock, std::chrono::milliseconds(50), [&] {
-                        return record->state != checkpoint_state::BUILDING;
-                    })) {
+            }
+            std::unique_lock<std::mutex> record_lock(record->mutex);
+            if (!record->ready_cv.wait_for(record_lock, std::chrono::milliseconds(50), [&] {
+                    return record->state != checkpoint_state::BUILDING;
+                })) {
+                record_lock.unlock();
+                {
+                    std::lock_guard<std::mutex> lock(checkpoint_mutex);
                     checkpoint_metrics.wait_timeouts++;
                     checkpoint_metrics.fallbacks++;
                     checkpoint_test_cv.notify_all();
-                    return false;
                 }
-            }
-            if (record->state == checkpoint_state::READY && record->resident && record->tokens == tokens &&
-                record->fingerprint == fingerprint) {
-                checkpoint_metrics.builds_coalesced++;
-                return true;
-            }
-            if (record->state == checkpoint_state::READY && !record->resident &&
-                record->tokens == tokens && record->fingerprint == fingerprint) {
-                checkpoints.erase(existing);
-            } else {
-                checkpoint_metrics.equality_mismatches++;
-                checkpoint_metrics.publication_failures++;
                 return false;
             }
         }
-        record = std::make_shared<checkpoint_record>();
-        record->key = key;
-        record->predecessor = predecessor;
-        record->has_predecessor = has_predecessor;
-        record->depth = depth;
-        checkpoints.emplace(key_string, record);
-        checkpoint_metrics.build_winners++;
+
+        bool coalesced = false;
+        bool rehydrate = false;
+        {
+            std::lock_guard<std::mutex> record_lock(record->mutex);
+            if (record->state == checkpoint_state::READY && record->resident) {
+                coalesced = true;
+            } else if (record->state == checkpoint_state::READY && !record->resident) {
+                record->state = checkpoint_state::BUILDING;
+                rehydrate = true;
+            }
+        }
+        if (coalesced) {
+            std::lock_guard<std::mutex> lock(checkpoint_mutex);
+            checkpoint_metrics.builds_coalesced++;
+            return true;
+        }
+        if (!rehydrate) {
+            std::lock_guard<std::mutex> lock(checkpoint_mutex);
+            checkpoint_metrics.publication_failures++;
+            return false;
+        }
+        {
+            std::lock_guard<std::mutex> lock(checkpoint_mutex);
+            checkpoint_metrics.build_winners++;
+        }
     }
 
     {
@@ -733,12 +916,10 @@ bool llama_paged_scheduler_impl::publish_checkpoint(
     llama_block_ids blocks;
     bool retained_pages = false;
     bool quota_reserved = false;
+    uint64_t host_bytes = 0;
     const auto fail_publication = [&]() {
-        if (retained_pages) {
-            kv_cache_manager->release_retained_block_ids(blocks);
-        }
-        std::lock_guard<std::mutex> lock(checkpoint_mutex);
         if (quota_reserved) {
+            std::lock_guard<std::mutex> lock(checkpoint_mutex);
             for (uint32_t block : blocks) {
                 auto page = checkpoint_page_refs.find(block);
                 GGML_ASSERT(page != checkpoint_page_refs.end() && page->second > 0);
@@ -746,21 +927,89 @@ bool llama_paged_scheduler_impl::publish_checkpoint(
                     checkpoint_page_refs.erase(page);
                 }
             }
-            GGML_ASSERT(checkpoint_resident_host_bytes >= record->host_bytes);
-            checkpoint_resident_host_bytes -= record->host_bytes;
+            GGML_ASSERT(checkpoint_resident_host_bytes >= host_bytes);
+            checkpoint_resident_host_bytes -= host_bytes;
             quota_reserved = false;
         }
-        record->state = checkpoint_state::FAILED;
-        checkpoint_metrics.publication_failures++;
-        checkpoint_metrics.rollbacks++;
-        record->ready_cv.notify_all();
-        checkpoints.erase(key_string);
+        if (retained_pages) {
+            kv_cache_manager->release_retained_block_ids(blocks);
+        }
+        llama_block_ids discarded_blocks;
+        llama_checkpoint_payload discarded_payload;
+        {
+            std::lock_guard<std::mutex> record_lock(record->mutex);
+            discarded_blocks = std::move(record->blocks);
+            discarded_payload = std::move(record->payload);
+            record->resident = false;
+            record->host_bytes = 0;
+            record->state = new_record ? checkpoint_state::FAILED : checkpoint_state::READY;
+            record->ready_cv.notify_all();
+        }
+        {
+            std::lock_guard<std::mutex> lock(checkpoint_mutex);
+            checkpoint_metrics.publication_failures++;
+            checkpoint_metrics.rollbacks++;
+            if (new_record) {
+                checkpoint_records.erase(record);
+                checkpoint_keys.erase(checkpoint_key_string(record->key));
+            }
+        }
+        if (new_record) {
+            remove_checkpoint_record(bucket, record);
+        }
         return false;
     };
 
-    if (fault == llama_checkpoint_publish_fault::TARGET ||
-        !kv_cache_manager->checkpoint_blocks(request_id, n_tokens, blocks)) {
+    if (source_lifetime->cancelled.load()) {
         return fail_publication();
+    }
+
+    if (record->has_predecessor) {
+        predecessor_record = record->predecessor_record.lock();
+        if (!predecessor_record) {
+            return fail_publication();
+        }
+        std::unique_lock<std::mutex> predecessor_lock(predecessor_record->mutex);
+        if (predecessor_record->state == checkpoint_state::BUILDING) {
+            predecessor_record->ready_cv.wait_for(predecessor_lock, std::chrono::seconds(5), [&] {
+                return predecessor_record->state != checkpoint_state::BUILDING;
+            });
+        }
+        if (predecessor_record->state != checkpoint_state::READY ||
+            predecessor_record->key != record->predecessor ||
+            predecessor_record->tokens.size() >= record->tokens.size() ||
+            !std::equal(predecessor_record->tokens.begin(), predecessor_record->tokens.end(), record->tokens.begin())) {
+            predecessor_lock.unlock();
+            return fail_publication();
+        }
+    }
+
+    {
+        std::lock_guard<std::recursive_mutex> request_lock(request_mutex);
+        const auto source_it = id_to_group.find(request_id);
+        const auto lifetime_it = request_build_sources.find(request_id);
+        if (fault == llama_checkpoint_publish_fault::TARGET || source_lifetime->cancelled.load() ||
+            source_it == id_to_group.end() || lifetime_it == request_build_sources.end() ||
+            lifetime_it->second != source_lifetime || source_it->second->n_past < n_tokens ||
+            source_it->second->logical_seq.size() < n_tokens ||
+            !std::equal(tokens.begin(), tokens.end(), source_it->second->logical_seq.begin()) ||
+            !kv_cache_manager->checkpoint_blocks(request_id, n_tokens, blocks) ||
+            !kv_cache_manager->retain_block_ids(blocks)) {
+            return fail_publication();
+        }
+        retained_pages = true;
+        if (n_tokens % block_size != 0 && source_it->second->n_past == n_tokens &&
+            source_it->second->n_prompt > n_tokens) {
+            if (!kv_cache_manager->cow_partial_tail(*source_it->second, n_tokens)) {
+                {
+                    std::lock_guard<std::mutex> lock(checkpoint_mutex);
+                    checkpoint_metrics.cow_failures++;
+                }
+                return fail_publication();
+            }
+            std::lock_guard<std::mutex> lock(checkpoint_mutex);
+            checkpoint_metrics.cow_copies++;
+        }
     }
 
     std::unordered_set<uint32_t> unique_new;
@@ -772,11 +1021,10 @@ bool llama_paged_scheduler_impl::publish_checkpoint(
             }
         }
     }
-    const uint64_t host_bytes = sizeof(checkpoint_record) + fingerprint.size() +
+    host_bytes = sizeof(checkpoint_record) + fingerprint.size() +
         tokens.size() * sizeof(llama_token) + blocks.size() * sizeof(uint32_t) +
         payload.recurrent.size() + payload.draft.size() + payload.speculative.size();
     evict_unpinned_checkpoints((uint32_t) unique_new.size(), host_bytes);
-    bool quota_exceeded = false;
     {
         std::lock_guard<std::mutex> lock(checkpoint_mutex);
         uint32_t still_new = 0;
@@ -787,34 +1035,16 @@ bool llama_paged_scheduler_impl::publish_checkpoint(
             checkpoint_resident_host_bytes + host_bytes > checkpoint_host_quota) {
             checkpoint_metrics.fallbacks++;
             checkpoint_metrics.admission_rejections++;
-            quota_exceeded = true;
         } else {
             for (uint32_t block : blocks) {
                 checkpoint_page_refs[block]++;
             }
-            record->host_bytes = host_bytes;
             checkpoint_resident_host_bytes += host_bytes;
             quota_reserved = true;
         }
     }
-    if (quota_exceeded) {
+    if (!quota_reserved) {
         return fail_publication();
-    }
-    if (!kv_cache_manager->retain_block_ids(blocks)) {
-        return fail_publication();
-    }
-    retained_pages = true;
-
-    if (n_tokens % block_size != 0 && source->n_past == n_tokens && source->n_prompt > n_tokens) {
-        if (!kv_cache_manager->cow_partial_tail(*source, n_tokens)) {
-            {
-                std::lock_guard<std::mutex> lock(checkpoint_mutex);
-                checkpoint_metrics.cow_failures++;
-            }
-            return fail_publication();
-        }
-        std::lock_guard<std::mutex> lock(checkpoint_mutex);
-        checkpoint_metrics.cow_copies++;
     }
 
     if (fault == llama_checkpoint_publish_fault::RECURRENT ||
@@ -822,19 +1052,34 @@ bool llama_paged_scheduler_impl::publish_checkpoint(
         fault == llama_checkpoint_publish_fault::SPECULATIVE ||
         fault == llama_checkpoint_publish_fault::TOKENS ||
         fault == llama_checkpoint_publish_fault::COMPATIBILITY ||
-        fault == llama_checkpoint_publish_fault::INTEGRITY) {
+        fault == llama_checkpoint_publish_fault::INTEGRITY ||
+        source_lifetime->cancelled.load()) {
         return fail_publication();
     }
 
-    record->tokens = std::move(tokens);
-    record->fingerprint = fingerprint;
-    record->blocks = blocks;
-    record->terminal_extent = n_tokens % block_size == 0 ? block_size : n_tokens % block_size;
-    record->payload = payload;
-    record->integrity = make_checkpoint_integrity(key, blocks, record->terminal_extent, payload);
+    const uint32_t terminal_extent = n_tokens % block_size == 0 ? block_size : n_tokens % block_size;
+    const llama_checkpoint_key integrity = make_checkpoint_integrity(record->key, blocks, terminal_extent, payload);
+    if (source_lifetime->cancelled.load()) {
+        return fail_publication();
+    }
     {
-        std::lock_guard<std::mutex> lock(checkpoint_mutex);
+        std::lock_guard<std::mutex> record_lock(record->mutex);
+        record->blocks = blocks;
+        record->terminal_extent = terminal_extent;
+        record->payload = payload;
+        record->integrity = integrity;
+        record->host_bytes = host_bytes;
         record->resident = true;
+    }
+    {
+        std::lock_guard<std::recursive_mutex> request_lock(request_mutex);
+        const auto lifetime_it = request_build_sources.find(request_id);
+        if (source_lifetime->cancelled.load() || lifetime_it == request_build_sources.end() ||
+            lifetime_it->second != source_lifetime) {
+            return fail_publication();
+        }
+        std::lock_guard<std::mutex> lock(checkpoint_mutex);
+        std::lock_guard<std::mutex> record_lock(record->mutex);
         record->last_access = ++checkpoint_clock;
         record->state = checkpoint_state::READY;
         checkpoint_metrics.publications++;
@@ -862,39 +1107,61 @@ bool llama_paged_scheduler_impl::queue_request_cached(
     }
 
     checkpoint_record_ptr selected;
+    const checkpoint_bucket_ptr bucket = get_checkpoint_bucket(fingerprint, false);
     {
         std::lock_guard<std::mutex> lock(checkpoint_mutex);
         checkpoint_metrics.lookups++;
-        for (const auto & item : checkpoints) {
-            const checkpoint_record_ptr & candidate = item.second;
-            if (candidate->state != checkpoint_state::READY || !candidate->resident ||
-                candidate->fingerprint != fingerprint || candidate->tokens.size() >= group.n_prompt) {
-                continue;
-            }
-            if (make_checkpoint_integrity(candidate->key, candidate->blocks,
-                    candidate->terminal_extent, candidate->payload) != candidate->integrity) {
-                checkpoint_metrics.publication_failures++;
-                checkpoint_metrics.fallbacks++;
-                continue;
-            }
-            const bool equal = std::equal(candidate->tokens.begin(), candidate->tokens.end(), group.logical_seq.begin());
-            if (!equal) {
-                if (force_digest_collision) {
-                    checkpoint_metrics.equality_mismatches++;
-                }
-                continue;
-            }
-            if (!selected || candidate->tokens.size() > selected->tokens.size()) {
-                selected = candidate;
+    }
+
+    const std::vector<checkpoint_record_ptr> candidates = bucket ?
+        find_checkpoint_prefixes(bucket, group.logical_seq) : std::vector<checkpoint_record_ptr>{};
+    for (const checkpoint_record_ptr & candidate : candidates) {
+        bool pinned = false;
+        {
+            std::lock_guard<std::mutex> lock(checkpoint_mutex);
+            std::lock_guard<std::mutex> record_lock(candidate->mutex);
+            if (candidate->state == checkpoint_state::READY && candidate->resident &&
+                candidate->tokens.size() < group.n_prompt) {
+                candidate->pins++;
+                candidate->last_access = ++checkpoint_clock;
+                pinned = true;
             }
         }
-        if (!selected) {
-            checkpoint_metrics.fallbacks++;
-            return false;
+        if (!pinned) {
+            continue;
         }
-        selected->pins++;
-        selected->last_access = ++checkpoint_clock;
-        request_checkpoint_pins[group.request_id] = selected;
+
+        bool valid = false;
+        {
+            std::lock_guard<std::mutex> record_lock(candidate->mutex);
+            valid = candidate->state == checkpoint_state::READY && candidate->resident &&
+                candidate->tokens.size() < group.n_prompt &&
+                std::equal(candidate->tokens.begin(), candidate->tokens.end(), group.logical_seq.begin()) &&
+                make_checkpoint_integrity(candidate->key, candidate->blocks,
+                    candidate->terminal_extent, candidate->payload) == candidate->integrity;
+            if (!valid) {
+                GGML_ASSERT(candidate->pins > 0);
+                candidate->pins--;
+            }
+        }
+        if (valid) {
+            selected = candidate;
+            std::lock_guard<std::mutex> lock(checkpoint_mutex);
+            request_checkpoint_pins[group.request_id] = selected;
+            break;
+        }
+        std::lock_guard<std::mutex> lock(checkpoint_mutex);
+        checkpoint_metrics.publication_failures++;
+        checkpoint_metrics.fallbacks++;
+    }
+
+    if (!selected) {
+        std::lock_guard<std::mutex> lock(checkpoint_mutex);
+        checkpoint_metrics.fallbacks++;
+        if (force_digest_collision) {
+            checkpoint_metrics.equality_mismatches++;
+        }
+        return false;
     }
 
     auto group_ptr = std::make_unique<llama_sequence_group>(std::move(group));
@@ -912,7 +1179,11 @@ bool llama_paged_scheduler_impl::queue_request_cached(
 
     group_ptr->n_past = selected->tokens.size();
     group_ptr->n_decoded = 0;
-    id_to_group[group_ptr->request_id] = group_ptr.get();
+    {
+        std::lock_guard<std::recursive_mutex> request_lock(request_mutex);
+        id_to_group[group_ptr->request_id] = group_ptr.get();
+        request_build_sources[group_ptr->request_id] = std::make_shared<checkpoint_build_source>();
+    }
     const int32_t request_id = group_ptr->request_id;
     set_waiting(std::move(group_ptr));
     if (view) {
@@ -1261,16 +1532,6 @@ void llama_paged_scheduler_impl::populate_batch_from(const llama_sequence_group_
     curr_info.n_seq            = batch_size;
     curr_info.n_tokens         = total_tokens;
     curr_info.n_blocks_per_seq = max_blocks;
-    {
-        std::lock_guard<std::mutex> lock(checkpoint_mutex);
-        const std::array<int32_t, 3> signature = { batch_size, total_tokens, max_blocks };
-        if (graph_signature == signature) {
-            checkpoint_metrics.graph_reuses++;
-        } else {
-            checkpoint_metrics.graph_rebuilds++;
-            graph_signature = signature;
-        }
-    }
 
     curr_info.write_slots   = new int32_t[total_tokens];
     curr_info.block_table   = new int32_t[batch_size * max_blocks];

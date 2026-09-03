@@ -4,10 +4,12 @@
 
 #include <clocale>
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -131,8 +133,10 @@ class llama_paged_scheduler_impl {
     void set_checkpoint_quotas_for_test(uint32_t page_quota, uint64_t host_quota);
     void set_checkpoint_build_gate_for_test(bool closed);
     bool wait_for_checkpoint_build_gate_for_test(uint32_t timeout_ms);
+    bool wait_for_checkpoint_builders_for_test(uint32_t builders, uint32_t timeout_ms);
     bool wait_for_checkpoint_metrics_for_test(uint64_t build_waiters, uint64_t wait_timeouts,
                                               uint32_t timeout_ms);
+    void record_graph_decision(bool reused);
     void set_request_paused(int32_t request_id, bool paused);
     uint32_t checkpoint_pin_depth(int32_t request_id) const;
     llama_block_ids request_block_ids(int32_t request_id) const;
@@ -187,8 +191,10 @@ class llama_paged_scheduler_impl {
 
     enum class checkpoint_state { BUILDING, READY, FAILED };
     struct checkpoint_record {
+        mutable std::mutex mutex;
         llama_checkpoint_key key = {};
         llama_checkpoint_key predecessor = {};
+        std::weak_ptr<checkpoint_record> predecessor_record;
         bool has_predecessor = false;
         checkpoint_state state = checkpoint_state::BUILDING;
         std::vector<llama_token> tokens;
@@ -206,8 +212,30 @@ class llama_paged_scheduler_impl {
     };
 
     using checkpoint_record_ptr = std::shared_ptr<checkpoint_record>;
+    struct checkpoint_prefix_node {
+        std::unordered_map<llama_token, std::unique_ptr<checkpoint_prefix_node>> children;
+        checkpoint_record_ptr record;
+    };
+    struct checkpoint_bucket {
+        mutable std::mutex mutex;
+        checkpoint_prefix_node root;
+    };
+    using checkpoint_bucket_ptr = std::shared_ptr<checkpoint_bucket>;
+
+    struct checkpoint_build_source {
+        std::atomic<bool> cancelled{false};
+    };
+    using checkpoint_build_source_ptr = std::shared_ptr<checkpoint_build_source>;
+
+    checkpoint_bucket_ptr get_checkpoint_bucket(const std::string & fingerprint, bool create);
+    std::vector<checkpoint_record_ptr> find_checkpoint_prefixes(
+            const checkpoint_bucket_ptr & bucket, const std::vector<llama_token> & tokens) const;
+    void remove_checkpoint_record(const checkpoint_bucket_ptr & bucket, const checkpoint_record_ptr & record);
+
     mutable std::mutex checkpoint_mutex;
-    std::unordered_map<std::string, checkpoint_record_ptr> checkpoints;
+    std::unordered_map<std::string, checkpoint_bucket_ptr> checkpoint_buckets;
+    std::unordered_map<std::string, checkpoint_record_ptr> checkpoint_keys;
+    std::unordered_set<checkpoint_record_ptr> checkpoint_records;
     std::unordered_map<int32_t, checkpoint_record_ptr> request_checkpoint_pins;
     std::unordered_set<int32_t> paused_requests;
     std::unordered_map<uint32_t, uint32_t> checkpoint_page_refs;
@@ -220,7 +248,9 @@ class llama_paged_scheduler_impl {
     bool checkpoint_build_gate_closed = false;
     uint32_t checkpoint_builders_at_gate = 0;
     std::condition_variable checkpoint_test_cv;
-    std::array<int32_t, 3> graph_signature = { -1, -1, -1 };
+
+    mutable std::recursive_mutex request_mutex;
+    std::unordered_map<int32_t, checkpoint_build_source_ptr> request_build_sources;
 
 
     int32_t priority_request_id = -1;

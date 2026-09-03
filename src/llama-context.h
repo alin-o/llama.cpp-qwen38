@@ -242,6 +242,9 @@ private:
 public:
     uint32_t graph_max_nodes(uint32_t n_tokens) const;
 
+    using paged_graph_decision_callback = void (*)(bool reused, void * user_data);
+    void set_paged_graph_decision_callback(paged_graph_decision_callback callback, void * user_data);
+
     // can reuse the llm_graph_result instance of the context (for example to update a memory module)
     llm_graph_result * get_gf_res_reserve() const;
 
@@ -378,6 +381,8 @@ private:
 
     // env: LLAMA_GRAPH_REUSE_DISABLE
     bool graph_reuse_disable = false;
+    paged_graph_decision_callback paged_graph_decision_cb = nullptr;
+    void * paged_graph_decision_data = nullptr;
 
     // perf
     mutable int64_t t_start_us  = 0;

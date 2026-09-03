@@ -1269,12 +1269,15 @@ TEST(test_cumulative_checkpoint_cross_slot_sharing_and_cow) {
     EXPECT_TRUE(attached_a->block_table[1] == attached_b->block_table[1]);
     EXPECT_TRUE(attached_a->block_table[2] != attached_b->block_table[2]);
 
+    fixture.sched->record_graph_decision(false);
+    fixture.sched->record_graph_decision(true);
     const llama_checkpoint_metrics metrics = fixture.sched->get_checkpoint_metrics();
     EXPECT_EQ(metrics.hits, 4u);
     EXPECT_EQ(metrics.hit_tokens, 100u);
     EXPECT_EQ(metrics.suffix_tokens, 20u);
     EXPECT_TRUE(metrics.cow_copies >= 3);
-    EXPECT_TRUE(metrics.graph_rebuilds >= 1);
+    EXPECT_EQ(metrics.graph_rebuilds, 1u);
+    EXPECT_EQ(metrics.graph_reuses, 1u);
 
     fixture.sched->remove_request(3);
     fixture.sched->remove_request(4);
@@ -1496,6 +1499,97 @@ TEST(test_cumulative_checkpoint_pin_evict_cancel_race) {
     fixture.kv->free_blocks(reclaimed);
     EXPECT_TRUE(fixture.kv->get_num_free_gpu_blocks() == 8u);
     llama_batch_free(batch);
+}
+
+TEST(test_cumulative_checkpoint_overlapping_lineage_and_builder_cancellation) {
+    const auto evaluate_source = [](paged_test_fixture & fixture, int32_t request_id, uint32_t n_tokens) {
+        llama_sequence_group source = make_group(request_id, n_tokens);
+        for (uint32_t i = 0; i < source.n_prompt; ++i) {
+            source.logical_seq[i] = i;
+        }
+        EXPECT_TRUE(fixture.sched->queue_request(std::move(source)));
+        llama_batch batch = {};
+        EXPECT_TRUE(fixture.sched->step(batch) == llama_scheduler_status::OK);
+        const int8_t keep_running[] = { 0 };
+        fixture.sched->update(batch, { 42 }, { n_tokens }, keep_running);
+        llama_batch_free(batch);
+    };
+
+    llama_checkpoint_payload payload;
+    payload.recurrent = { 1 };
+    payload.draft = { 2 };
+    payload.speculative = { 3 };
+
+    auto concurrent = make_fixture(/*n_ctx=*/128, /*block_size=*/16, /*n_batch=*/64,
+                                   /*n_gpu_blocks=*/16, /*n_cpu_blocks=*/2);
+    evaluate_source(concurrent, 0, 40);
+    concurrent.sched->set_checkpoint_build_gate_for_test(true);
+    llama_checkpoint_key concurrent_short = {};
+    llama_checkpoint_key concurrent_long = {};
+    bool short_published = false;
+    bool long_published = false;
+    std::thread short_builder([&] {
+        short_published = concurrent.sched->publish_checkpoint(
+            0, 16, "overlapping-lineage", payload, &concurrent_short);
+    });
+    EXPECT_TRUE(concurrent.sched->wait_for_checkpoint_builders_for_test(1, 1000));
+    std::thread long_builder([&] {
+        long_published = concurrent.sched->publish_checkpoint(
+            0, 32, "overlapping-lineage", payload, &concurrent_long);
+    });
+    EXPECT_TRUE(concurrent.sched->wait_for_checkpoint_builders_for_test(2, 1000));
+    concurrent.sched->set_checkpoint_build_gate_for_test(false);
+    short_builder.join();
+    long_builder.join();
+    EXPECT_TRUE(short_published);
+    EXPECT_TRUE(long_published);
+
+    auto sequential = make_fixture(/*n_ctx=*/128, /*block_size=*/16, /*n_batch=*/64,
+                                   /*n_gpu_blocks=*/16, /*n_cpu_blocks=*/2);
+    evaluate_source(sequential, 0, 40);
+    llama_checkpoint_key sequential_short = {};
+    llama_checkpoint_key sequential_long = {};
+    EXPECT_TRUE(sequential.sched->publish_checkpoint(
+        0, 16, "overlapping-lineage", payload, &sequential_short));
+    EXPECT_TRUE(sequential.sched->publish_checkpoint(
+        0, 32, "overlapping-lineage", payload, &sequential_long));
+    EXPECT_TRUE(concurrent_short == sequential_short);
+    EXPECT_TRUE(concurrent_long == sequential_long);
+
+    llama_sequence_group attached = make_group(/*request_id=*/1, /*n_prompt=*/36);
+    for (uint32_t i = 0; i < 32; ++i) {
+        attached.logical_seq[i] = i;
+    }
+    uint32_t used = 0;
+    EXPECT_TRUE(concurrent.sched->queue_request_cached(
+        std::move(attached), "overlapping-lineage", nullptr, &used));
+    EXPECT_EQ(used, 32u);
+    concurrent.sched->remove_request(1);
+
+    auto cancelled = make_fixture(/*n_ctx=*/128, /*block_size=*/16, /*n_batch=*/64,
+                                  /*n_gpu_blocks=*/8, /*n_cpu_blocks=*/2);
+    evaluate_source(cancelled, 0, 18);
+    cancelled.sched->set_checkpoint_build_gate_for_test(true);
+    bool cancelled_published = true;
+    std::thread cancelled_builder([&] {
+        cancelled_published = cancelled.sched->publish_checkpoint(
+            0, 18, "cancelled-builder", payload);
+    });
+    EXPECT_TRUE(cancelled.sched->wait_for_checkpoint_builders_for_test(1, 1000));
+    cancelled.sched->remove_request(0);
+    cancelled.sched->set_checkpoint_build_gate_for_test(false);
+    cancelled_builder.join();
+    EXPECT_FALSE(cancelled_published);
+    EXPECT_EQ(cancelled.sched->get_checkpoint_metrics().records, 0u);
+    EXPECT_EQ(cancelled.sched->get_checkpoint_metrics().publications, 0u);
+    EXPECT_EQ(cancelled.kv->get_num_free_gpu_blocks(), 8u);
+
+    llama_sequence_group miss = make_group(/*request_id=*/2, /*n_prompt=*/24);
+    for (uint32_t i = 0; i < 18; ++i) {
+        miss.logical_seq[i] = i;
+    }
+    EXPECT_FALSE(cancelled.sched->queue_request_cached(
+        std::move(miss), "cancelled-builder", nullptr, nullptr));
 }
 
 TEST(test_cumulative_checkpoint_cow_failure_and_repeated_residency_cycles) {
@@ -3372,6 +3466,7 @@ int main(int argc, char ** argv) {
     RUN(test_cumulative_checkpoint_cross_slot_sharing_and_cow);
     RUN(test_cumulative_checkpoint_atomic_publication_faults_and_single_flight);
     RUN(test_cumulative_checkpoint_pin_evict_cancel_race);
+    RUN(test_cumulative_checkpoint_overlapping_lineage_and_builder_cancellation);
     RUN(test_cumulative_checkpoint_cow_failure_and_repeated_residency_cycles);
     RUN(test_scheduler_evicts_retained_prefix_under_pressure);
     RUN(test_scheduler_reports_active_prefix_recomputation);

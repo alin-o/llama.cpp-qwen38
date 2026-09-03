@@ -8,14 +8,24 @@
 
 struct llama_paged_scheduler {
     llama_paged_scheduler_impl impl;
+    llama_context * ctx;
 
     llama_paged_scheduler(
             uint32_t                  n_ctx,
             uint32_t                  block_sz,
             uint32_t                  n_batch,
             llama_kv_cache_paged *    kv_manager,
-            llama_memory_recurrent *  recurrent_manager) :
-        impl(n_ctx, block_sz, n_batch, kv_manager, recurrent_manager) {}
+            llama_memory_recurrent *  recurrent_manager,
+            llama_context *           ctx) :
+        impl(n_ctx, block_sz, n_batch, kv_manager, recurrent_manager), ctx(ctx) {
+        ctx->set_paged_graph_decision_callback([](bool reused, void * user_data) {
+            static_cast<llama_paged_scheduler_impl *>(user_data)->record_graph_decision(reused);
+        }, &impl);
+    }
+
+    ~llama_paged_scheduler() {
+        ctx->set_paged_graph_decision_callback(nullptr, nullptr);
+    }
 };
 
 LLAMA_API struct llama_paged_scheduler * llama_paged_scheduler_init(struct llama_context * ctx) {
@@ -47,7 +57,7 @@ LLAMA_API struct llama_paged_scheduler * llama_paged_scheduler_init(struct llama
     GGML_ASSERT(n_batch == ctx->n_ubatch() && "kv_paged requires n_batch == n_ubatch.");
 
     try {
-        return new llama_paged_scheduler(n_ctx, block_sz, n_batch, paged_kv, recurrent);
+        return new llama_paged_scheduler(n_ctx, block_sz, n_batch, paged_kv, recurrent, ctx);
     } catch (const std::exception & e) {
         LLAMA_LOG_ERROR("%s: Error when creating llama_paged_scheduler: %s\n", __func__, e.what());
         return nullptr;

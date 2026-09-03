@@ -1407,7 +1407,12 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     // in order to correctly reuse a graph, it's full topology has to be uniquely determined by these parameters
     const auto gparams = graph_params(res, ubatch, mctx, gtype);
 
-    if (!graph_reuse_disable && res->can_reuse(gparams)) {
+    const bool graph_reused = !graph_reuse_disable && res->can_reuse(gparams);
+    if (paged_graph_decision_cb && cparams.kv_paged) {
+        paged_graph_decision_cb(graph_reused, paged_graph_decision_data);
+    }
+
+    if (graph_reused) {
         //LLAMA_LOG_DEBUG("%s: reusing previous graph\n", __func__);
 
         // with pipeline parallelism, the previous graph_compute_async may still be running
@@ -1463,6 +1468,12 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     ret = GGML_STATUS_SUCCESS;
 
     return res;
+}
+
+void llama_context::set_paged_graph_decision_callback(
+        paged_graph_decision_callback callback, void * user_data) {
+    paged_graph_decision_cb = callback;
+    paged_graph_decision_data = user_data;
 }
 
 int llama_context::encode(const llama_batch & batch_inp) {
