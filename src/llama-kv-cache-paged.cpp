@@ -264,6 +264,100 @@ bool llama_kv_cache_paged::release_seq_tail(llama_seq_id seq_id, uint32_t keep_t
     return true;
 }
 
+bool llama_kv_cache_paged::retain_block_ids(const llama_block_ids & block_ids) {
+    return block_manager.retain_blocks(block_ids);
+}
+
+void llama_kv_cache_paged::release_retained_block_ids(const llama_block_ids & block_ids) {
+    release_block_ids(block_ids);
+}
+
+bool llama_kv_cache_paged::checkpoint_blocks(
+        llama_seq_id seq_id, uint32_t n_tokens, llama_block_ids & block_ids) const {
+    const auto it = sequence_blocks.find(seq_id);
+    const size_t count = (n_tokens + block_size - 1) / block_size;
+    if (n_tokens == 0 || it == sequence_blocks.end() || it->second.size() < count ||
+        seq_pos_min(seq_id) != 0 || seq_pos_max(seq_id) < (llama_pos) n_tokens - 1) {
+        return false;
+    }
+    block_ids.assign(it->second.begin(), it->second.begin() + count);
+    return std::all_of(block_ids.begin(), block_ids.end(), [&](uint32_t id) {
+        return block_manager.is_gpu(id) && block_manager.is_allocated(id);
+    });
+}
+
+void llama_kv_cache_paged::do_gpu_block_copy(uint32_t src_id, uint32_t dst_id) {
+    GGML_ASSERT(block_manager.is_gpu(src_id) && block_manager.is_gpu(dst_id));
+    std::vector<uint8_t> staging(std::max(block_bytes_k, block_bytes_v));
+    for (uint32_t physical = 0; physical < physical_to_layer.size(); ++physical) {
+        ggml_backend_tensor_get(k_gpu_layers[physical], staging.data(), (size_t) src_id * block_bytes_k, block_bytes_k);
+        ggml_backend_tensor_set(k_gpu_layers[physical], staging.data(), (size_t) dst_id * block_bytes_k, block_bytes_k);
+        ggml_backend_tensor_get(v_gpu_layers[physical], staging.data(), (size_t) src_id * block_bytes_v, block_bytes_v);
+        ggml_backend_tensor_set(v_gpu_layers[physical], staging.data(), (size_t) dst_id * block_bytes_v, block_bytes_v);
+    }
+}
+
+bool llama_kv_cache_paged::cow_partial_tail(llama_sequence_group & group, uint32_t n_tokens) {
+    if (n_tokens == 0 || n_tokens % block_size == 0) {
+        return true;
+    }
+    register_group(group);
+    const size_t logical_block = n_tokens / block_size;
+    if (logical_block >= group.block_table.size()) {
+        return false;
+    }
+    llama_block_ids replacement = block_manager.checkout_gpu_blocks(1);
+    if (replacement.size() != 1) {
+        return false;
+    }
+    try {
+        do_gpu_block_copy(group.block_table[logical_block], replacement[0]);
+    } catch (...) {
+        block_manager.release_gpu_blocks(replacement);
+        return false;
+    }
+    const uint32_t shared = group.block_table[logical_block];
+    group.block_table[logical_block] = replacement[0];
+    sequence_blocks[group.request_id] = group.block_table;
+    release_block_ids({ shared });
+    return true;
+}
+
+bool llama_kv_cache_paged::attach_checkpoint(
+        llama_sequence_group & group, const llama_block_ids & block_ids,
+        uint32_t n_tokens, bool private_writer, bool * did_cow) {
+    if (did_cow) {
+        *did_cow = false;
+    }
+    if (n_tokens == 0 || block_ids.size() != (n_tokens + block_size - 1) / block_size ||
+        sequence_blocks.count(group.request_id) || sequence_groups.count(group.request_id)) {
+        return false;
+    }
+    if (!block_manager.retain_blocks(block_ids)) {
+        return false;
+    }
+
+    group.block_table = block_ids;
+    sequence_blocks[group.request_id] = block_ids;
+    sequence_groups[group.request_id] = &group;
+    sequence_positions[group.request_id] = { 0, (llama_pos) n_tokens - 1 };
+
+    if (private_writer && n_tokens % block_size != 0) {
+        if (!cow_partial_tail(group, n_tokens)) {
+            seq_rm(group.request_id, -1, -1);
+            return false;
+        }
+        if (did_cow) {
+            *did_cow = true;
+        }
+    }
+    return true;
+}
+
+uint32_t llama_kv_cache_paged::get_block_ref_count(uint32_t block_id) const {
+    return block_manager.ref_count(block_id);
+}
+
 
 void llama_kv_cache_paged::do_block_copy(const llama_block_ids & src_ids,
                                          const llama_block_ids & new_ids,

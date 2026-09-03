@@ -890,6 +890,11 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
     // parse all CLI args now, so that -hf is available below for remote preset resolution
     parse_cli_args();
 
+    if (params.checkpoint_test_controls && params.hostname != "127.0.0.1" &&
+        params.hostname != "localhost" && params.hostname != "::1") {
+        throw std::invalid_argument("--checkpoint-test-controls requires a loopback --host");
+    }
+
     postprocess_cpu_params(params.cpuparams,       nullptr);
     postprocess_cpu_params(params.cpuparams_batch, &params.cpuparams);
 
@@ -1638,13 +1643,33 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         {"-c", "--ctx-size"}, "N",
         string_format("size of the prompt context (default: %d, 0 = loaded from model)", params.n_ctx),
         [](common_params & params, int value) {
+            if (value != 0 && params.n_ctx_per_request != 0) {
+                throw std::invalid_argument("--ctx-size and --ctx-size-per-request are mutually exclusive");
+            }
             params.n_ctx = value;
+            params.n_ctx_set = true;
             if (value == 0) {
                 // disable context reduction in llama_params_fit if the user explicitly requests the full context size:
                 params.fit_params_min_ctx = UINT32_MAX;
             }
         }
     ).set_env("LLAMA_ARG_CTX_SIZE"));
+    add_opt(common_arg(
+        {"--ctx-size-per-request"}, "N",
+        "logical context limit for each request in causal paged mode (default: 0 = legacy --ctx-size semantics)",
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("ctx-size-per-request must be non-negative");
+            }
+            if (value != 0 && params.n_ctx_set && params.n_ctx != 0) {
+                throw std::invalid_argument("--ctx-size-per-request and --ctx-size are mutually exclusive");
+            }
+            params.n_ctx_per_request = value;
+            if (value != 0) {
+                params.fit_params_min_ctx = UINT32_MAX;
+            }
+        }
+    ).set_env("LLAMA_ARG_CTX_SIZE_PER_REQUEST"));
     add_opt(common_arg(
         {"-n", "--predict", "--n-predict"}, "N",
         string_format(
@@ -3631,6 +3656,13 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.endpoint_slots = value;
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_ENDPOINT_SLOTS"));
+    add_opt(common_arg(
+        {"--checkpoint-test-controls"},
+        "enable loopback-only checkpoint pressure-test latch controls (default: disabled)",
+        [](common_params & params) {
+            params.checkpoint_test_controls = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
         {"--slot-save-path"}, "PATH",
         "path to save slot kv cache (default: disabled)",

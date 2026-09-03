@@ -244,6 +244,10 @@ int llama_server(common_params & params, int argc, char ** argv) {
     ctx_http.post("/chat/completions",         ex_wrapper(routes.post_chat_completions));
     ctx_http.post("/v1/chat/completions",      ex_wrapper(routes.post_chat_completions));
     ctx_http.post("/v1/chat/completions/control", ex_wrapper(routes.post_control));
+    if (params.checkpoint_test_controls && !is_router_server) {
+        ctx_http.post("/checkpoint-test/latches/:checkpoint_test_latch/release",
+                ex_wrapper(routes.post_checkpoint_test_latch_release));
+    }
     ctx_http.post("/v1/responses",             ex_wrapper(routes.post_responses_oai));
     ctx_http.post("/responses",                ex_wrapper(routes.post_responses_oai));
     ctx_http.post("/v1/audio/transcriptions",  ex_wrapper(routes.post_transcriptions_oai));

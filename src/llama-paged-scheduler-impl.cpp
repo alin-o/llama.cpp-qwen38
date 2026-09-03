@@ -5,6 +5,73 @@
 #include "llama-impl.h"
 #include "llama-memory-recurrent.h"
 
+extern "C" {
+#include "../vendor/hash/sha256/sha256.h"
+}
+
+#include <chrono>
+#include <cstring>
+
+static std::string checkpoint_key_string(const llama_checkpoint_key & key) {
+    return std::string(reinterpret_cast<const char *>(key.data()), key.size());
+}
+
+static void checkpoint_hash_u32(sha256_t & hash, uint32_t value) {
+    const uint8_t bytes[] = {
+        (uint8_t) value, (uint8_t) (value >> 8), (uint8_t) (value >> 16), (uint8_t) (value >> 24),
+    };
+    sha256_update(&hash, bytes, sizeof(bytes));
+}
+
+static void checkpoint_hash_bytes(sha256_t & hash, const void * data, size_t size) {
+    checkpoint_hash_u32(hash, (uint32_t) size);
+    if (size > 0) {
+        sha256_update(&hash, static_cast<const uint8_t *>(data), size);
+    }
+}
+
+static llama_checkpoint_key make_checkpoint_key(
+        const std::string & fingerprint,
+        const std::vector<llama_token> & tokens,
+        const llama_checkpoint_key * predecessor) {
+    sha256_t hash;
+    sha256_init(&hash);
+    checkpoint_hash_u32(hash, 1);
+    static const char namespace_default[] = "default";
+    checkpoint_hash_bytes(hash, namespace_default, sizeof(namespace_default) - 1);
+    llama_checkpoint_key empty = {};
+    const llama_checkpoint_key & parent = predecessor ? *predecessor : empty;
+    sha256_update(&hash, parent.data(), parent.size());
+    checkpoint_hash_bytes(hash, fingerprint.data(), fingerprint.size());
+    checkpoint_hash_u32(hash, (uint32_t) tokens.size());
+    for (llama_token token : tokens) {
+        checkpoint_hash_u32(hash, (uint32_t) token);
+    }
+    llama_checkpoint_key result;
+    sha256_final(&hash, result.data());
+    return result;
+}
+
+static llama_checkpoint_key make_checkpoint_integrity(
+        const llama_checkpoint_key & key,
+        const llama_block_ids & blocks,
+        uint32_t terminal_extent,
+        const llama_checkpoint_payload & payload) {
+    sha256_t hash;
+    sha256_init(&hash);
+    sha256_update(&hash, key.data(), key.size());
+    checkpoint_hash_u32(hash, terminal_extent);
+    for (uint32_t block : blocks) {
+        checkpoint_hash_u32(hash, block);
+    }
+    checkpoint_hash_bytes(hash, payload.recurrent.data(), payload.recurrent.size());
+    checkpoint_hash_bytes(hash, payload.draft.data(), payload.draft.size());
+    checkpoint_hash_bytes(hash, payload.speculative.data(), payload.speculative.size());
+    llama_checkpoint_key result;
+    sha256_final(&hash, result.data());
+    return result;
+}
+
 llama_paged_scheduler_impl::llama_paged_scheduler_impl(
         uint32_t                 n_ctx,
         uint32_t                 block_sz,
@@ -16,7 +83,12 @@ llama_paged_scheduler_impl::llama_paged_scheduler_impl(
     n_batch(n_batch),
     kv_cache_manager(kv_manager),
     recurrent_manager(recurrent_manager),
-    curr_info{} {}
+    curr_info{} {
+    checkpoint_page_quota = std::min<uint32_t>(512, kv_cache_manager->get_num_gpu_blocks() * 3 / 8);
+    if (kv_cache_manager->get_num_gpu_blocks() >= 512) {
+        checkpoint_page_quota = std::max<uint32_t>(302, checkpoint_page_quota);
+    }
+}
 
 llama_paged_scheduler_impl::~llama_paged_scheduler_impl() {
     kv_cache_manager->set_paged_batch_info(nullptr);
@@ -30,6 +102,11 @@ llama_paged_scheduler_impl::~llama_paged_scheduler_impl() {
         kv_cache_manager->seq_rm(item.first, -1, -1);
         if (recurrent_manager) {
             recurrent_manager->seq_rm(item.first, -1, -1);
+        }
+    }
+    for (auto & item : checkpoints) {
+        if (item.second->resident) {
+            kv_cache_manager->release_retained_block_ids(item.second->blocks);
         }
     }
 }
@@ -196,7 +273,12 @@ bool llama_paged_scheduler_impl::queue_request(llama_sequence_group group, uint3
             recurrent_manager->seq_pos_max(group.request_id) == (llama_pos) n_past - 1;
 
         if (prefix_matches && blocks_match && positions_match && recurrent_matches &&
-            kv_cache_manager->release_seq_tail(group.request_id, n_past)) {
+            kv_cache_manager->release_seq_tail(group.request_id, n_past) &&
+            kv_cache_manager->cow_partial_tail(*old, n_past)) {
+            if (n_past % block_size != 0) {
+                std::lock_guard<std::mutex> lock(checkpoint_mutex);
+                checkpoint_metrics.cow_copies++;
+            }
             kv_cache_manager->set_seq_max_pos(group.request_id, n_past - 1);
             llama_sequence_group_ptr group_ptr = std::move(cached->second);
             retained.erase(cached);
@@ -300,6 +382,7 @@ bool llama_paged_scheduler_impl::finish(llama_sequence_group & group) {
         LLAMA_LOG_DEBUG("%s: Request: %d generated %d tokens.\n", __func__, group.request_id, group.n_decoded);
     }
     group.status = llama_sequence_group_status::FINISHED;
+    release_checkpoint_pin(group.request_id);
     checkpoint_before_last.erase(group.request_id);
     if (retain_on_finish.erase(group.request_id) > 0) {
         if (kv_cache_manager->release_seq_tail(group.request_id, group.n_past)) {
@@ -349,6 +432,8 @@ void llama_paged_scheduler_impl::complete_request(int32_t request_id) {
 void llama_paged_scheduler_impl::remove_request(int32_t request_id) {
     retain_on_finish.erase(request_id);
     checkpoint_before_last.erase(request_id);
+    release_checkpoint_pin(request_id);
+    set_request_paused(request_id, false);
     if (const auto it = retained.find(request_id); it != retained.end()) {
         kv_cache_manager->free_blocks(*it->second);
         if (recurrent_manager) {
@@ -377,6 +462,7 @@ bool llama_paged_scheduler_impl::is_retained(int32_t request_id) const {
 }
 
 llama_paged_cache_stats llama_paged_scheduler_impl::get_cache_stats() const {
+    const llama_checkpoint_metrics checkpoint = get_checkpoint_metrics();
     return {
         /* .block_size        = */ block_size,
         /* .n_gpu_blocks      = */ kv_cache_manager->get_num_gpu_blocks(),
@@ -384,7 +470,436 @@ llama_paged_cache_stats llama_paged_scheduler_impl::get_cache_stats() const {
         /* .n_cpu_blocks      = */ kv_cache_manager->get_num_cpu_blocks(),
         /* .n_cpu_blocks_free = */ kv_cache_manager->get_num_free_cpu_blocks(),
         /* .n_retained        = */ (uint32_t) retained.size(),
+        /* .checkpoint_records = */ (uint32_t) checkpoint.records,
+        /* .checkpoint_pages   = */ (uint32_t) checkpoint.resident_pages,
+        /* .checkpoint_pins    = */ (uint32_t) checkpoint.pins,
+        /* .checkpoint_hits    = */ checkpoint.hits,
+        /* .checkpoint_hit_tokens = */ checkpoint.hit_tokens,
+        /* .checkpoint_suffix_tokens = */ checkpoint.suffix_tokens,
+        /* .checkpoint_cow_copies = */ checkpoint.cow_copies,
+        /* .checkpoint_fallbacks = */ checkpoint.fallbacks,
+        /* .checkpoint_lookups = */ checkpoint.lookups,
+        /* .checkpoint_equality_mismatches = */ checkpoint.equality_mismatches,
+        /* .checkpoint_build_winners = */ checkpoint.build_winners,
+        /* .checkpoint_build_waiters = */ checkpoint.build_waiters,
+        /* .checkpoint_builds_coalesced = */ checkpoint.builds_coalesced,
+        /* .checkpoint_wait_timeouts = */ checkpoint.wait_timeouts,
+        /* .checkpoint_publications = */ checkpoint.publications,
+        /* .checkpoint_publication_failures = */ checkpoint.publication_failures,
+        /* .checkpoint_evictions = */ checkpoint.evictions,
+        /* .checkpoint_rollbacks = */ checkpoint.rollbacks,
+        /* .checkpoint_graph_reuses = */ checkpoint.graph_reuses,
+        /* .checkpoint_graph_rebuilds = */ checkpoint.graph_rebuilds,
+        /* .checkpoint_host_bytes = */ checkpoint.resident_host_bytes,
+        /* .checkpoint_host_quota_bytes = */ checkpoint.host_quota_bytes,
+        /* .checkpoint_admission_rejections = */ checkpoint.admission_rejections,
+        /* .checkpoint_logical_page_refs = */ checkpoint.logical_page_refs,
+        /* .checkpoint_page_reclamations = */ checkpoint.page_reclamations,
+        /* .checkpoint_cow_failures = */ checkpoint.cow_failures,
+        /* .checkpoint_restore_successes = */ checkpoint.restore_successes,
+        /* .checkpoint_restore_failures = */ checkpoint.restore_failures,
     };
+}
+
+llama_checkpoint_metrics llama_paged_scheduler_impl::get_checkpoint_metrics() const {
+    std::lock_guard<std::mutex> lock(checkpoint_mutex);
+    llama_checkpoint_metrics result = checkpoint_metrics;
+    result.records = checkpoints.size();
+    result.resident_pages = checkpoint_page_refs.size();
+    result.pins = request_checkpoint_pins.size();
+    result.resident_host_bytes = checkpoint_resident_host_bytes;
+    result.host_quota_bytes = checkpoint_host_quota;
+    result.logical_page_refs = 0;
+    for (const auto & item : checkpoints) {
+        if (item.second->resident) {
+            result.logical_page_refs += item.second->blocks.size();
+        }
+    }
+    return result;
+}
+
+void llama_paged_scheduler_impl::set_request_paused(int32_t request_id, bool paused) {
+    std::lock_guard<std::mutex> lock(checkpoint_mutex);
+    if (paused) {
+        paused_requests.insert(request_id);
+    } else {
+        paused_requests.erase(request_id);
+    }
+}
+
+uint32_t llama_paged_scheduler_impl::checkpoint_pin_depth(int32_t request_id) const {
+    std::lock_guard<std::mutex> lock(checkpoint_mutex);
+    const auto it = request_checkpoint_pins.find(request_id);
+    return it == request_checkpoint_pins.end() ? 0 : (uint32_t) it->second->tokens.size();
+}
+
+llama_block_ids llama_paged_scheduler_impl::request_block_ids(int32_t request_id) const {
+    const llama_sequence_group * group = get_group_from_id(request_id);
+    return group ? group->block_table : llama_block_ids{};
+}
+
+void llama_paged_scheduler_impl::release_checkpoint_pin(int32_t request_id) {
+    std::lock_guard<std::mutex> lock(checkpoint_mutex);
+    const auto it = request_checkpoint_pins.find(request_id);
+    if (it == request_checkpoint_pins.end()) {
+        return;
+    }
+    GGML_ASSERT(it->second->pins > 0);
+    it->second->pins--;
+    request_checkpoint_pins.erase(it);
+}
+
+void llama_paged_scheduler_impl::evict_unpinned_checkpoints(uint32_t pages_needed, uint64_t host_bytes_needed) {
+    std::vector<llama_block_ids> released;
+    std::unique_lock<std::mutex> lock(checkpoint_mutex);
+    while ((checkpoint_page_refs.size() + pages_needed > checkpoint_page_quota ||
+            checkpoint_resident_host_bytes + host_bytes_needed > checkpoint_host_quota)) {
+        checkpoint_record_ptr victim;
+        for (const auto & item : checkpoints) {
+            const checkpoint_record_ptr & candidate = item.second;
+            if (candidate->state != checkpoint_state::READY || !candidate->resident || candidate->pins != 0) {
+                continue;
+            }
+            if (!victim || candidate->last_access < victim->last_access ||
+                (candidate->last_access == victim->last_access && candidate->depth > victim->depth)) {
+                victim = candidate;
+            }
+        }
+        if (!victim) {
+            break;
+        }
+        released.push_back(victim->blocks);
+        for (uint32_t block : victim->blocks) {
+            auto page = checkpoint_page_refs.find(block);
+            GGML_ASSERT(page != checkpoint_page_refs.end() && page->second > 0);
+            if (--page->second == 0) {
+                checkpoint_page_refs.erase(page);
+                if (kv_cache_manager->get_block_ref_count(block) == 1) {
+                    checkpoint_metrics.page_reclamations++;
+                }
+            }
+        }
+        victim->resident = false;
+        GGML_ASSERT(checkpoint_resident_host_bytes >= victim->host_bytes);
+        checkpoint_resident_host_bytes -= victim->host_bytes;
+        victim->blocks.clear();
+        victim->payload = {};
+        victim->host_bytes = 0;
+        checkpoint_metrics.evictions++;
+    }
+    lock.unlock();
+    for (const llama_block_ids & blocks : released) {
+        kv_cache_manager->release_retained_block_ids(blocks);
+    }
+}
+
+void llama_paged_scheduler_impl::force_checkpoint_digest_for_test(bool enabled) {
+    std::lock_guard<std::mutex> lock(checkpoint_mutex);
+    force_digest_collision = enabled;
+}
+
+void llama_paged_scheduler_impl::set_checkpoint_quotas_for_test(uint32_t page_quota, uint64_t host_quota) {
+    std::lock_guard<std::mutex> lock(checkpoint_mutex);
+    checkpoint_page_quota = page_quota;
+    checkpoint_host_quota = host_quota;
+}
+
+bool llama_paged_scheduler_impl::publish_checkpoint(
+        int32_t request_id, uint32_t n_tokens,
+        const std::string & fingerprint,
+        const llama_checkpoint_payload & payload,
+        llama_checkpoint_key * key_out,
+        llama_checkpoint_publish_fault fault) {
+    llama_sequence_group * source = get_group_from_id(request_id);
+    if (!source || n_tokens == 0 || source->n_past < n_tokens || source->logical_seq.size() < n_tokens ||
+        fingerprint.empty() || !payload.recurrent_complete || !payload.draft_complete ||
+        !payload.speculative_complete) {
+        std::lock_guard<std::mutex> lock(checkpoint_mutex);
+        checkpoint_metrics.publication_failures++;
+        return false;
+    }
+
+    std::vector<llama_token> tokens(source->logical_seq.begin(), source->logical_seq.begin() + n_tokens);
+    llama_checkpoint_key predecessor = {};
+    bool has_predecessor = false;
+    uint32_t depth = 1;
+    {
+        std::lock_guard<std::mutex> lock(checkpoint_mutex);
+        checkpoint_record_ptr parent;
+        for (const auto & item : checkpoints) {
+            const checkpoint_record_ptr & candidate = item.second;
+            if (candidate->state != checkpoint_state::READY || candidate->fingerprint != fingerprint ||
+                candidate->tokens.size() >= tokens.size() ||
+                !std::equal(candidate->tokens.begin(), candidate->tokens.end(), tokens.begin())) {
+                continue;
+            }
+            if (!parent || candidate->tokens.size() > parent->tokens.size()) {
+                parent = candidate;
+            }
+        }
+        if (parent) {
+            predecessor = parent->key;
+            has_predecessor = true;
+            depth = parent->depth + 1;
+        }
+    }
+
+    llama_checkpoint_key key = make_checkpoint_key(fingerprint, tokens, has_predecessor ? &predecessor : nullptr);
+    {
+        std::lock_guard<std::mutex> lock(checkpoint_mutex);
+        if (force_digest_collision) {
+            key.fill(0x5a);
+        }
+    }
+    if (key_out) {
+        *key_out = key;
+    }
+    const std::string key_string = checkpoint_key_string(key);
+    checkpoint_record_ptr record;
+    {
+        std::unique_lock<std::mutex> lock(checkpoint_mutex);
+        const auto existing = checkpoints.find(key_string);
+        if (existing != checkpoints.end()) {
+            record = existing->second;
+            if (record->state == checkpoint_state::BUILDING) {
+                checkpoint_metrics.build_waiters++;
+                if (!record->ready_cv.wait_for(lock, std::chrono::milliseconds(50), [&] {
+                        return record->state != checkpoint_state::BUILDING;
+                    })) {
+                    checkpoint_metrics.wait_timeouts++;
+                    checkpoint_metrics.fallbacks++;
+                    return false;
+                }
+            }
+            if (record->state == checkpoint_state::READY && record->resident && record->tokens == tokens &&
+                record->fingerprint == fingerprint) {
+                checkpoint_metrics.builds_coalesced++;
+                return true;
+            }
+            if (record->state == checkpoint_state::READY && !record->resident &&
+                record->tokens == tokens && record->fingerprint == fingerprint) {
+                checkpoints.erase(existing);
+            } else {
+                checkpoint_metrics.equality_mismatches++;
+                checkpoint_metrics.publication_failures++;
+                return false;
+            }
+        }
+        record = std::make_shared<checkpoint_record>();
+        record->key = key;
+        record->predecessor = predecessor;
+        record->has_predecessor = has_predecessor;
+        record->depth = depth;
+        checkpoints.emplace(key_string, record);
+        checkpoint_metrics.build_winners++;
+    }
+
+    llama_block_ids blocks;
+    bool retained_pages = false;
+    bool quota_reserved = false;
+    const auto fail_publication = [&]() {
+        if (retained_pages) {
+            kv_cache_manager->release_retained_block_ids(blocks);
+        }
+        std::lock_guard<std::mutex> lock(checkpoint_mutex);
+        if (quota_reserved) {
+            for (uint32_t block : blocks) {
+                auto page = checkpoint_page_refs.find(block);
+                GGML_ASSERT(page != checkpoint_page_refs.end() && page->second > 0);
+                if (--page->second == 0) {
+                    checkpoint_page_refs.erase(page);
+                }
+            }
+            GGML_ASSERT(checkpoint_resident_host_bytes >= record->host_bytes);
+            checkpoint_resident_host_bytes -= record->host_bytes;
+            quota_reserved = false;
+        }
+        record->state = checkpoint_state::FAILED;
+        checkpoint_metrics.publication_failures++;
+        checkpoint_metrics.rollbacks++;
+        record->ready_cv.notify_all();
+        checkpoints.erase(key_string);
+        return false;
+    };
+
+    if (fault == llama_checkpoint_publish_fault::TARGET ||
+        !kv_cache_manager->checkpoint_blocks(request_id, n_tokens, blocks)) {
+        return fail_publication();
+    }
+
+    std::unordered_set<uint32_t> unique_new;
+    {
+        std::lock_guard<std::mutex> lock(checkpoint_mutex);
+        for (uint32_t block : blocks) {
+            if (!checkpoint_page_refs.count(block)) {
+                unique_new.insert(block);
+            }
+        }
+    }
+    const uint64_t host_bytes = sizeof(checkpoint_record) + fingerprint.size() +
+        tokens.size() * sizeof(llama_token) + blocks.size() * sizeof(uint32_t) +
+        payload.recurrent.size() + payload.draft.size() + payload.speculative.size();
+    evict_unpinned_checkpoints((uint32_t) unique_new.size(), host_bytes);
+    bool quota_exceeded = false;
+    {
+        std::lock_guard<std::mutex> lock(checkpoint_mutex);
+        uint32_t still_new = 0;
+        for (uint32_t block : blocks) {
+            still_new += checkpoint_page_refs.count(block) == 0;
+        }
+        if (checkpoint_page_refs.size() + still_new > checkpoint_page_quota ||
+            checkpoint_resident_host_bytes + host_bytes > checkpoint_host_quota) {
+            checkpoint_metrics.fallbacks++;
+            checkpoint_metrics.admission_rejections++;
+            quota_exceeded = true;
+        } else {
+            for (uint32_t block : blocks) {
+                checkpoint_page_refs[block]++;
+            }
+            record->host_bytes = host_bytes;
+            checkpoint_resident_host_bytes += host_bytes;
+            quota_reserved = true;
+        }
+    }
+    if (quota_exceeded) {
+        return fail_publication();
+    }
+    if (!kv_cache_manager->retain_block_ids(blocks)) {
+        return fail_publication();
+    }
+    retained_pages = true;
+
+    if (n_tokens % block_size != 0 && source->n_past == n_tokens && source->n_prompt > n_tokens) {
+        if (!kv_cache_manager->cow_partial_tail(*source, n_tokens)) {
+            {
+                std::lock_guard<std::mutex> lock(checkpoint_mutex);
+                checkpoint_metrics.cow_failures++;
+            }
+            return fail_publication();
+        }
+        std::lock_guard<std::mutex> lock(checkpoint_mutex);
+        checkpoint_metrics.cow_copies++;
+    }
+
+    if (fault == llama_checkpoint_publish_fault::RECURRENT ||
+        fault == llama_checkpoint_publish_fault::DRAFT ||
+        fault == llama_checkpoint_publish_fault::SPECULATIVE ||
+        fault == llama_checkpoint_publish_fault::TOKENS ||
+        fault == llama_checkpoint_publish_fault::COMPATIBILITY ||
+        fault == llama_checkpoint_publish_fault::INTEGRITY) {
+        return fail_publication();
+    }
+
+    record->tokens = std::move(tokens);
+    record->fingerprint = fingerprint;
+    record->blocks = blocks;
+    record->terminal_extent = n_tokens % block_size == 0 ? block_size : n_tokens % block_size;
+    record->payload = payload;
+    record->integrity = make_checkpoint_integrity(key, blocks, record->terminal_extent, payload);
+    {
+        std::lock_guard<std::mutex> lock(checkpoint_mutex);
+        record->resident = true;
+        record->last_access = ++checkpoint_clock;
+        record->state = checkpoint_state::READY;
+        checkpoint_metrics.publications++;
+        record->ready_cv.notify_all();
+    }
+    return true;
+}
+
+bool llama_paged_scheduler_impl::queue_request_cached(
+        llama_sequence_group group,
+        const std::string & fingerprint,
+        llama_checkpoint_view * view,
+        uint32_t * n_prefix_used) {
+    if (view) {
+        *view = {};
+    }
+    if (n_prefix_used) {
+        *n_prefix_used = 0;
+    }
+    if (group.n_prompt >= n_seq_max_ctx || group.logical_seq.size() < group.n_prompt) {
+        return false;
+    }
+    if (id_to_group.count(group.request_id)) {
+        remove_request(group.request_id);
+    }
+
+    checkpoint_record_ptr selected;
+    {
+        std::lock_guard<std::mutex> lock(checkpoint_mutex);
+        checkpoint_metrics.lookups++;
+        for (const auto & item : checkpoints) {
+            const checkpoint_record_ptr & candidate = item.second;
+            if (candidate->state != checkpoint_state::READY || !candidate->resident ||
+                candidate->fingerprint != fingerprint || candidate->tokens.size() >= group.n_prompt) {
+                continue;
+            }
+            if (make_checkpoint_integrity(candidate->key, candidate->blocks,
+                    candidate->terminal_extent, candidate->payload) != candidate->integrity) {
+                checkpoint_metrics.publication_failures++;
+                checkpoint_metrics.fallbacks++;
+                continue;
+            }
+            const bool equal = std::equal(candidate->tokens.begin(), candidate->tokens.end(), group.logical_seq.begin());
+            if (!equal) {
+                if (force_digest_collision) {
+                    checkpoint_metrics.equality_mismatches++;
+                }
+                continue;
+            }
+            if (!selected || candidate->tokens.size() > selected->tokens.size()) {
+                selected = candidate;
+            }
+        }
+        if (!selected) {
+            checkpoint_metrics.fallbacks++;
+            return false;
+        }
+        selected->pins++;
+        selected->last_access = ++checkpoint_clock;
+        request_checkpoint_pins[group.request_id] = selected;
+    }
+
+    auto group_ptr = std::make_unique<llama_sequence_group>(std::move(group));
+    bool did_cow = false;
+    if (!kv_cache_manager->attach_checkpoint(
+            *group_ptr, selected->blocks, (uint32_t) selected->tokens.size(), true, &did_cow)) {
+        release_checkpoint_pin(group_ptr->request_id);
+        std::lock_guard<std::mutex> lock(checkpoint_mutex);
+        checkpoint_metrics.cow_failures += selected->terminal_extent != block_size;
+        checkpoint_metrics.restore_failures++;
+        checkpoint_metrics.rollbacks++;
+        checkpoint_metrics.fallbacks++;
+        return false;
+    }
+
+    group_ptr->n_past = selected->tokens.size();
+    group_ptr->n_decoded = 0;
+    id_to_group[group_ptr->request_id] = group_ptr.get();
+    const int32_t request_id = group_ptr->request_id;
+    set_waiting(std::move(group_ptr));
+    if (view) {
+        view->recurrent = selected->payload.recurrent.data();
+        view->recurrent_size = selected->payload.recurrent.size();
+        view->draft = selected->payload.draft.data();
+        view->draft_size = selected->payload.draft.size();
+        view->speculative = selected->payload.speculative.data();
+        view->speculative_size = selected->payload.speculative.size();
+        view->n_tokens = selected->tokens.size();
+    }
+    if (n_prefix_used) {
+        *n_prefix_used = selected->tokens.size();
+    }
+    {
+        std::lock_guard<std::mutex> lock(checkpoint_mutex);
+        checkpoint_metrics.hits++;
+        checkpoint_metrics.hit_tokens += selected->tokens.size();
+        checkpoint_metrics.suffix_tokens += get_group_from_id(request_id)->n_prompt - selected->tokens.size();
+        checkpoint_metrics.cow_copies += did_cow;
+        checkpoint_metrics.restore_successes++;
+    }
+    return true;
 }
 
 void llama_paged_scheduler_impl::evict_retained_requests() {
@@ -476,6 +991,13 @@ void llama_paged_scheduler_impl::process_running_list(llama_sequence_group_raw_l
             }
             continue;
         }
+        {
+            std::lock_guard<std::mutex> lock(checkpoint_mutex);
+            if (paused_requests.count(group->request_id)) {
+                ++it;
+                continue;
+            }
+        }
         const int32_t scheduled_tokens = get_scheduled_tokens(*group);
         const int32_t allocation_tokens = scheduled_tokens +
             (group->n_past < group->n_prompt && group->n_past + scheduled_tokens == group->n_prompt ? 1 : 0);
@@ -488,6 +1010,10 @@ void llama_paged_scheduler_impl::process_running_list(llama_sequence_group_raw_l
             LLAMA_LOG_DEBUG("%s: (running_pending) request_id=%d: requires a new block to decode.\n", __func__,
                             group->request_id);
             bool success = kv_cache_manager->allocate(allocation_tokens, *group);
+            if (!success) {
+                evict_unpinned_checkpoints(checkpoint_page_quota);
+                success = kv_cache_manager->allocate(allocation_tokens, *group);
+            }
             if (!success) {
                 evict_retained_requests();
                 success = kv_cache_manager->allocate(allocation_tokens, *group);
@@ -535,10 +1061,21 @@ void llama_paged_scheduler_impl::process_swapped_list(llama_sequence_group_raw_l
         llama_sequence_group * group = it->get();
 
         GGML_ASSERT(group && "the group to swap is nullptr.");
+        {
+            std::lock_guard<std::mutex> lock(checkpoint_mutex);
+            if (paused_requests.count(group->request_id)) {
+                ++it;
+                continue;
+            }
+        }
         const int32_t scheduled_tokens = get_scheduled_tokens(*group);
         const int32_t allocation_tokens = scheduled_tokens +
             (group->n_past < group->n_prompt && group->n_past + scheduled_tokens == group->n_prompt ? 1 : 0);
         bool success = kv_cache_manager->swap_in(*group, allocation_tokens);
+        if (!success) {
+            evict_unpinned_checkpoints(checkpoint_page_quota);
+            success = kv_cache_manager->swap_in(*group, allocation_tokens);
+        }
         if (!success && !retained.empty()) {
             evict_retained_requests();
             success = kv_cache_manager->swap_in(*group, allocation_tokens);
@@ -567,6 +1104,14 @@ void llama_paged_scheduler_impl::process_waiting_list(llama_sequence_group_raw_l
         llama_sequence_group * group = it->get();
         GGML_ASSERT(group && "the waiting group is nullptr.");
 
+        {
+            std::lock_guard<std::mutex> lock(checkpoint_mutex);
+            if (paused_requests.count(group->request_id)) {
+                ++it;
+                continue;
+            }
+        }
+
         if (remaining_token_budget <= 0) {
             break;
         }
@@ -583,6 +1128,10 @@ void llama_paged_scheduler_impl::process_waiting_list(llama_sequence_group_raw_l
         ++count;
         // Reserve room for speculative decode without charging it to prefill.
         bool success = kv_cache_manager->allocate(allocation_tokens, *group);
+        if (!success) {
+            evict_unpinned_checkpoints(checkpoint_page_quota);
+            success = kv_cache_manager->allocate(allocation_tokens, *group);
+        }
         if (!success && !retained.empty()) {
             evict_retained_requests();
             success = kv_cache_manager->allocate(allocation_tokens, *group);
@@ -676,6 +1225,16 @@ void llama_paged_scheduler_impl::populate_batch_from(const llama_sequence_group_
     curr_info.n_seq            = batch_size;
     curr_info.n_tokens         = total_tokens;
     curr_info.n_blocks_per_seq = max_blocks;
+    {
+        std::lock_guard<std::mutex> lock(checkpoint_mutex);
+        const std::array<int32_t, 3> signature = { batch_size, total_tokens, max_blocks };
+        if (graph_signature == signature) {
+            checkpoint_metrics.graph_reuses++;
+        } else {
+            checkpoint_metrics.graph_rebuilds++;
+            graph_signature = signature;
+        }
+    }
 
     curr_info.write_slots   = new int32_t[total_tokens];
     curr_info.block_table   = new int32_t[batch_size * max_blocks];

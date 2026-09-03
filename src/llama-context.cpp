@@ -157,7 +157,8 @@ llama_context::llama_context(
     cparams.ctx_type     = params.ctx_type;
     cparams.pooling_type = params.pooling_type;
 
-    cparams.n_ctx            = params.n_ctx           == 0    ? hparams.n_ctx_train           : params.n_ctx;
+    cparams.n_ctx            = params.n_ctx_per_request != 0 ? params.n_ctx_per_request :
+                               params.n_ctx == 0 ? hparams.n_ctx_train : params.n_ctx;
     cparams.rope_freq_base   = params.rope_freq_base  == 0.0f ? hparams.rope_freq_base_train  : params.rope_freq_base;
     cparams.rope_freq_scale  = params.rope_freq_scale == 0.0f ? hparams.rope_freq_scale_train : params.rope_freq_scale;
 
@@ -321,7 +322,12 @@ llama_context::llama_context(
     // ref: https://github.com/ggml-org/llama.cpp/pull/17046#discussion_r2503085732
     cparams.n_ctx = GGML_PAD(cparams.n_ctx, 256);
 
-    if (cparams.kv_unified) {
+    if (params.n_ctx_per_request != 0) {
+        if (!cparams.kv_paged || !cparams.causal_attn) {
+            throw std::runtime_error("n_ctx_per_request requires causal paged KV");
+        }
+        cparams.n_ctx_seq = cparams.n_ctx;
+    } else if (cparams.kv_unified) {
         cparams.n_ctx_seq = cparams.n_ctx;
     } else {
         cparams.n_ctx_seq = cparams.n_ctx / cparams.n_seq_max;
@@ -3591,6 +3597,7 @@ void llama_context::opt_epoch(
 llama_context_params llama_context_default_params() {
     llama_context_params result = {
         /*.n_ctx                       =*/ 512,
+        /*.n_ctx_per_request           =*/ 0,
         /*.n_batch                     =*/ 2048,
         /*.n_ubatch                    =*/ 512,
         /*.n_seq_max                   =*/ 1,

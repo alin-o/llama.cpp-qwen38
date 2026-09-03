@@ -25,6 +25,7 @@ struct server_context_meta {
     bool has_inp_video;
     json json_ui_settings;
     int slot_n_ctx;
+    llama_paged_cache_stats paged_cache;
     enum llama_pooling_type pooling_type;
 
     // chat params
@@ -140,6 +141,7 @@ struct server_routes {
     server_http_context::handler_t post_chat_completions;
     server_http_context::handler_t post_chat_completions_tok;
     server_http_context::handler_t post_control;
+    server_http_context::handler_t post_checkpoint_test_latch_release;
     server_http_context::handler_t post_responses_oai;
     server_http_context::handler_t post_responses_tok_oai;
     server_http_context::handler_t post_transcriptions_oai;

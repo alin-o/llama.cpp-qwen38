@@ -1605,6 +1605,72 @@ std::string server_task_result_metrics::to_metrics() {
             "spec_decode_num_drafts_total",
             "Speculative: Total speculative decoding verification steps",
             (double) metrics.n_draft_verif_steps
+        }, {
+            "checkpoint_lookup_total", "Cumulative checkpoint lookups",
+            (double) metrics.paged_cache.checkpoint_lookups
+        }, {
+            "checkpoint_hit_total", "Cumulative checkpoint hits",
+            (double) metrics.paged_cache.checkpoint_hits
+        }, {
+            "checkpoint_hit_tokens_total", "Prompt tokens restored from cumulative checkpoints",
+            (double) metrics.paged_cache.checkpoint_hit_tokens
+        }, {
+            "checkpoint_suffix_tokens_total", "Prompt suffix tokens computed after checkpoint attachment",
+            (double) metrics.paged_cache.checkpoint_suffix_tokens
+        }, {
+            "checkpoint_equality_mismatch_total", "Digest candidates rejected by exact token comparison",
+            (double) metrics.paged_cache.checkpoint_equality_mismatches
+        }, {
+            "checkpoint_build_winner_total", "Single-flight checkpoint build winners",
+            (double) metrics.paged_cache.checkpoint_build_winners
+        }, {
+            "checkpoint_build_waiter_total", "Single-flight checkpoint build waiters",
+            (double) metrics.paged_cache.checkpoint_build_waiters
+        }, {
+            "checkpoint_build_coalesced_total", "Checkpoint builders coalesced onto a ready record",
+            (double) metrics.paged_cache.checkpoint_builds_coalesced
+        }, {
+            "checkpoint_wait_timeout_total", "Checkpoint followers that exceeded the bounded wait",
+            (double) metrics.paged_cache.checkpoint_wait_timeouts
+        }, {
+            "checkpoint_publication_total", "Atomically published cumulative checkpoints",
+            (double) metrics.paged_cache.checkpoint_publications
+        }, {
+            "checkpoint_publication_failure_total", "Checkpoint publications rolled back before selection",
+            (double) metrics.paged_cache.checkpoint_publication_failures
+        }, {
+            "checkpoint_eviction_total", "Resident cumulative checkpoints evicted",
+            (double) metrics.paged_cache.checkpoint_evictions
+        }, {
+            "checkpoint_cow_total", "Partial checkpoint pages copied before private writes",
+            (double) metrics.paged_cache.checkpoint_cow_copies
+        }, {
+            "checkpoint_rollback_total", "Checkpoint transactions rolled back",
+            (double) metrics.paged_cache.checkpoint_rollbacks
+        }, {
+            "checkpoint_fallback_total", "Cache failures that fell back without failing generation",
+            (double) metrics.paged_cache.checkpoint_fallbacks
+        }, {
+            "checkpoint_graph_reuse_total", "Paged graph shapes reused after mapping refresh",
+            (double) metrics.paged_cache.checkpoint_graph_reuses
+        }, {
+            "checkpoint_graph_rebuild_total", "Paged graph shapes rebuilt for incompatible mapping shapes",
+            (double) metrics.paged_cache.checkpoint_graph_rebuilds
+        }, {
+            "checkpoint_admission_rejection_total", "Checkpoint records rejected by page or host quota",
+            (double) metrics.paged_cache.checkpoint_admission_rejections
+        }, {
+            "checkpoint_page_reclamation_total", "Checkpoint pages released after their final record reference",
+            (double) metrics.paged_cache.checkpoint_page_reclamations
+        }, {
+            "checkpoint_cow_failure_total", "Checkpoint partial-page copy-on-write failures",
+            (double) metrics.paged_cache.checkpoint_cow_failures
+        }, {
+            "checkpoint_restore_success_total", "Checkpoint attachments restored successfully",
+            (double) metrics.paged_cache.checkpoint_restore_successes
+        }, {
+            "checkpoint_restore_failure_total", "Checkpoint attachments rolled back during restore",
+            (double) metrics.paged_cache.checkpoint_restore_failures
         },
     };
 
@@ -1650,6 +1716,24 @@ std::string server_task_result_metrics::to_metrics() {
             "Number of idle slot-local paged prompt states retained",
             (double) metrics.paged_cache.n_retained
         }, {
+            "checkpoint_records", "Cumulative checkpoint identities in the in-memory index",
+            (double) metrics.paged_cache.checkpoint_records
+        }, {
+            "checkpoint_resident_pages", "Unique physical GPU pages owned by cumulative checkpoints",
+            (double) metrics.paged_cache.checkpoint_pages
+        }, {
+            "checkpoint_active_pins", "Active request pins on cumulative checkpoints",
+            (double) metrics.paged_cache.checkpoint_pins
+        }, {
+            "checkpoint_host_payload_bytes", "Resident checkpoint host payload bytes",
+            (double) metrics.paged_cache.checkpoint_host_bytes
+        }, {
+            "checkpoint_host_payload_quota_bytes", "Checkpoint host payload quota bytes",
+            (double) metrics.paged_cache.checkpoint_host_quota_bytes
+        }, {
+            "checkpoint_logical_page_references", "Logical checkpoint references to resident physical pages",
+            (double) metrics.paged_cache.checkpoint_logical_page_refs
+        }, {
             "predicted_tokens_seconds",
             "Average generation throughput in tokens/s",
             metrics.predict_bucket.n_per_second()
@@ -1689,6 +1773,15 @@ std::string server_task_result_metrics::to_metrics() {
         for (size_t i = 0; i < metrics.n_accepted_per_pos.size(); i++) {
             prometheus << "llamacpp:spec_decode_num_accepted_tokens_per_pos_total{position=\""
                        << i << "\"} " << metrics.n_accepted_per_pos[i] << "\n";
+        }
+    }
+
+    if (!metrics.checkpoint_test_latched_slots.empty()) {
+        prometheus << "# HELP llamacpp:checkpoint_test_latched_slots Active checkpoint pressure-test latch holders\n"
+                   << "# TYPE llamacpp:checkpoint_test_latched_slots gauge\n";
+        for (const auto & item : metrics.checkpoint_test_latched_slots) {
+            prometheus << "llamacpp:checkpoint_test_latched_slots{latch=\""
+                       << item.first << "\"} " << item.second << "\n";
         }
     }
 

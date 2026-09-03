@@ -193,10 +193,28 @@ static void test(void) {
     assert(params.n_batch == 9090);
     {
         common_params paged_params;
-        argv = {"binary_name", "--model", "model.gguf", "--n-gpu-blocks", "64", "--n-cpu-blocks", "16"};
+        argv = {"binary_name", "--model", "model.gguf", "--kv-paged", "--ctx-size-per-request", "128000",
+                "--parallel", "10", "--n-gpu-blocks", "64", "--n-cpu-blocks", "16"};
         assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), paged_params, LLAMA_EXAMPLE_PAGED));
+        assert(paged_params.n_ctx_per_request == 128000);
+        assert(paged_params.n_parallel == 10);
         assert(paged_params.n_gpu_blocks == 64 && paged_params.n_gpu_blocks_set);
         assert(paged_params.n_cpu_blocks == 16 && paged_params.n_cpu_blocks_set);
+
+        common_params conflicting;
+        argv = {"binary_name", "--ctx-size", "4096", "--ctx-size-per-request", "128000"};
+        assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), conflicting, LLAMA_EXAMPLE_PAGED));
+        conflicting = {};
+        argv = {"binary_name", "--ctx-size-per-request", "128000", "--ctx-size", "4096"};
+        assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), conflicting, LLAMA_EXAMPLE_PAGED));
+
+        common_params controls;
+        argv = {"binary_name", "--checkpoint-test-controls"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), controls, LLAMA_EXAMPLE_SERVER));
+        assert(controls.checkpoint_test_controls);
+        controls = {};
+        argv = {"binary_name", "--checkpoint-test-controls", "--host", "0.0.0.0"};
+        assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), controls, LLAMA_EXAMPLE_SERVER));
     }
 
     // --draft cannot be used outside llama-speculative

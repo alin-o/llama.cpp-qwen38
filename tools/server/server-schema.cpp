@@ -31,6 +31,24 @@ std::vector<std::unique_ptr<field>> make_llama_cmpl_schema(const common_params &
     add((new field_bool("cache_prompt", params.cache_prompt))
         ->set_desc("Re-use KV cache from a previous request if possible. This way the common prefix does not have to be re-processed, only the suffix that differs between the requests"));
 
+    add((new field_str("checkpoint_test_latch"))
+        ->set_desc("Loopback-only checkpoint pressure-test latch identifier")
+        ->set_handler([&](field_eval_context & ctx, const json & data) {
+            if (!params_base.checkpoint_test_controls) {
+                throw std::invalid_argument("checkpoint_test_latch requires --checkpoint-test-controls");
+            }
+            const std::string value = data.at("checkpoint_test_latch").get<std::string>();
+            const bool valid = !value.empty() && value.size() <= 64 &&
+                std::all_of(value.begin(), value.end(), [](char c) {
+                    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.';
+                });
+            if (!valid) {
+                throw std::invalid_argument("checkpoint_test_latch must be 1-64 identifier characters");
+            }
+            ctx.params.checkpoint_test_latch = value;
+        }));
+
     add((new field_bool("return_tokens", params.return_tokens))
         ->set_desc("Return the raw generated token ids in the `tokens` field"));
 

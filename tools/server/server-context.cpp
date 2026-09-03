@@ -123,6 +123,7 @@ enum slot_state {
     SLOT_STATE_PROCESSING_PROMPT,
     SLOT_STATE_DONE_PROMPT,
     SLOT_STATE_GENERATING,
+    SLOT_STATE_CHECKPOINT_TEST_LATCHED,
 };
 
 struct server_slot; // forward declaration
@@ -313,6 +314,9 @@ struct server_slot {
     // state
     slot_state state = SLOT_STATE_IDLE;
 
+    bool checkpoint_test_output_pending = false;
+    completion_token_output checkpoint_test_output;
+
     server_prompt prompt;
 
     bool prompt_save(server_prompt_cache & prompt_cache) const {
@@ -423,6 +427,8 @@ struct server_slot {
         n_accepted_per_pos.clear();
 
         n_predict_max = -1;
+        checkpoint_test_output_pending = false;
+        checkpoint_test_output = {};
 
         llama_set_sampler(ctx_tgt, id, nullptr);
 
@@ -726,6 +732,10 @@ struct server_slot {
                     {"n_decoded",      stats.n_gen},
                 }
             });
+            if (state == SLOT_STATE_CHECKPOINT_TEST_LATCHED) {
+                res["state"] = "checkpoint_test_latched";
+                res["checkpoint_test_latch"] = ptask->params.checkpoint_test_latch;
+            }
 
             if (!only_metrics) {
                 res["prompt"] = ptask->tokens.detokenize(ctx_tgt, true);
@@ -895,6 +905,13 @@ public:
     server_metrics get_metrics() const {
         server_metrics result = metrics;
         refresh_paged_cache_stats(result);
+        if (params_base.checkpoint_test_controls) {
+            for (const server_slot & slot : slots) {
+                if (slot.state == SLOT_STATE_CHECKPOINT_TEST_LATCHED && slot.task) {
+                    result.checkpoint_test_latched_slots[slot.task->params.checkpoint_test_latch]++;
+                }
+            }
+        }
         return result;
     }
 
@@ -943,6 +960,18 @@ private:
         return are_lora_equal(
             paged_lora_for(slots.at(request_id_a), n_past_a),
             paged_lora_for(slots.at(request_id_b), n_past_b));
+    }
+
+    std::string paged_checkpoint_fingerprint(const server_slot & slot) const {
+        std::string result = string_format(
+            "schema=1;model=%p;tgt=%p;dft=%p;ctx=%d;block=%d;gpu=%u;cpu=%u;mtp=%d;alora=%d",
+            (const void *) model_tgt, (const void *) ctx_tgt, (const void *) ctx_dft,
+            slot.n_ctx, params_base.block_size, params_base.n_gpu_blocks, params_base.n_cpu_blocks,
+            spec != nullptr, slot.alora_invocation_start);
+        for (const auto & lora : slot.lora) {
+            result += string_format(";lora=%p:%a", (const void *) lora.ptr, lora.scale);
+        }
+        return result;
     }
 
     bool update_slots_paged() {
@@ -1329,12 +1358,19 @@ private:
                 result.tok = id;
                 result.text_to_send = common_token_to_piece(ctx_tgt, id, params_base.special);
                 result.prob = 1.0f;
-                slot.stats.n_gen++;
-                slot.stats.update_gen_last();
                 sampled_tokens[i] = id;
                 accepted_counts[i] = info->batch_lens[i];
-                if (!process_token(result, slot)) {
-                    stop_flags[i] = 1;
+                const bool latch = is_final_prefill && params_base.checkpoint_test_controls &&
+                    !slot.task->params.checkpoint_test_latch.empty();
+                if (latch) {
+                    slot.checkpoint_test_output = std::move(result);
+                    slot.checkpoint_test_output_pending = true;
+                } else {
+                    slot.stats.n_gen++;
+                    slot.stats.update_gen_last();
+                    if (!process_token(result, slot)) {
+                        stop_flags[i] = 1;
+                    }
                 }
             }
 
@@ -1342,6 +1378,9 @@ private:
                 slot.print_timings();
                 send_final_response(slot);
                 finished_slots.push_back(slot.id);
+            } else if (slot.checkpoint_test_output_pending) {
+                slot.state = SLOT_STATE_CHECKPOINT_TEST_LATCHED;
+                llama_paged_scheduler_set_request_paused(paged_scheduler.get(), slot.id, true);
             } else {
                 slot.state = SLOT_STATE_GENERATING;
             }
@@ -1351,9 +1390,7 @@ private:
             const int offset = info->batch_offsets[i];
             const server_slot & slot = slots[paged_batch.seq_id[offset][0]];
             const bool checkpoint_before_last =
-                llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt) ||
-                (ctx_dft && (ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
-                             ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS));
+                llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt) || ctx_dft;
             if (slot.task->params.cache_prompt && !slot.task->tokens.has_media_chunks() && checkpoint_before_last &&
                 seq_states[i].n_prompt > 1 &&
                 seq_states[i].n_past + info->batch_lens[i] + 1 == seq_states[i].n_prompt) {
@@ -1374,11 +1411,30 @@ private:
             if (llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt)) {
                 checkpoint.update_tgt(ctx_tgt, id_slot, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
             }
-            if (ctx_dft && (ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
-                            ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS)) {
+            if (ctx_dft) {
                 checkpoint.update_dft(ctx_dft, id_slot, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
             }
-            common_speculative_get_state(spec.get(), id_slot, checkpoint.data_spec);
+            const bool speculative_complete = !spec ||
+                common_speculative_get_state(spec.get(), id_slot, checkpoint.data_spec);
+
+            const bool recurrent_required = llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
+            const bool draft_required = ctx_dft != nullptr;
+            const llama_paged_checkpoint_data data = {
+                /* .recurrent              = */ checkpoint.data_tgt.data(),
+                /* .recurrent_size         = */ checkpoint.data_tgt.size(),
+                /* .draft                  = */ checkpoint.data_dft.data(),
+                /* .draft_size             = */ checkpoint.data_dft.size(),
+                /* .speculative            = */ checkpoint.data_spec.data(),
+                /* .speculative_size       = */ checkpoint.data_spec.size(),
+                /* .recurrent_complete     = */ !recurrent_required || !checkpoint.data_tgt.empty(),
+                /* .draft_complete         = */ !draft_required || !checkpoint.data_dft.empty(),
+                /* .speculative_complete   = */ speculative_complete,
+            };
+            if (!llama_paged_scheduler_publish_checkpoint(
+                    paged_scheduler.get(), id_slot, checkpoint.n_tokens,
+                    paged_checkpoint_fingerprint(slot).c_str(), &data)) {
+                SLT_DBG(slot, "%s", "cumulative checkpoint publication failed open\n");
+            }
         }
         if (server_mtp_diag_enabled()) {
             for (int i{}; i < info->n_seq; ++i) {
@@ -1735,6 +1791,14 @@ private:
         // setup slots
         SRV_INF("initializing, n_slots = %d, n_ctx_slot = %d, kv_unified = '%s'\n",
                 params_base.n_parallel, n_ctx_slot, params_base.kv_unified ? "true" : "false");
+        if (params_base.kv_paged) {
+            SRV_INF("paged logical context per request = %d, max slots = %d, block size = %d, "
+                    "GPU/CPU pool = %u/%u blocks (%" PRIu64 "/%" PRIu64 " tokens)\n",
+                    n_ctx_slot, params_base.n_parallel, params_base.block_size,
+                    params_base.n_gpu_blocks, params_base.n_cpu_blocks,
+                    (uint64_t) params_base.n_gpu_blocks * params_base.block_size,
+                    (uint64_t) params_base.n_cpu_blocks * params_base.block_size);
+        }
 
         // initialize slots
         for (int i = 0; i < params_base.n_parallel; i++) {
@@ -2358,8 +2422,88 @@ private:
                 slot.prompt_clear();
             }
 
+            const bool needs_tgt_checkpoint =
+                llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
+            const bool needs_dft_checkpoint = ctx_dft != nullptr;
+            const llama_tokens paged_tokens = task.tokens.get_paged_tokens();
+            const std::string checkpoint_fingerprint = paged_checkpoint_fingerprint(slot);
+            int32_t n_prefix_used = 0;
+            bool checkpoint_queued = false;
+            if (task.type == SERVER_TASK_TYPE_COMPLETION && task.params.cache_prompt && !has_media) {
+                llama_paged_checkpoint_view view = {};
+                checkpoint_queued = llama_paged_scheduler_add_request_cached(
+                    paged_scheduler.get(), paged_tokens.data(), paged_tokens.size(), slot.id,
+                    checkpoint_fingerprint.c_str(), &view, &n_prefix_used);
+                if (checkpoint_queued) {
+                    const bool tgt_ok = !needs_tgt_checkpoint ||
+                        (view.recurrent_size > 0 && llama_state_seq_set_data_ext(
+                            ctx_tgt, view.recurrent, view.recurrent_size, slot.id,
+                            LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) == view.recurrent_size);
+                    bool dft_ok = !needs_dft_checkpoint;
+                    if (needs_dft_checkpoint) {
+                        llama_memory_t mem_dft = llama_get_memory(ctx_dft);
+                        llama_memory_seq_rm(mem_dft, slot.id, -1, -1);
+
+                        for (const server_slot & source : slots) {
+                            if (source.id == slot.id || !source.is_processing() || !source.task ||
+                                llama_paged_scheduler_checkpoint_pin_depth(
+                                    paged_scheduler.get(), source.id) != (int32_t) view.n_tokens ||
+                                paged_checkpoint_fingerprint(source) != checkpoint_fingerprint) {
+                                continue;
+                            }
+
+                            const llama_tokens source_tokens = source.task->tokens.get_paged_tokens();
+                            if (source_tokens.size() < view.n_tokens ||
+                                !std::equal(paged_tokens.begin(), paged_tokens.begin() + view.n_tokens,
+                                            source_tokens.begin()) ||
+                                llama_memory_seq_pos_max(mem_dft, source.id) < (llama_pos) view.n_tokens - 1) {
+                                continue;
+                            }
+
+                            llama_memory_seq_cp(mem_dft, source.id, slot.id, 0, view.n_tokens);
+                            dft_ok = llama_memory_seq_pos_max(mem_dft, slot.id) ==
+                                (llama_pos) view.n_tokens - 1;
+                            if (dft_ok) {
+                                break;
+                            }
+                            llama_memory_seq_rm(mem_dft, slot.id, -1, -1);
+                        }
+
+                        if (!dft_ok) {
+                            dft_ok = view.draft_size > 0 && llama_state_seq_set_data_ext(
+                                ctx_dft, view.draft, view.draft_size, slot.id,
+                                LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY) == view.draft_size;
+                        }
+                    }
+                    if (dft_ok && needs_dft_checkpoint) {
+                        dft_ok = llama_memory_seq_rm(
+                            llama_get_memory(ctx_dft), slot.id, view.n_tokens, -1) &&
+                            llama_memory_seq_pos_max(llama_get_memory(ctx_dft), slot.id) ==
+                                (llama_pos) view.n_tokens - 1;
+                    }
+                    if (tgt_ok && dft_ok) {
+                        if (spec) {
+                            std::vector<uint8_t> speculative;
+                            if (view.speculative_size > 0) {
+                                speculative.assign(view.speculative, view.speculative + view.speculative_size);
+                            }
+                            common_speculative_set_state(spec.get(), slot.id, speculative);
+                        }
+                    } else {
+                        llama_paged_scheduler_remove_request(paged_scheduler.get(), slot.id);
+                        llama_memory_seq_rm(llama_get_memory(ctx_tgt), slot.id, -1, -1);
+                        if (ctx_dft) {
+                            llama_memory_seq_rm(llama_get_memory(ctx_dft), slot.id, -1, -1);
+                        }
+                        checkpoint_queued = false;
+                        n_prefix_used = 0;
+                    }
+                }
+            }
+
             int32_t n_prefix = 0;
-            const bool can_reuse = task.type == SERVER_TASK_TYPE_COMPLETION && task.params.cache_prompt &&
+            const bool can_reuse = !checkpoint_queued &&
+                task.type == SERVER_TASK_TYPE_COMPLETION && task.params.cache_prompt &&
                 !has_media &&
                 !slot.prompt.tokens.has_media_chunks() &&
                 llama_paged_scheduler_is_retained(paged_scheduler.get(), slot.id);
@@ -2393,11 +2537,6 @@ private:
                     }
                 }
 
-                const bool needs_tgt_checkpoint =
-                    llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt);
-                const bool needs_dft_checkpoint = ctx_dft &&
-                    (ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
-                     ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS);
                 const bool needs_checkpoint = needs_tgt_checkpoint || needs_dft_checkpoint;
                 if (needs_checkpoint && !full_prompt_match) {
                     n_prefix = 0;
@@ -2435,9 +2574,7 @@ private:
                 }
             }
 
-            int32_t n_prefix_used = 0;
-            const llama_tokens paged_tokens = task.tokens.get_paged_tokens();
-            if (!llama_paged_scheduler_add_request_with_prefix(
+            if (!checkpoint_queued && !llama_paged_scheduler_add_request_with_prefix(
                     paged_scheduler.get(), paged_tokens.data(), paged_tokens.size(), slot.id,
                     n_prefix, &n_prefix_used)) {
                 send_error(task, "failed to queue request in paged KV scheduler", ERROR_TYPE_SERVER);
@@ -2451,9 +2588,7 @@ private:
                 !has_media &&
                 (!ctx_dft || ctx_dft_seq_rm_type != COMMON_CONTEXT_SEQ_RM_TYPE_NO)) {
                 const bool checkpoint_before_last =
-                    llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt) ||
-                    (ctx_dft && (ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
-                                 ctx_dft_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS));
+                    llama_model_is_recurrent(model_tgt) || llama_model_is_hybrid(model_tgt) || ctx_dft;
                 if (llama_paged_scheduler_retain_request(
                         paged_scheduler.get(), slot.id, checkpoint_before_last)) {
                     slot.paged_prompt_lora = slot.lora;
@@ -3092,6 +3227,9 @@ private:
                     // release slot linked with the task id
                     for (auto & slot : slots) {
                         if (slot.task && slot.task->id == task.id_target) {
+                            if (params_base.kv_paged) {
+                                slot.prompt_clear();
+                            }
                             slot.release();
                             break;
                         }
@@ -3130,6 +3268,51 @@ private:
 
                     queue_results.send(std::move(res));
                 } break;
+            case SERVER_TASK_TYPE_CHECKPOINT_TEST_RELEASE:
+                {
+                    auto res = std::make_unique<server_task_result_control>();
+                    res->id = task.id;
+                    uint32_t released = 0;
+                    for (server_slot & slot : slots) {
+                        if (slot.state != SLOT_STATE_CHECKPOINT_TEST_LATCHED || !slot.task ||
+                            slot.task->params.checkpoint_test_latch != task.checkpoint_test_latch ||
+                            !slot.checkpoint_test_output_pending) {
+                            continue;
+                        }
+
+                        if (task.checkpoint_test_cancel) {
+                            slot.checkpoint_test_output = {};
+                            slot.checkpoint_test_output_pending = false;
+                            slot.prompt_clear();
+                            slot.release();
+                            released++;
+                            continue;
+                        }
+
+                        completion_token_output output = std::move(slot.checkpoint_test_output);
+                        slot.checkpoint_test_output = {};
+                        slot.checkpoint_test_output_pending = false;
+                        slot.stats.n_gen++;
+                        slot.stats.update_gen_last();
+                        const bool keep_running = process_token(output, slot);
+                        llama_paged_scheduler_set_request_paused(paged_scheduler.get(), slot.id, false);
+                        if (keep_running) {
+                            slot.state = SLOT_STATE_GENERATING;
+                        } else {
+                            slot.print_timings();
+                            send_final_response(slot);
+                            slot.release();
+                        }
+                        released++;
+                    }
+                    res->success = released > 0;
+                    if (released == 0) {
+                        res->message = "no matching latched slot";
+                    } else {
+                        res->message = string_format("released %u slot(s)", released);
+                    }
+                    queue_results.send(std::move(res));
+                } break;
             case SERVER_TASK_TYPE_NEXT_RESPONSE:
                 {
                     // do nothing
@@ -3159,6 +3342,7 @@ private:
             case SERVER_TASK_TYPE_SLOT_GET:
                 {
                     json slots_data = json::array();
+                    const llama_paged_cache_stats paged = get_metrics().paged_cache;
 
                     int n_idle_slots = 0;
 
@@ -3167,7 +3351,36 @@ private:
                             n_idle_slots++;
                         }
 
-                        slots_data.push_back(slot.to_json(slots_debug == 0));
+                        json slot_data = slot.to_json(slots_debug == 0);
+                        if (params_base.kv_paged) {
+                            const int32_t pin_depth = llama_paged_scheduler_checkpoint_pin_depth(
+                                paged_scheduler.get(), slot.id);
+                            slot_data["logical_context_per_request"] = slot.n_ctx;
+                            slot_data["max_parallel_slots"] = params_base.n_parallel;
+                            slot_data["continuous_batching"] = params_base.cont_batching;
+                            slot_data["paged_kv"] = {
+                                {"block_size", paged.block_size},
+                                {"gpu_blocks", paged.n_gpu_blocks},
+                                {"gpu_blocks_free", paged.n_gpu_blocks_free},
+                                {"cpu_blocks", paged.n_cpu_blocks},
+                                {"cpu_blocks_free", paged.n_cpu_blocks_free},
+                                {"checkpoint_pages", paged.checkpoint_pages},
+                            };
+                            slot_data["checkpoint_pin_held"] = pin_depth > 0;
+                            slot_data["checkpoint_hit_depth"] = pin_depth;
+                            if (params_base.checkpoint_test_controls &&
+                                slot.state == SLOT_STATE_CHECKPOINT_TEST_LATCHED) {
+                                const int32_t n_blocks = llama_paged_scheduler_get_request_block_ids(
+                                    paged_scheduler.get(), slot.id, nullptr, 0);
+                                std::vector<uint32_t> block_ids(std::max(0, n_blocks));
+                                if (n_blocks > 0) {
+                                    llama_paged_scheduler_get_request_block_ids(
+                                        paged_scheduler.get(), slot.id, block_ids.data(), n_blocks);
+                                }
+                                slot_data["checkpoint_test_physical_pages"] = std::move(block_ids);
+                            }
+                        }
+                        slots_data.push_back(std::move(slot_data));
                     }
                     SRV_DBG("n_idle_slots = %d\n", n_idle_slots);
 
@@ -4859,6 +5072,7 @@ server_context_meta server_context::get_meta() const {
         /* has_inp_video          */ impl->chat_params.allow_video,
         /* json_ui_settings       */ impl->json_ui_settings,
         /* slot_n_ctx             */ impl->get_slot_n_ctx(),
+        /* paged_cache            */ impl->get_metrics().paged_cache,
         /* pooling_type           */ llama_pooling_type(impl->ctx_tgt),
 
         /* chat_params            */ impl->chat_params,
@@ -5275,6 +5489,20 @@ static json get_res_props(const server_context_meta & meta, const common_params 
     json props = {
         { "default_generation_settings", default_generation_settings_for_props },
         { "total_slots",                 params.n_parallel },
+        { "logical_context_per_request", meta.slot_n_ctx },
+        { "max_parallel_slots",          params.n_parallel },
+        { "continuous_batching",         params.cont_batching },
+        { "paged_kv",                    json {
+            {"enabled", params.kv_paged},
+            {"block_size", meta.paged_cache.block_size},
+            {"gpu_blocks", meta.paged_cache.n_gpu_blocks},
+            {"gpu_blocks_free", meta.paged_cache.n_gpu_blocks_free},
+            {"gpu_token_capacity", (uint64_t) meta.paged_cache.n_gpu_blocks * meta.paged_cache.block_size},
+            {"cpu_blocks", meta.paged_cache.n_cpu_blocks},
+            {"cpu_blocks_free", meta.paged_cache.n_cpu_blocks_free},
+            {"cpu_token_capacity", (uint64_t) meta.paged_cache.n_cpu_blocks * meta.paged_cache.block_size},
+            {"checkpoint_pages", meta.paged_cache.checkpoint_pages},
+        } },
         { "model_alias",                 meta.model_name },
         { "model_ftype",                 meta.model_ftype },
         { "model_path",                  meta.model_path },
@@ -5633,6 +5861,34 @@ void server_routes::init_routes() {
             task.params.control_action  = action;
             rd.post_task(std::move(task));
         }
+
+        auto result = rd.next(req.should_stop);
+        if (!result) {
+            GGML_ASSERT(req.should_stop());
+            return res;
+        }
+        if (result->is_error()) {
+            res->error(result->to_json());
+            return res;
+        }
+        res->ok(result->to_json());
+        return res;
+    };
+
+    this->post_checkpoint_test_latch_release = [this](const server_http_req & req) {
+        auto res = create_response();
+        const std::string latch = req.get_param("checkpoint_test_latch");
+        if (latch.empty()) {
+            res->error(format_error_response("missing checkpoint latch id", ERROR_TYPE_INVALID_REQUEST));
+            return res;
+        }
+
+        auto & rd = res->rd;
+        server_task task(SERVER_TASK_TYPE_CHECKPOINT_TEST_RELEASE);
+        task.id = rd.get_new_id();
+        task.checkpoint_test_latch = latch;
+        task.checkpoint_test_cancel = req.get_param("cancel") == "1";
+        rd.post_task(std::move(task), true);
 
         auto result = rd.next(req.should_stop);
         if (!result) {

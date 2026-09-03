@@ -369,6 +369,7 @@ extern "C" {
     //       https://github.com/ggml-org/llama.cpp/pull/7544
     struct llama_context_params {
         uint32_t n_ctx;                 // text context, 0 = from model
+        uint32_t n_ctx_per_request;     // paged logical context per request, 0 = legacy n_ctx semantics
         uint32_t n_batch;               // logical maximum batch size that can be submitted to llama_decode
         uint32_t n_ubatch;              // physical maximum batch size
         uint32_t n_seq_max;             // max number of sequences (i.e. distinct states for recurrent models)
@@ -1670,6 +1671,56 @@ extern "C" {
         uint32_t n_cpu_blocks;
         uint32_t n_cpu_blocks_free;
         uint32_t n_retained;
+        uint32_t checkpoint_records;
+        uint32_t checkpoint_pages;
+        uint32_t checkpoint_pins;
+        uint64_t checkpoint_hits;
+        uint64_t checkpoint_hit_tokens;
+        uint64_t checkpoint_suffix_tokens;
+        uint64_t checkpoint_cow_copies;
+        uint64_t checkpoint_fallbacks;
+        uint64_t checkpoint_lookups;
+        uint64_t checkpoint_equality_mismatches;
+        uint64_t checkpoint_build_winners;
+        uint64_t checkpoint_build_waiters;
+        uint64_t checkpoint_builds_coalesced;
+        uint64_t checkpoint_wait_timeouts;
+        uint64_t checkpoint_publications;
+        uint64_t checkpoint_publication_failures;
+        uint64_t checkpoint_evictions;
+        uint64_t checkpoint_rollbacks;
+        uint64_t checkpoint_graph_reuses;
+        uint64_t checkpoint_graph_rebuilds;
+        uint64_t checkpoint_host_bytes;
+        uint64_t checkpoint_host_quota_bytes;
+        uint64_t checkpoint_admission_rejections;
+        uint64_t checkpoint_logical_page_refs;
+        uint64_t checkpoint_page_reclamations;
+        uint64_t checkpoint_cow_failures;
+        uint64_t checkpoint_restore_successes;
+        uint64_t checkpoint_restore_failures;
+    };
+
+    struct llama_paged_checkpoint_data {
+        const uint8_t * recurrent;
+        size_t recurrent_size;
+        const uint8_t * draft;
+        size_t draft_size;
+        const uint8_t * speculative;
+        size_t speculative_size;
+        bool recurrent_complete;
+        bool draft_complete;
+        bool speculative_complete;
+    };
+
+    struct llama_paged_checkpoint_view {
+        const uint8_t * recurrent;
+        size_t recurrent_size;
+        const uint8_t * draft;
+        size_t draft_size;
+        const uint8_t * speculative;
+        size_t speculative_size;
+        uint32_t n_tokens;
     };
 
     typedef void (*llama_paged_on_finish_cb)(int32_t             request_id,
@@ -1709,6 +1760,35 @@ extern "C" {
                                                         bool                           checkpoint_before_last);
     LLAMA_API bool llama_paged_scheduler_is_retained(const struct llama_paged_scheduler * sched,
                                                       int32_t                              request_id);
+
+    // Internal server boundary for the process-local cumulative checkpoint store.
+    // The returned view remains valid while request_id is attached to the scheduler.
+    LLAMA_API bool llama_paged_scheduler_publish_checkpoint(
+            struct llama_paged_scheduler *             sched,
+            int32_t                                    request_id,
+            uint32_t                                   n_tokens,
+            const char *                               fingerprint,
+            const struct llama_paged_checkpoint_data * data);
+    LLAMA_API bool llama_paged_scheduler_add_request_cached(
+            struct llama_paged_scheduler *             sched,
+            const llama_token *                        tokens,
+            int32_t                                    n_tokens,
+            int32_t                                    request_id,
+            const char *                               fingerprint,
+            struct llama_paged_checkpoint_view *       view,
+            int32_t *                                  n_prefix_used);
+    LLAMA_API void llama_paged_scheduler_set_request_paused(
+            struct llama_paged_scheduler * sched,
+            int32_t                        request_id,
+            bool                           paused);
+    LLAMA_API int32_t llama_paged_scheduler_checkpoint_pin_depth(
+            const struct llama_paged_scheduler * sched,
+            int32_t                              request_id);
+    LLAMA_API int32_t llama_paged_scheduler_get_request_block_ids(
+            const struct llama_paged_scheduler * sched,
+            int32_t                              request_id,
+            uint32_t *                           block_ids,
+            int32_t                              capacity);
 
     // Optional server-side batch policy. The token limit can split a request's
     // next scheduler step at a state boundary. The compatibility callback

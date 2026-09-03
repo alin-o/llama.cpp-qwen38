@@ -44,6 +44,7 @@ add_library(llama
             llama-quant.cpp
             llama-sampler.cpp
             llama-vocab.cpp
+            ../vendor/hash/sha256/sha256.c
             unicode-data.cpp
             unicode.cpp
             unicode.h
@@ -62,6 +63,7 @@ target_compile_definitions(llama PRIVATE
 )
 
 target_include_directories(llama PRIVATE .)
+target_include_directories(llama PRIVATE ../vendor/hash)
 target_include_directories(llama PUBLIC ../include)
 target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
 

@@ -1331,11 +1331,14 @@ static void common_fit_paged_kv_blocks(common_params & params, const llama_model
     const size_t bytes_per_block = (size_t) n_heads_kv * block_size *
         (ggml_row_size(type_k, head_dim) + ggml_row_size(type_v, head_dim)) * n_layers;
 
-    const uint32_t effective_n_ctx = params.n_ctx == 0 ? llama_model_n_ctx_train(model) : params.n_ctx;
+    const uint32_t effective_n_ctx = params.n_ctx_per_request != 0 ? params.n_ctx_per_request :
+        (params.n_ctx == 0 ? llama_model_n_ctx_train(model) : params.n_ctx);
     const bool has_mtp = std::find(params.speculative.types.begin(), params.speculative.types.end(),
                                    COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end();
     const size_t spec_extra = has_mtp ? std::max(0, params.speculative.draft.n_max) : 0;
-    const size_t blocks_per_seq = ((size_t) effective_n_ctx / std::max(1, params.n_parallel) + spec_extra + block_size - 1) / block_size;
+    const size_t logical_ctx_per_seq = params.n_ctx_per_request != 0 ? effective_n_ctx :
+        effective_n_ctx / std::max(1, params.n_parallel);
+    const size_t blocks_per_seq = (logical_ctx_per_seq + spec_extra + block_size - 1) / block_size;
     const size_t min_gpu_blocks = (size_t) std::ceil(blocks_per_seq / (1.0f - params.kv_paged_watermark));
     const size_t margin = std::max(
         params.fit_params_target.empty() ? (size_t) 0 : params.fit_params_target[0],
@@ -1827,6 +1830,7 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     auto cparams = llama_context_default_params();
 
     cparams.n_ctx             = params.n_ctx;
+    cparams.n_ctx_per_request = params.n_ctx_per_request;
     cparams.n_seq_max         = params.n_parallel;
     cparams.n_rs_seq          = params.speculative.need_n_rs_seq();
     cparams.n_outputs_max     = std::max(params.n_outputs_max, 0);

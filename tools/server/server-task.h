@@ -19,6 +19,7 @@ enum server_task_type {
     SERVER_TASK_TYPE_INFILL,
     SERVER_TASK_TYPE_CANCEL,
     SERVER_TASK_TYPE_CONTROL,
+    SERVER_TASK_TYPE_CHECKPOINT_TEST_RELEASE,
     SERVER_TASK_TYPE_NEXT_RESPONSE,
     SERVER_TASK_TYPE_METRICS,
     SERVER_TASK_TYPE_SLOT_GET,
@@ -88,6 +89,7 @@ struct task_params {
     // realtime control (SERVER_TASK_TYPE_CONTROL)
     std::string        control_action;
     std::string        control_cmpl_id;
+    std::string        checkpoint_test_latch;
 
     // per-request parameters for chat parsing
     common_chat_parser_params chat_parser_params;
@@ -173,6 +175,10 @@ struct server_task {
 
     // used by SERVER_TASK_TYPE_METRICS
     bool metrics_reset_bucket = false;
+
+    // used by SERVER_TASK_TYPE_CHECKPOINT_TEST_RELEASE
+    std::string checkpoint_test_latch;
+    bool checkpoint_test_cancel = false;
 
     // used by SERVER_TASK_TYPE_SET_LORA
     std::map<int, float> set_lora; // mapping adapter ID -> scale

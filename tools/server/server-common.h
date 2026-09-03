@@ -481,6 +481,7 @@ struct server_metrics {
 
     // immediate paged-KV capacity snapshot, refreshed when metrics are read
     llama_paged_cache_stats paged_cache = {};
+    std::map<std::string, uint32_t> checkpoint_test_latched_slots;
 
     uint64_t n_tokens_max = 0;
 

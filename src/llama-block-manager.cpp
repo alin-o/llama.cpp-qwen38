@@ -5,6 +5,7 @@
 #include <cmath>
 
 void llama_block_manager::init(uint32_t n_gpu, uint32_t n_cpu, float watermark) {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     LLAMA_LOG_INFO("%s: Block manager initialized: n_free_gpu_blocks=%d, n_free_cpu_blocks=%d\n", __func__, n_gpu,
                    n_cpu);
     total_num_gpu_blocks = n_gpu;
@@ -29,14 +30,17 @@ void llama_block_manager::init(uint32_t n_gpu, uint32_t n_cpu, float watermark) 
 }
 
 size_t llama_block_manager::n_free_gpu_blocks() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     return free_gpu_ids.size();
 }
 
 size_t llama_block_manager::n_free_cpu_blocks() const {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     return free_cpu_ids.size();
 }
 
 bool llama_block_manager::has_free_gpu_blocks(uint32_t num_requested_blocks) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     size_t curr_free_gpus = free_gpu_ids.size();
     if (curr_free_gpus < watermark_gpu_safety_num_blocks) {
         return false;
@@ -45,6 +49,7 @@ bool llama_block_manager::has_free_gpu_blocks(uint32_t num_requested_blocks) con
 }
 
 bool llama_block_manager::has_free_cpu_blocks(uint32_t num_requested_blocks) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     size_t curr_free_cpus = free_cpu_ids.size();
     if (curr_free_cpus < watermark_cpu_safety_num_blocks) {
         return false;
@@ -53,6 +58,7 @@ bool llama_block_manager::has_free_cpu_blocks(uint32_t num_requested_blocks) con
 }
 
 llama_block_manager::physical_block_ids llama_block_manager::checkout_gpu_blocks(uint32_t num_blocks) {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     physical_block_ids new_ids = {};
     if (num_blocks > free_gpu_ids.size()) {
         return new_ids;
@@ -69,6 +75,7 @@ llama_block_manager::physical_block_ids llama_block_manager::checkout_gpu_blocks
 }
 
 llama_block_manager::physical_block_ids llama_block_manager::checkout_cpu_blocks(uint32_t num_blocks) {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     physical_block_ids new_ids = {};
     if (num_blocks > free_cpu_ids.size()) {
         return new_ids;
@@ -84,8 +91,27 @@ llama_block_manager::physical_block_ids llama_block_manager::checkout_cpu_blocks
     return new_ids;
 }
 
+bool llama_block_manager::retain_blocks(const physical_block_ids & blocks) {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    for (const uint32_t id : blocks) {
+        if (!is_allocated(id)) {
+            return false;
+        }
+    }
+    for (const uint32_t id : blocks) {
+        if (is_gpu(id)) {
+            gpu_registry[id].ref_count++;
+        } else {
+            cpu_registry[id - total_num_gpu_blocks].ref_count++;
+        }
+    }
+    return true;
+}
+
 void llama_block_manager::release_gpu_blocks(const physical_block_ids & freed_blocks_ids) {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     for (const uint32_t & id : freed_blocks_ids) {
+        GGML_ASSERT(id < total_num_gpu_blocks && gpu_registry[id].ref_count > 0);
         gpu_registry[id].ref_count -= 1;
         if (gpu_registry[id].ref_count <= 0) {
             gpu_registry[id].ref_count = 0;
@@ -95,7 +121,10 @@ void llama_block_manager::release_gpu_blocks(const physical_block_ids & freed_bl
 }
 
 void llama_block_manager::release_cpu_blocks(const physical_block_ids & freed_blocks_ids) {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     for (const uint32_t & id : freed_blocks_ids) {
+        GGML_ASSERT(id >= total_num_gpu_blocks && id < total_num_gpu_blocks + total_num_cpu_blocks &&
+                    cpu_registry[id - total_num_gpu_blocks].ref_count > 0);
         cpu_registry[id - total_num_gpu_blocks].ref_count -= 1;
         if (cpu_registry[id - total_num_gpu_blocks].ref_count <= 0) {
             cpu_registry[id - total_num_gpu_blocks].ref_count = 0;
@@ -105,6 +134,7 @@ void llama_block_manager::release_cpu_blocks(const physical_block_ids & freed_bl
 }
 
 bool llama_block_manager::restore(const std::vector<uint32_t> & allocated_blocks) {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     std::vector<bool> allocated(total_num_gpu_blocks + total_num_cpu_blocks);
     for (const uint32_t id : allocated_blocks) {
         if (id >= allocated.size() || allocated[id]) {
@@ -132,5 +162,24 @@ bool llama_block_manager::restore(const std::vector<uint32_t> & allocated_blocks
 }
 
 bool llama_block_manager::is_gpu(uint32_t block_id) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
     return block_id < total_num_gpu_blocks;
+}
+
+bool llama_block_manager::is_allocated(uint32_t block_id) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    if (block_id < total_num_gpu_blocks) {
+        return gpu_registry[block_id].ref_count > 0;
+    }
+    const uint32_t cpu_id = block_id - total_num_gpu_blocks;
+    return cpu_id < total_num_cpu_blocks && cpu_registry[cpu_id].ref_count > 0;
+}
+
+uint32_t llama_block_manager::ref_count(uint32_t block_id) const {
+    std::lock_guard<std::recursive_mutex> lock(mutex);
+    if (block_id < total_num_gpu_blocks) {
+        return gpu_registry[block_id].ref_count;
+    }
+    const uint32_t cpu_id = block_id - total_num_gpu_blocks;
+    return cpu_id < total_num_cpu_blocks ? cpu_registry[cpu_id].ref_count : 0;
 }

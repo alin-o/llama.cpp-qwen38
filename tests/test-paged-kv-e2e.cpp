@@ -633,9 +633,9 @@ static path_result run_paged_divergent_prefix_case(
             EXPECT_TRUE(info->context_lens[0] == (int32_t) divergent_prompt.size());
             if (reuse_prefix) {
                 const int32_t partial_block = n_prefix / params.block_size;
-                EXPECT_TRUE(info->block_table[partial_block] == retained_partial_block);
+                EXPECT_TRUE(info->block_table[partial_block] != retained_partial_block);
                 EXPECT_TRUE(info->write_slots[0] ==
-                    retained_partial_block * params.block_size + n_prefix % params.block_size);
+                    info->block_table[partial_block] * params.block_size + n_prefix % params.block_size);
             }
         } else {
             EXPECT_TRUE(batch.n_tokens == 1);
@@ -812,6 +812,40 @@ static void run_paged_multi_slot_retained_prefix(const std::string & model_path)
     }
 }
 
+static void run_dynamic_context_creation(const std::string & model_path, int32_t n_parallel) {
+    common_params params;
+    params.model.path          = model_path;
+    params.n_ctx_per_request   = 128000;
+    params.n_batch             = 64;
+    params.n_ubatch            = 64;
+    params.warmup              = false;
+    params.kv_paged            = true;
+    params.n_gpu_blocks        = 320;
+    params.n_cpu_blocks        = 16;
+    params.n_gpu_blocks_set    = true;
+    params.n_cpu_blocks_set    = true;
+    params.n_sequences         = n_parallel;
+    params.n_parallel          = n_parallel;
+    params.cache_type_k        = GGML_TYPE_Q8_0;
+    params.cache_type_v        = GGML_TYPE_Q8_0;
+
+    auto init = common_init_from_params(params);
+    llama_context * ctx = init->context();
+    EXPECT_TRUE(ctx != nullptr);
+    EXPECT_TRUE(llama_n_ctx(ctx) == 128000);
+    EXPECT_TRUE(llama_n_ctx_seq(ctx) == 128000);
+    EXPECT_TRUE(llama_n_seq_max(ctx) == (uint32_t) n_parallel);
+
+    llama_paged_scheduler * sched = llama_paged_scheduler_init(ctx);
+    EXPECT_TRUE(sched != nullptr);
+    std::vector<llama_token> prompt(17000, 1);
+    EXPECT_TRUE(prompt.size() > 128000u / n_parallel);
+    EXPECT_TRUE(llama_paged_scheduler_add_request(
+        sched, prompt.data(), prompt.size(), 0));
+    llama_paged_scheduler_remove_request(sched, 0);
+    llama_paged_scheduler_free(sched);
+}
+
 static std::vector<int> top_k(const std::vector<float> & logits) {
     std::vector<int> result(logits.size());
     std::iota(result.begin(), result.end(), 0);
@@ -925,6 +959,9 @@ int main(int argc, char ** argv) {
     }
 
     if (head_dim % ggml_blck_size(GGML_TYPE_Q8_0) == 0) {
+        fprintf(stderr, "test-paged-kv-e2e: creating dynamic 128k contexts at NP=8 and NP=10\n");
+        run_dynamic_context_creation(params.model.path, 8);
+        run_dynamic_context_creation(params.model.path, 10);
         fprintf(stderr, "test-paged-kv-e2e: checking multi-sequence rebuild\n");
         run_paged_incompatible_shape_probe(params.model.path);
     }

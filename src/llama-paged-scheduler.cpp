@@ -4,6 +4,8 @@
 #include "llama-memory-hybrid-paged.h"
 #include "llama-paged-scheduler-impl.h"
 
+#include <algorithm>
+
 struct llama_paged_scheduler {
     llama_paged_scheduler_impl impl;
 
@@ -175,6 +177,98 @@ LLAMA_API bool llama_paged_scheduler_retain_request(
 LLAMA_API bool llama_paged_scheduler_is_retained(
         const struct llama_paged_scheduler * sched, int32_t request_id) {
     return sched && sched->impl.is_retained(request_id);
+}
+
+LLAMA_API bool llama_paged_scheduler_publish_checkpoint(
+        struct llama_paged_scheduler *             sched,
+        int32_t                                    request_id,
+        uint32_t                                   n_tokens,
+        const char *                               fingerprint,
+        const struct llama_paged_checkpoint_data * data) {
+    if (!sched || !fingerprint || !data) {
+        return false;
+    }
+    llama_checkpoint_payload payload;
+    if (data->recurrent && data->recurrent_size) {
+        payload.recurrent.assign(data->recurrent, data->recurrent + data->recurrent_size);
+    }
+    if (data->draft && data->draft_size) {
+        payload.draft.assign(data->draft, data->draft + data->draft_size);
+    }
+    if (data->speculative && data->speculative_size) {
+        payload.speculative.assign(data->speculative, data->speculative + data->speculative_size);
+    }
+    payload.recurrent_complete = data->recurrent_complete;
+    payload.draft_complete = data->draft_complete;
+    payload.speculative_complete = data->speculative_complete;
+    return sched->impl.publish_checkpoint(request_id, n_tokens, fingerprint, payload);
+}
+
+LLAMA_API bool llama_paged_scheduler_add_request_cached(
+        struct llama_paged_scheduler *       sched,
+        const llama_token *                  tokens,
+        int32_t                              n_tokens,
+        int32_t                              request_id,
+        const char *                         fingerprint,
+        struct llama_paged_checkpoint_view * view,
+        int32_t *                            n_prefix_used) {
+    if (view) {
+        *view = {};
+    }
+    if (n_prefix_used) {
+        *n_prefix_used = 0;
+    }
+    if (!sched || !tokens || n_tokens <= 0 || !fingerprint) {
+        return false;
+    }
+    llama_sequence_group group;
+    group.request_id = request_id;
+    group.n_prompt = n_tokens;
+    group.logical_seq.assign(tokens, tokens + n_tokens);
+    group.t_arrival_time = ggml_time_us();
+    llama_checkpoint_view internal;
+    uint32_t used = 0;
+    if (!sched->impl.queue_request_cached(std::move(group), fingerprint, &internal, &used)) {
+        return false;
+    }
+    if (view) {
+        view->recurrent = internal.recurrent;
+        view->recurrent_size = internal.recurrent_size;
+        view->draft = internal.draft;
+        view->draft_size = internal.draft_size;
+        view->speculative = internal.speculative;
+        view->speculative_size = internal.speculative_size;
+        view->n_tokens = internal.n_tokens;
+    }
+    if (n_prefix_used) {
+        *n_prefix_used = used;
+    }
+    return true;
+}
+
+LLAMA_API void llama_paged_scheduler_set_request_paused(
+        struct llama_paged_scheduler * sched, int32_t request_id, bool paused) {
+    if (sched) {
+        sched->impl.set_request_paused(request_id, paused);
+    }
+}
+
+LLAMA_API int32_t llama_paged_scheduler_checkpoint_pin_depth(
+        const struct llama_paged_scheduler * sched, int32_t request_id) {
+    return sched ? (int32_t) sched->impl.checkpoint_pin_depth(request_id) : 0;
+}
+
+LLAMA_API int32_t llama_paged_scheduler_get_request_block_ids(
+        const struct llama_paged_scheduler * sched, int32_t request_id,
+        uint32_t * block_ids, int32_t capacity) {
+    if (!sched || capacity < 0) {
+        return -1;
+    }
+    const llama_block_ids ids = sched->impl.request_block_ids(request_id);
+    if (block_ids && capacity > 0) {
+        std::copy_n(ids.begin(), std::min<size_t>(ids.size(), capacity), block_ids);
+    }
+    return (int32_t) ids.size();
 }
 
 LLAMA_API void llama_paged_scheduler_set_batch_policy(

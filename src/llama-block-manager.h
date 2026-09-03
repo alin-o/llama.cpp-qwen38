@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 class llama_block_manager {
@@ -25,6 +26,7 @@ class llama_block_manager {
 
     uint32_t total_num_gpu_blocks;
     uint32_t total_num_cpu_blocks;
+    mutable std::recursive_mutex mutex;
 
   public:
     void init(uint32_t n_gpu, uint32_t n_cpu, float watermark);
@@ -38,9 +40,13 @@ class llama_block_manager {
     physical_block_ids checkout_gpu_blocks(uint32_t num_blocks);
     physical_block_ids checkout_cpu_blocks(uint32_t num_blocks);
 
+    bool retain_blocks(const physical_block_ids & blocks);
+
     void release_gpu_blocks(const physical_block_ids & freed_blocks);
     void release_cpu_blocks(const physical_block_ids & freed_blocks);
     bool restore(const std::vector<uint32_t> & allocated_blocks);
 
     bool is_gpu(uint32_t block) const;
+    bool is_allocated(uint32_t block) const;
+    uint32_t ref_count(uint32_t block) const;
 };
