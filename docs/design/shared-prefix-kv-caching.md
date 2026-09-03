@@ -27,8 +27,9 @@ prefix, but its useful branches have substantial exact overlap. At 64-token
 pages, 665,216 of 899,152 prompt tokens were avoidable against the best prior
 request. Separately retained snapshots used 14,019 complete pages, while the
 cumulative prefix trie had 3,625 unique pages. The exact 19,322-token Codex
-prefix occurred in 13 captures and occupies 301 pages. The store therefore
-supports multiple roots and branches; it is not a single global prompt cache.
+prefix occurred in 13 captures and contains 301 complete pages plus 58 tokens
+in one partial allocated page. The store therefore supports multiple roots and
+branches; it is not a single global prompt cache.
 
 ## 2. Identity
 
@@ -319,7 +320,7 @@ gone. Draft/recurrent host payloads follow the same record lifetime.
 Admission uses two explicit quotas:
 
 - GPU checkpoint target pages: 512 of the configured 2,048 pages by default.
-  This holds the measured 301-page Codex root and leaves 1,536 pages (98,304
+  This holds the measured 302-page-rounded Codex root and leaves 1,536 pages (98,304
   tokens) for private active state. For a deliberately reduced 1,024-page
   NP=10 profile the default is 384 pages, sufficient for that root and leaving
   640 pages for private state.
@@ -329,7 +330,7 @@ Admission uses two explicit quotas:
   bounded below that headroom.
 
 The general default is `min(512, floor(gpu_blocks * 3 / 8))`, with an automatic
-minimum of 301 pages only when the pool has at least 512 pages. The scheduler
+minimum of 302 pages only when the pool has at least 512 pages. The scheduler
 may evict below that soft quota to preserve `max(64, 8 * max_slots)` free target
 pages for active progress. Quota is charged once per unique physical page and
 once per unique record payload, not once per pin or logical reference.
@@ -508,3 +509,29 @@ matrix. A phase must pass its owned cases when introduced and all applicable
 earlier cases as regressions. No later phase may reopen the identity,
 registration, wait, COW, quota, context, restart, or graph decisions above
 without retaining the original gate and documenting new measured evidence.
+
+## 14. Binding concurrent fixture selection
+
+Fixture selection is explicit by slot count and is recorded in every raw row.
+Mixed hit/miss inputs alternate roles, and version-change inputs alternate old
+and replacement roots. Thus NP=4 selects two requests of each class, NP=8 four
+of each, and NP=10 five of each. A runner must reject a selection without both
+classes or with class counts differing by more than one; positional slicing of
+class-grouped inputs is forbidden.
+
+Pinned eviction pressure is a two-slot churn schedule, not a single barrier of
+only four prompts. Seed the 19,322-token common checkpoint, which owns 301
+complete pages and one partial allocated page. For NP=4 and NP=8 also seed
+three 64-page disjoint checkpoints, filling 494 of the 512-page quota. For the
+measured feasible NP=10 1,024-block profile seed one 64-page disjoint
+checkpoint, filling 366 of its 384-page quota. Start and hold `NP-2` requests
+that pin the common checkpoint, verify all holders are active, then use the two
+remaining slots for disjoint 4,096-token admission waves. Wait for each wave
+before launching the next and release holders only after all waves finish.
+
+The feature's maximum target residency is 632 pages at NP=4, 652 at NP=8, and
+534 at NP=10: seeded pages plus five private pages per holder (terminal-page
+COW and four new tail pages) plus two 64-page churn requests. These fit the
+declared pools. The matched uncached arm uses identical requests and arrivals;
+inability of NP=10 to hold duplicated prefix pages is recorded as its expected
+physical-capacity control.
