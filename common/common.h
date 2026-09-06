@@ -693,6 +693,7 @@ struct common_params {
     std::string media_path; // path to directory for loading media files
 
     float slot_prompt_similarity = 0.1f;
+    float slot_prompt_cache_threshold = 0.5f;
 
     // batched-bench params
     bool is_pp_shared   = false;

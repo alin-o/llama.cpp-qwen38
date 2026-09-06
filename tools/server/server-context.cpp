@@ -926,6 +926,7 @@ private:
 
     // Necessary similarity of prompt for slot selection
     float slot_prompt_similarity = 0.0f;
+    float slot_prompt_cache_threshold = 0.5f;
 
     std::string model_name; // name of the loaded model, to be used by API
     std::set<std::string> model_aliases; // additional names for the model
@@ -1205,6 +1206,7 @@ private:
 
         // Necessary similarity of prompt for slot selection
         slot_prompt_similarity = params_base.slot_prompt_similarity;
+        slot_prompt_cache_threshold = params_base.slot_prompt_cache_threshold;
 
         const int n_ctx_train = llama_model_n_ctx_train(model_tgt);
 
@@ -1603,7 +1605,7 @@ private:
                 }
 
                 // if we are about to lose a large portion of the existing context - save it in the prompt cache
-                if (f_keep < 0.5f) {
+                if (f_keep < slot_prompt_cache_threshold) {
                     update_cache = true;
                 }
             }
