@@ -430,7 +430,9 @@ extern "C" {
         GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
         GGML_TYPE_Q1_0    = 41,
         GGML_TYPE_Q2_0    = 42,
-        GGML_TYPE_COUNT   = 43,
+        GGML_TYPE_TURBO3_0 = 43,
+        GGML_TYPE_TURBO4_0 = 44,
+        GGML_TYPE_COUNT   = 45,
     };
 
     // precision
@@ -574,6 +576,7 @@ extern "C" {
         GGML_OP_DSV4_HC_COMB,
         GGML_OP_DSV4_HC_PRE,
         GGML_OP_DSV4_HC_POST,
+        GGML_OP_TURBO_WHT,
 
         GGML_OP_UNARY,
 
@@ -2666,6 +2669,11 @@ extern "C" {
             struct ggml_tensor  * residual,
             struct ggml_tensor  * post,
             struct ggml_tensor  * comb);
+
+    GGML_API struct ggml_tensor * ggml_turbo_wht(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            int                   direction);
 
     // custom operators
 

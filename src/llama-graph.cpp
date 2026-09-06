@@ -2832,8 +2832,20 @@ ggml_tensor * llm_graph_context::build_attn(
     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
     ggml_tensor * v = mctx_cur->get_v(ctx0, il);
 
+    const bool turbo_k = k->type == GGML_TYPE_TURBO3_0 || k->type == GGML_TYPE_TURBO4_0;
+    const bool turbo_v = v->type == GGML_TYPE_TURBO3_0 || v->type == GGML_TYPE_TURBO4_0;
+    if (turbo_k) {
+        q = ggml_turbo_wht(ctx0, q, 0);
+        cb(q, "q_turbo", il);
+    }
+
     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, 0, kq_scale, il);
     cb(cur, "kqv_out", il);
+
+    if (turbo_v) {
+        cur = ggml_turbo_wht(ctx0, cur, 1);
+        cb(cur, "kqv_turbo", il);
+    }
 
     if (inp->self_v_rot) {
         cur = llama_mul_mat_hadamard(ctx0, cur, inp->self_v_rot);
