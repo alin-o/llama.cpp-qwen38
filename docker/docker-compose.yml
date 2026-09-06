@@ -38,10 +38,10 @@ services:
         carapa-llama-cpp: docker-image://carapa-llama-cpp:latest
     image: qwen38-upstream:b10502
     ports:
-      - "${QWEN38_UPSTREAM_PORT:-8882}:8080"
+      - "${QWEN38_UPSTREAM_PORT:-8881}:8080"
     volumes:
       - ${MODELS_DIR:-/mnt/S/.cache/llama.cpp}:/models:ro
-      - ./scripts/qwen38:/qwen38:ro
+      - ../scripts/qwen38:/qwen38:ro
       - ./run-model-server.sh:/run-model-server.sh:ro
       - ./state:/state
     environment:
