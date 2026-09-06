@@ -2072,8 +2072,9 @@ private:
 
         res->verbose           = slot.task->params.verbose;
         res->res_type          = slot.task->params.res_type;
-        res->oaicompat_model   = slot.task->params.oaicompat_model;
-        res->oaicompat_cmpl_id = slot.task->params.oaicompat_cmpl_id;
+        res->oaicompat_model      = slot.task->params.oaicompat_model;
+        res->oaicompat_cmpl_id    = slot.task->params.oaicompat_cmpl_id;
+        res->response_tool_names  = slot.task->params.response_tool_names;
 
         // populate res.probs_output
         if (slot.task->params.sampling.n_probs > 0) {
@@ -2127,8 +2128,9 @@ private:
         res->stream            = slot.task->params.stream;
         res->include_usage     = slot.task->params.include_usage;
         res->res_type          = slot.task->params.res_type;
-        res->oaicompat_model   = slot.task->params.oaicompat_model;
-        res->oaicompat_cmpl_id = slot.task->params.oaicompat_cmpl_id;
+        res->oaicompat_model      = slot.task->params.oaicompat_model;
+        res->oaicompat_cmpl_id    = slot.task->params.oaicompat_cmpl_id;
+        res->response_tool_names  = slot.task->params.response_tool_names;
 
         // populate res.probs_output
         if (slot.task->params.sampling.n_probs > 0) {
@@ -4245,7 +4247,8 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             server_task_type type,
             const json & data,
             const std::vector<raw_buffer> & files,
-            task_response_type res_type) {
+            task_response_type res_type,
+            responses_tool_name_map response_tool_names) {
     GGML_ASSERT(type == SERVER_TASK_TYPE_COMPLETION || type == SERVER_TASK_TYPE_INFILL);
 
     auto res = create_response();
@@ -4310,9 +4313,10 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             sse_ping_interval = task.params.sse_ping_interval;
 
             // OAI-compat
-            task.params.res_type          = res_type;
-            task.params.oaicompat_cmpl_id = completion_id;
-            task.params.oaicompat_model   = meta->model_name;
+            task.params.res_type            = res_type;
+            task.params.oaicompat_cmpl_id   = completion_id;
+            task.params.oaicompat_model     = meta->model_name;
+            task.params.response_tool_names = response_tool_names;
 
             // prepare child tasks
             if (task.params.n_cmpl > 1) {
@@ -4973,7 +4977,8 @@ void server_routes::init_routes() {
     this->post_responses_oai = [this](const server_http_req & req) {
         auto res = create_response();
         std::vector<raw_buffer> files;
-        json body = server_chat_convert_responses_to_chatcmpl(json::parse(req.body));
+        responses_tool_name_map response_tool_names;
+        json body = server_chat_convert_responses_to_chatcmpl(json::parse(req.body), &response_tool_names);
         SRV_DBG("%s\n", "Request converted: OpenAI Responses -> OpenAI Chat Completions");
         SRV_DBG("converted request: %s\n", body.dump().c_str());
         json body_parsed = oaicompat_chat_params_parse(
@@ -4985,7 +4990,8 @@ void server_routes::init_routes() {
             SERVER_TASK_TYPE_COMPLETION,
             body_parsed,
             files,
-            TASK_RESPONSE_TYPE_OAI_RESP);
+            TASK_RESPONSE_TYPE_OAI_RESP,
+            std::move(response_tool_names));
     };
 
     this->post_responses_tok_oai = [this](const server_http_req & req) {

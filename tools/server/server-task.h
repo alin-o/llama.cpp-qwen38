@@ -83,6 +83,7 @@ struct task_params {
     task_response_type res_type = TASK_RESPONSE_TYPE_NONE;
     std::string        oaicompat_model;
     std::string        oaicompat_cmpl_id;
+    responses_tool_name_map response_tool_names;
 
     // realtime control (SERVER_TASK_TYPE_CONTROL)
     std::string        control_action;
@@ -122,6 +123,7 @@ struct task_result_state {
     const std::string oai_resp_reasoning_id;
     const std::string oai_resp_message_id;
     std::string oai_resp_fc_id; // function call ID for current args delta
+    bool oai_resp_fc_custom = false;
 
     task_result_state(const common_chat_parser_params & chat_parser_params);
 
@@ -346,6 +348,7 @@ struct server_task_result_cmpl_final : server_task_result {
     task_response_type res_type = TASK_RESPONSE_TYPE_NONE;
     std::string        oaicompat_model;
     std::string        oaicompat_cmpl_id;
+    responses_tool_name_map response_tool_names;
     common_chat_msg    oaicompat_msg; // to be populated by update()
 
     std::vector<common_chat_msg_diff> oaicompat_msg_diffs; // to be populated by update()
@@ -413,6 +416,7 @@ struct server_task_result_cmpl_partial : server_task_result {
     task_response_type res_type = TASK_RESPONSE_TYPE_NONE;
     std::string        oaicompat_model;
     std::string        oaicompat_cmpl_id;
+    responses_tool_name_map response_tool_names;
     std::vector<common_chat_msg_diff> oaicompat_msg_diffs; // to be populated by update()
     bool is_updated = false;
 
@@ -426,6 +430,7 @@ struct server_task_result_cmpl_partial : server_task_result {
     std::string oai_resp_reasoning_id;
     std::string oai_resp_message_id;
     std::string oai_resp_fc_id;
+    bool oai_resp_fc_custom = false;
 
     // for Anthropic API: track if any reasoning content has been generated
     bool anthropic_has_reasoning = false;

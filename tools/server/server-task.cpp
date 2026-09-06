@@ -317,6 +317,37 @@ std::vector<unsigned char> completion_token_output::str_to_bytes(const std::stri
 //
 // server_task_result_cmpl_final
 //
+static bool restore_responses_tool_name(json & item, const std::string & name, const responses_tool_name_map & tool_names) {
+    const auto it = tool_names.find(name);
+    if (it == tool_names.end()) {
+        item["name"] = name;
+        return false;
+    }
+
+    if (!it->second.namespace_name.empty()) {
+        item["namespace"] = it->second.namespace_name;
+    }
+    item["name"]      = it->second.name;
+    return it->second.custom;
+}
+
+static std::string responses_custom_tool_input(const std::string & arguments) {
+    const json parsed = json::parse_no_throw(arguments);
+    if (parsed.is_object() && parsed.contains("input") && parsed.at("input").is_string()) {
+        return parsed.at("input");
+    }
+    return arguments;
+}
+
+static void restore_responses_tool_call(json & item, const common_chat_tool_call & tool_call, const responses_tool_name_map & tool_names) {
+    if (!restore_responses_tool_name(item, tool_call.name, tool_names)) {
+        return;
+    }
+    item["type"]  = "custom_tool_call";
+    item["input"] = responses_custom_tool_input(tool_call.arguments);
+    item.erase("arguments");
+}
+
 json server_task_result_cmpl_final::to_json() {
     GGML_ASSERT(is_updated && "update() must be called before to_json()");
     switch (res_type) {
@@ -566,14 +597,15 @@ json server_task_result_cmpl_final::to_json_oaicompat_resp() {
     }
 
     for (const common_chat_tool_call & tool_call : oaicompat_msg.tool_calls) {
-        output.push_back(json {
+        json output_item = {
             {"id",        "fc_" + tool_call.id},
             {"type",      "function_call"},
             {"status",    "completed"},
             {"arguments", tool_call.arguments},
             {"call_id",   "call_" + tool_call.id},
-            {"name",      tool_call.name},
-        });
+        };
+        restore_responses_tool_call(output_item, tool_call, response_tool_names);
+        output.push_back(std::move(output_item));
     }
 
     std::time_t t = std::time(0);
@@ -666,14 +698,14 @@ json server_task_result_cmpl_final::to_json_oaicompat_resp_stream() {
     }
 
     for (const common_chat_tool_call & tool_call : oaicompat_msg.tool_calls) {
-        const json output_item = {
+        json output_item = {
             {"id",        "fc_" + tool_call.id},
             {"type",      "function_call"},
             {"status",    "completed"},
             {"arguments", tool_call.arguments},
-            {"call_id",   "call_" + tool_call.id},
-            {"name",      tool_call.name}
+            {"call_id",   "call_" + tool_call.id}
         };
+        restore_responses_tool_call(output_item, tool_call, response_tool_names);
         server_sent_events.push_back(json {
             {"event", "response.output_item.done"},
             {"data", json {
@@ -1001,6 +1033,7 @@ void server_task_result_cmpl_partial::update(task_result_state & state) {
     oai_resp_reasoning_id  = state.oai_resp_reasoning_id;
     oai_resp_message_id    = state.oai_resp_message_id;
     oai_resp_fc_id         = state.oai_resp_fc_id;
+    oai_resp_fc_custom     = state.oai_resp_fc_custom;
 
     // track if the accumulated message has any reasoning content
     anthropic_has_reasoning = !state.chat_msg.reasoning_content.empty();
@@ -1019,6 +1052,8 @@ void server_task_result_cmpl_partial::update(task_result_state & state) {
         }
         if (!diff.tool_call_delta.name.empty()) {
             state.oai_resp_fc_id = diff.tool_call_delta.id;
+            const auto tool = response_tool_names.find(diff.tool_call_delta.name);
+            state.oai_resp_fc_custom = tool != response_tool_names.end() && tool->second.custom;
         }
     }
 }
@@ -1271,24 +1306,32 @@ json server_task_result_cmpl_partial::to_json_oaicompat_resp() {
         }
 
         if (!diff.tool_call_delta.name.empty()) {
+            const auto tool = response_tool_names.find(diff.tool_call_delta.name);
+            oai_resp_fc_custom = tool != response_tool_names.end() && tool->second.custom;
+            json output_item = {
+                {"id",        "fc_" + diff.tool_call_delta.id},
+                {"arguments", ""},
+                {"call_id",   "call_" + diff.tool_call_delta.id},
+                {"type",      "function_call"},
+                {"status",    "in_progress"},
+            };
+            restore_responses_tool_name(output_item, diff.tool_call_delta.name, response_tool_names);
+            if (oai_resp_fc_custom) {
+                output_item["type"] = "custom_tool_call";
+                output_item["input"] = "";
+                output_item.erase("arguments");
+            }
             events.push_back(json {
                 {"event", "response.output_item.added"},
                 {"data", json {
-                    {"type",  "response.output_item.added"},
-                    {"item", json {
-                        {"id",        "fc_" + diff.tool_call_delta.id},
-                        {"arguments", ""},
-                        {"call_id",   "call_" + diff.tool_call_delta.id},
-                        {"name",      diff.tool_call_delta.name},
-                        {"type",      "function_call"},
-                        {"status",    "in_progress"},
-                    }},
+                    {"type", "response.output_item.added"},
+                    {"item", std::move(output_item)},
                 }},
             });
             oai_resp_fc_id = diff.tool_call_delta.id;
         }
 
-        if (!diff.tool_call_delta.arguments.empty()) {
+        if (!diff.tool_call_delta.arguments.empty() && !oai_resp_fc_custom) {
             events.push_back(json {
                 {"event", "response.function_call_arguments.delta"},
                 {"data", json {

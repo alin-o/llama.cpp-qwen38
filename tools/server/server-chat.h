@@ -9,7 +9,7 @@
 #include "json.h"
 
 // Convert OpenAI Responses API format to OpenAI Chat Completions API format
-json server_chat_convert_responses_to_chatcmpl(const json & body);
+json server_chat_convert_responses_to_chatcmpl(const json & body, responses_tool_name_map * tool_names = nullptr);
 
 // Convert Anthropic Messages API format to OpenAI Chat Completions API format
 json server_chat_convert_anthropic_to_oai(const json & body);

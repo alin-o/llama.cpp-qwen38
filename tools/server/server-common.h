@@ -319,6 +319,14 @@ struct server_chat_params {
     bool force_pure_content = false;
 };
 
+struct responses_tool_name {
+    std::string namespace_name;
+    std::string name;
+    bool custom = false;
+};
+
+using responses_tool_name_map = std::map<std::string, responses_tool_name>;
+
 // used by /completions endpoint
 json oaicompat_completion_params_parse(const json & body);
 
