@@ -10,7 +10,7 @@ SB="$ROOT/tools/server/bench/speed-bench/speed_bench.py"
 # /models must be the unsloth store for these runs (compose default is the
 # cache root); this bench references /models/<file> paths directly.
 export MODELS_DIR="${MODELS_DIR:-/mnt/S/.cache/llama.cpp/qwen38/unsloth-Qwen3.8-27B-GGUF-27af057e}"
-COMPOSE_FILE="$ROOT/docker-compose.yml"
+COMPOSE_FILE="$ROOT/docker/docker-compose.yml"
 PORT="${QWEN38_UPSTREAM_PORT:-8881}"
 RESULTS_DIR="$ROOT/docker/results/$(date -u +%Y%m%dT%H%M%SZ)-bench-drafter"
 mkdir -p "$RESULTS_DIR"

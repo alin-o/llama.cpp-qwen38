@@ -22,7 +22,7 @@ RUN --mount=type=cache,id=qwen38-cmake-cuda133-sm89,target=/workspace/build,shar
     -DGGML_CUDA_FA_ALL=ON \
     -DGGML_CUDA_FA_ALL_QUANTS=1 \
     -DCMAKE_CUDA_ARCHITECTURES=89 \
-    -DGGML_CUDA_FORCE_CUBLAS=OFF \        
+    -DGGML_CUDA_FORCE_CUBLAS=OFF \
     -DGGML_CUDA_PEER_MAX_BATCH=4096 \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.3/bin/nvcc \

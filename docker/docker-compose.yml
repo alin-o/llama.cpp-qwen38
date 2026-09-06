@@ -32,8 +32,10 @@ services:
     # not rely solely on the Swarm-style deploy reservation below.
     gpus: all
     build:
-      context: .
-      dockerfile: Dockerfile
+      # The Dockerfile is in docker/, but COPY . . must see the repository
+      # root so the complete llama.cpp source tree is available to CMake.
+      context: ..
+      dockerfile: docker/Dockerfile
       additional_contexts:
         carapa-llama-cpp: docker-image://carapa-llama-cpp:latest
     image: qwen38-upstream:b10502

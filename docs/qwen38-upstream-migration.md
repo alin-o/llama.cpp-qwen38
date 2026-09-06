@@ -30,7 +30,7 @@ The SHA-256 values are recorded in `qwen38/artifacts.sha256`. Runtime commands u
 Both images use CUDA 13.1, compute capability 8.9, static libraries, flash attention, and the same compiler image.
 
 ```bash
-docker compose -f docker-compose.yml --profile upstream build llama-server
+docker compose -f docker/docker-compose.yml --profile upstream build llama-server
 ./scripts/qwen38/run-matrix.sh
 ```
 

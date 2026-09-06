@@ -29,4 +29,4 @@ fi
 # parallel build failures before they can be read.
 BUILDKIT_PROGRESS=plain \
 BUILDX_BUILDER="${CARAPA_BUILDER:-carapa}" \
-    docker compose --profile upstream build llama-server
+    docker compose -f "$SCRIPT_DIR/docker-compose.yml" --profile upstream build llama-server

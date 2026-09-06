@@ -9,7 +9,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 # /models must be the unsloth store for these runs (compose default is the
 # cache root); this bench references /models/<file> paths directly.
 export MODELS_DIR="${MODELS_DIR:-/mnt/S/.cache/llama.cpp/qwen38/unsloth-Qwen3.8-27B-GGUF-27af057e}"
-COMPOSE=(docker compose -f "${ROOT}/docker-compose.yml")
+COMPOSE=(docker compose -f "${ROOT}/docker/docker-compose.yml")
 MODEL=/models/Qwen3.8-27B-UD-Q4_K_XL.gguf
 PROFILES="${CACHE_PROFILE:-turbo4,turbo3,t3k-t4v,t4k-t3v}"
 DEPTH="${DEPTH:-16384}"
