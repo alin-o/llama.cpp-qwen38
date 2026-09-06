@@ -113,6 +113,36 @@ struct llama_memory_i {
     virtual void seq_add (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1, llama_pos shift) = 0;
     virtual void seq_div (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1, int d) = 0;
 
+    // Attention-only sequence operations are used for immutable prefix sharing.
+    // Recurrent memories override these with no-ops and hybrid memories forward only to their attention component.
+    virtual bool seq_rm_attn(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+        return seq_rm(seq_id, p0, p1);
+    }
+    virtual void seq_cp_attn(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) {
+        seq_cp(seq_id_src, seq_id_dst, p0, p1);
+    }
+    virtual size_t seq_n_cells_attn(llama_seq_id /*seq_id*/) const {
+        return 0;
+    }
+    virtual size_t seq_n_shared_cells_attn(llama_seq_id /*seq_id*/) const {
+        return 0;
+    }
+    virtual llama_pos seq_pos_min_attn(llama_seq_id /*seq_id*/) const {
+        return -1;
+    }
+    virtual llama_pos seq_pos_max_attn(llama_seq_id /*seq_id*/) const {
+        return -1;
+    }
+    virtual bool seq_can_share_attn() const {
+        return false;
+    }
+    virtual size_t n_unique_cells_attn(llama_seq_id /*seq_id_begin*/, llama_seq_id /*seq_id_end*/) const {
+        return 0;
+    }
+    virtual size_t n_unique_tokens_attn(llama_seq_id /*seq_id_begin*/, llama_seq_id /*seq_id_end*/) const {
+        return 0;
+    }
+
     virtual llama_pos seq_pos_min(llama_seq_id seq_id) const = 0;
     virtual llama_pos seq_pos_max(llama_seq_id seq_id) const = 0;
 

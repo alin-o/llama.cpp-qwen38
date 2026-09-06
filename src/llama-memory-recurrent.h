@@ -49,6 +49,9 @@ public:
     void seq_add (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1, llama_pos shift) override;
     void seq_div (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1, int d) override;
 
+    bool seq_rm_attn(llama_seq_id, llama_pos, llama_pos) override { return true; }
+    void seq_cp_attn(llama_seq_id, llama_seq_id, llama_pos, llama_pos) override {}
+
     llama_pos seq_pos_min(llama_seq_id seq_id) const override;
     llama_pos seq_pos_max(llama_seq_id seq_id) const override;
 

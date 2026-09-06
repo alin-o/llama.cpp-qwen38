@@ -159,6 +159,43 @@ void llama_memory_hybrid_iswa::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_
     mem_recr->seq_cp(seq_id_src, seq_id_dst, p0, p1);
 }
 
+bool llama_memory_hybrid_iswa::seq_rm_attn(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+    return mem_attn->seq_rm(seq_id, p0, p1);
+}
+
+void llama_memory_hybrid_iswa::seq_cp_attn(
+        llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) {
+    mem_attn->seq_cp(seq_id_src, seq_id_dst, p0, p1);
+}
+
+size_t llama_memory_hybrid_iswa::seq_n_cells_attn(llama_seq_id seq_id) const {
+    return mem_attn->seq_n_cells_attn(seq_id);
+}
+
+size_t llama_memory_hybrid_iswa::seq_n_shared_cells_attn(llama_seq_id seq_id) const {
+    return mem_attn->seq_n_shared_cells_attn(seq_id);
+}
+
+llama_pos llama_memory_hybrid_iswa::seq_pos_min_attn(llama_seq_id seq_id) const {
+    return mem_attn->seq_pos_min_attn(seq_id);
+}
+
+llama_pos llama_memory_hybrid_iswa::seq_pos_max_attn(llama_seq_id seq_id) const {
+    return mem_attn->seq_pos_max_attn(seq_id);
+}
+
+bool llama_memory_hybrid_iswa::seq_can_share_attn() const {
+    return mem_attn->seq_can_share_attn();
+}
+
+size_t llama_memory_hybrid_iswa::n_unique_cells_attn(llama_seq_id seq_id_begin, llama_seq_id seq_id_end) const {
+    return mem_attn->n_unique_cells_attn(seq_id_begin, seq_id_end);
+}
+
+size_t llama_memory_hybrid_iswa::n_unique_tokens_attn(llama_seq_id seq_id_begin, llama_seq_id seq_id_end) const {
+    return mem_attn->n_unique_tokens_attn(seq_id_begin, seq_id_end);
+}
+
 void llama_memory_hybrid_iswa::seq_keep(llama_seq_id seq_id) {
     mem_attn->seq_keep(seq_id);
     mem_recr->seq_keep(seq_id);

@@ -27,12 +27,34 @@ int main(void) {
 
     size_t n_chunks = mtmd_input_chunks_size(chunks);
     printf("Number of chunks: %zu\n", n_chunks);
-    assert(n_chunks > 0);
+    assert(n_chunks == 10);
+
+    uint8_t digests[10][MTMD_INPUT_CHUNK_CONTENT_DIGEST_SIZE];
 
     for (size_t i = 0; i < n_chunks; i++) {
         const mtmd_input_chunk * chunk = mtmd_input_chunks_get(chunks, i);
         assert(chunk != NULL);
         enum mtmd_input_chunk_type type = mtmd_input_chunk_get_type(chunk);
+
+        uint8_t digest[MTMD_INPUT_CHUNK_CONTENT_DIGEST_SIZE];
+        int32_t digest_rc = mtmd_input_chunk_get_content_digest(chunk, digest);
+        if (digest_rc != 0) {
+            fprintf(stderr, "Failed to digest chunk %zu\n", i);
+            return 1;
+        }
+        printf("Chunk %zu content digest rc: %d\n", i, digest_rc);
+        memcpy(digests[i], digest, sizeof(digest));
+
+        mtmd_input_chunk * copied = mtmd_input_chunk_copy(chunk);
+        uint8_t digest_copy[MTMD_INPUT_CHUNK_CONTENT_DIGEST_SIZE];
+        if (copied == NULL || mtmd_input_chunk_get_content_digest(copied, digest_copy) != 0 ||
+                memcmp(digest, digest_copy, sizeof(digest)) != 0) {
+            fprintf(stderr, "Copied chunk %zu has a different digest\n", i);
+            mtmd_input_chunk_free(copied);
+            return 1;
+        }
+        mtmd_input_chunk_free(copied);
+
         printf("Chunk %zu type: %d\n", i, type);
 
         if (type == MTMD_INPUT_CHUNK_TYPE_TEXT) {
@@ -63,6 +85,25 @@ int main(void) {
             printf("    Image ID: %s\n", id);
         }
     }
+
+    // Canonical identity ignores caller-supplied IDs, but covers decoded content,
+    // position layout, preprocessing metadata, and audio token layout.
+    assert(memcmp(digests[1], digests[2], sizeof(digests[1])) == 0);
+    assert(memcmp(digests[1], digests[3], sizeof(digests[1])) != 0);
+    assert(memcmp(digests[1], digests[4], sizeof(digests[1])) != 0);
+    assert(memcmp(digests[1], digests[5], sizeof(digests[1])) != 0);
+    assert(mtmd_input_chunk_get_n_tokens(mtmd_input_chunks_get(chunks, 1)) ==
+           mtmd_input_chunk_get_n_tokens(mtmd_input_chunks_get(chunks, 4)));
+    assert(mtmd_input_chunk_get_n_pos(mtmd_input_chunks_get(chunks, 1)) !=
+           mtmd_input_chunk_get_n_pos(mtmd_input_chunks_get(chunks, 4)));
+
+    assert(memcmp(digests[6], digests[7], sizeof(digests[6])) == 0);
+    assert(memcmp(digests[6], digests[8], sizeof(digests[6])) != 0);
+    assert(memcmp(digests[6], digests[9], sizeof(digests[6])) != 0);
+    assert(mtmd_input_chunk_get_n_tokens(mtmd_input_chunks_get(chunks, 6)) !=
+           mtmd_input_chunk_get_n_tokens(mtmd_input_chunks_get(chunks, 9)));
+    assert(mtmd_input_chunk_get_n_pos(mtmd_input_chunks_get(chunks, 6)) !=
+           mtmd_input_chunk_get_n_pos(mtmd_input_chunks_get(chunks, 9)));
 
     // test chunk save/load round-trip
     for (size_t i = 0; i < n_chunks; i++) {
@@ -118,11 +159,18 @@ int main(void) {
                 assert(tok_orig[j] == tok_loaded[j]);
             }
         } else if (type == MTMD_INPUT_CHUNK_TYPE_IMAGE || type == MTMD_INPUT_CHUNK_TYPE_AUDIO) {
+            uint8_t digest[MTMD_INPUT_CHUNK_CONTENT_DIGEST_SIZE];
             const char * id_orig   = mtmd_input_chunk_get_id(chunk);
             const char * id_loaded = mtmd_input_chunk_get_id(loaded);
             printf("    Chunk %zu: loaded id '%s' (orig '%s')\n", i, id_loaded, id_orig);
             assert(id_orig != NULL && id_loaded != NULL);
             assert(strcmp(id_orig, id_loaded) == 0);
+            int32_t digest_rc = mtmd_input_chunk_get_content_digest(loaded, digest);
+            if (digest_rc == 0) {
+                fprintf(stderr, "Placeholder chunk %zu unexpectedly produced a digest\n", i);
+                return 1;
+            }
+            printf("    Placeholder content digest rc: %d\n", digest_rc);
         }
 
         mtmd_input_chunk_free(loaded);

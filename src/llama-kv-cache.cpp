@@ -6,6 +6,7 @@
 #include "llama-context.h"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cmath>
 #include <cstring>
@@ -538,6 +539,62 @@ void llama_kv_cache::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, ll
     //for (uint32_t s = 0; s < n_stream; ++s) {
     //    LLAMA_LOG_WARN("%s: seq %d: min = %d, max = %d\n", __func__, s, v_cells[s].seq_pos_min(s), v_cells[s].seq_pos_max(s));
     //}
+}
+
+size_t llama_kv_cache::seq_n_cells_attn(llama_seq_id seq_id) const {
+    GGML_ASSERT(seq_id >= 0 && (size_t) seq_id < seq_to_stream.size());
+
+    const auto & cells = v_cells[seq_to_stream[seq_id]];
+    size_t result = 0;
+    for (uint32_t i = 0; i < cells.size(); ++i) {
+        result += cells.seq_has(i, seq_id);
+    }
+    return result;
+}
+
+size_t llama_kv_cache::seq_n_shared_cells_attn(llama_seq_id seq_id) const {
+    GGML_ASSERT(seq_id >= 0 && (size_t) seq_id < seq_to_stream.size());
+
+    const auto & cells = v_cells[seq_to_stream[seq_id]];
+    size_t result = 0;
+    for (uint32_t i = 0; i < cells.size(); ++i) {
+        result += cells.seq_has(i, seq_id) && cells.seq_count(i) > 1;
+    }
+    return result;
+}
+
+llama_pos llama_kv_cache::seq_pos_min_attn(llama_seq_id seq_id) const {
+    return seq_pos_min(seq_id);
+}
+
+llama_pos llama_kv_cache::seq_pos_max_attn(llama_seq_id seq_id) const {
+    return seq_pos_max(seq_id);
+}
+
+bool llama_kv_cache::seq_can_share_attn() const {
+    return n_stream == 1;
+}
+
+size_t llama_kv_cache::n_unique_cells_attn(llama_seq_id seq_id_begin, llama_seq_id seq_id_end) const {
+    GGML_ASSERT(seq_id_begin >= 0 && seq_id_begin <= seq_id_end);
+    GGML_ASSERT((size_t) seq_id_end <= seq_to_stream.size());
+
+    llama_kv_cells::seq_set_t seq_ids;
+    for (llama_seq_id seq_id = seq_id_begin; seq_id < seq_id_end; ++seq_id) {
+        seq_ids.set(seq_id);
+    }
+
+    size_t result = 0;
+    for (const auto & cells : v_cells) {
+        for (uint32_t i = 0; i < cells.size(); ++i) {
+            result += (cells.seq_get_all(i) & seq_ids).any();
+        }
+    }
+    return result;
+}
+
+size_t llama_kv_cache::n_unique_tokens_attn(llama_seq_id seq_id_begin, llama_seq_id seq_id_end) const {
+    return n_unique_cells_attn(seq_id_begin, seq_id_end);
 }
 
 void llama_kv_cache::seq_keep(llama_seq_id seq_id) {

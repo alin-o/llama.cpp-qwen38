@@ -761,6 +761,52 @@ extern "C" {
                  llama_pos p0,
                  llama_pos p1);
 
+    // Attention-only variants for sharing immutable prefixes without aliasing mutable recurrent state.
+    LLAMA_API bool llama_memory_seq_rm_attn(
+            llama_memory_t mem,
+              llama_seq_id seq_id,
+                 llama_pos p0,
+                 llama_pos p1);
+
+    LLAMA_API void llama_memory_seq_cp_attn(
+            llama_memory_t mem,
+              llama_seq_id seq_id_src,
+              llama_seq_id seq_id_dst,
+                 llama_pos p0,
+                 llama_pos p1);
+
+    // Physical attention cells owned by seq_id, and the subset associated with more than one sequence.
+    LLAMA_API size_t llama_memory_seq_n_cells_attn(
+            llama_memory_t mem,
+              llama_seq_id seq_id);
+
+    LLAMA_API size_t llama_memory_seq_n_shared_cells_attn(
+            llama_memory_t mem,
+              llama_seq_id seq_id);
+
+    LLAMA_API llama_pos llama_memory_seq_pos_min_attn(
+            llama_memory_t mem,
+              llama_seq_id seq_id);
+
+    LLAMA_API llama_pos llama_memory_seq_pos_max_attn(
+            llama_memory_t mem,
+              llama_seq_id seq_id);
+
+    // True when sequence aliases in this memory retain one physical attention allocation.
+    LLAMA_API bool llama_memory_seq_can_share_attn(llama_memory_t mem);
+
+    // Count physical attention cells owned by at least one sequence in [seq_id_begin, seq_id_end).
+    LLAMA_API size_t llama_memory_n_unique_cells_attn(
+            llama_memory_t mem,
+              llama_seq_id seq_id_begin,
+              llama_seq_id seq_id_end);
+
+    // Count unique logical token positions, without double-counting mirrored attention caches.
+    LLAMA_API size_t llama_memory_n_unique_tokens_attn(
+            llama_memory_t mem,
+              llama_seq_id seq_id_begin,
+              llama_seq_id seq_id_end);
+
     // Removes all tokens that do not belong to the specified sequence
     LLAMA_API void llama_memory_seq_keep(
             llama_memory_t mem,

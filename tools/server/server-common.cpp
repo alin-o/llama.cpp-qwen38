@@ -84,6 +84,19 @@ json server_slot_stats::to_json() const {
         base["draft_n_accepted"] = n_draft_accepted;
     }
 
+    if (checkpoint_hit_tokens > 0) {
+        base["checkpoint"] = {
+            {"hit_tokens",       checkpoint_hit_tokens},
+            {"target_cells",     checkpoint_target_cells},
+            {"draft_cells",      checkpoint_draft_cells},
+            {"recurrent_clones", checkpoint_recurrent_clones},
+            {"working_state_bytes", checkpoint_working_state_bytes},
+            {"media_chunks",     checkpoint_media_chunks},
+            {"media_tokens",     checkpoint_media_tokens},
+            {"hidden_replay",    0},
+        };
+    }
+
     return base;
 }
 
@@ -266,7 +279,7 @@ static inline raw_buffer base64_decode(const std::string & encoded_string) {
 
 namespace {
 
-constexpr uint32_t SERVER_TOKENS_STATE_VERSION = 1;
+constexpr uint32_t SERVER_TOKENS_STATE_VERSION = 2;
 
 uint32_t server_tokens_state_u32(size_t value) {
     if (value > std::numeric_limits<uint32_t>::max()) {
@@ -496,6 +509,10 @@ void server_tokens::push_back(const mtmd_input_chunk * chunk) {
         }
         mtmd::input_chunk_ptr new_chunk(mtmd_input_chunk_copy(chunk));
         map_idx_to_media[start_idx] = std::move(new_chunk);
+        std::array<uint8_t, MTMD_INPUT_CHUNK_CONTENT_DIGEST_SIZE> digest;
+        if (mtmd_input_chunk_get_content_digest(chunk, digest.data()) == 0) {
+            map_idx_to_media_digest[start_idx] = digest;
+        }
     } else if (type == MTMD_INPUT_CHUNK_TYPE_TEXT) {
         size_t n_tokens;
         const auto * text_tokens = mtmd_input_chunk_get_tokens_text(chunk, &n_tokens);
@@ -519,6 +536,10 @@ void server_tokens::push_back_placeholder(const mtmd_input_chunk * chunk) {
             tokens.emplace_back(LLAMA_TOKEN_NULL);
         }
         map_idx_to_media[start_idx] = std::move(new_chunk);
+        std::array<uint8_t, MTMD_INPUT_CHUNK_CONTENT_DIGEST_SIZE> digest;
+        if (mtmd_input_chunk_get_content_digest(chunk, digest.data()) == 0) {
+            map_idx_to_media_digest[start_idx] = digest;
+        }
     } else {
         push_back(chunk);
     }
@@ -537,6 +558,10 @@ void server_tokens::push_back(server_tokens & tokens) {
             auto * chunk = tokens.map_idx_to_media[it->first].get();
             mtmd::input_chunk_ptr new_chunk(mtmd_input_chunk_copy(chunk));
             map_idx_to_media[start_idx + it->first] = std::move(new_chunk);
+            const auto digest_it = tokens.map_idx_to_media_digest.find(it->first);
+            if (digest_it != tokens.map_idx_to_media_digest.end()) {
+                map_idx_to_media_digest[start_idx + it->first] = digest_it->second;
+            }
         }
     }
 }
@@ -547,6 +572,11 @@ void server_tokens::insert(const llama_tokens & inp_tokens) {
 
 const llama_tokens & server_tokens::get_tokens() const {
     GGML_ASSERT(!has_mtmd);
+    return tokens;
+}
+
+const llama_tokens & server_tokens::get_tokens_no_media() const {
+    GGML_ASSERT(!has_media_chunks());
     return tokens;
 }
 
@@ -567,6 +597,11 @@ std::vector<char> server_tokens::serialize() const {
 
     for (const auto & item : map_idx_to_media) {
         writer.write_media_chunk(item.second.get());
+        const auto digest_it = map_idx_to_media_digest.find(item.first);
+        writer.write<uint8_t>(digest_it != map_idx_to_media_digest.end());
+        if (digest_it != map_idx_to_media_digest.end()) {
+            writer.write(std::vector<uint8_t>(digest_it->second.begin(), digest_it->second.end()));
+        }
     }
 
     return writer.take();
@@ -582,7 +617,8 @@ server_tokens server_tokens::deserialize(const llama_tokens & packed, bool has_m
 
     server_tokens_state_reader reader(reinterpret_cast<const char *>(packed.data()), packed.size() * sizeof(llama_token));
     reader.read<llama_token>(); // format marker
-    if (reader.read<uint32_t>() != SERVER_TOKENS_STATE_VERSION) {
+    const uint32_t version = reader.read<uint32_t>();
+    if (version != 1 && version != SERVER_TOKENS_STATE_VERSION) {
         throw std::runtime_error("Unsupported server tokens state version");
     }
 
@@ -608,6 +644,13 @@ server_tokens server_tokens::deserialize(const llama_tokens & packed, bool has_m
             throw std::runtime_error("Cannot load media chunk from server tokens state");
         }
         result.map_idx_to_media[start_idx] = std::move(chunk);
+        if (version >= 2 && reader.read<uint8_t>() != 0) {
+            const std::vector<uint8_t> digest = reader.read_vector<uint8_t>();
+            if (digest.size() != MTMD_INPUT_CHUNK_CONTENT_DIGEST_SIZE) {
+                throw std::runtime_error("Invalid media digest in server tokens state");
+            }
+            std::copy(digest.begin(), digest.end(), result.map_idx_to_media_digest[start_idx].begin());
+        }
     }
 
     if (reader.remaining() >= sizeof(llama_token)) {
@@ -629,7 +672,7 @@ llama_tokens server_tokens::get_text_tokens() const {
 }
 
 void server_tokens::set_token(llama_pos pos, llama_token id) {
-    GGML_ASSERT(!has_mtmd); // only allow this if mtmd is disabled
+    GGML_ASSERT(!has_media_chunks());
     tokens[pos] = id;
 }
 
@@ -658,6 +701,13 @@ void server_tokens::keep_first(size_t n) {
             size_t idx = it->first;
             if (idx >= n) {
                 it = map_idx_to_media.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (auto it = map_idx_to_media_digest.begin(); it != map_idx_to_media_digest.end(); ) {
+            if (it->first >= n) {
+                it = map_idx_to_media_digest.erase(it);
             } else {
                 ++it;
             }
@@ -702,13 +752,18 @@ size_t server_tokens::get_common_prefix(const server_tokens & b) const {
 
             GGML_ASSERT(a_chunk && b_chunk);
 
-            const std::string id_ai = mtmd_input_chunk_get_id(a_chunk.get());
-            const std::string id_bi = mtmd_input_chunk_get_id(b_chunk.get());
-
             const size_t n_tok_a = mtmd_input_chunk_get_n_tokens(a_chunk.get());
             const size_t n_tok_b = mtmd_input_chunk_get_n_tokens(b_chunk.get());
+            const llama_pos n_pos_a = mtmd_input_chunk_get_n_pos(a_chunk.get());
+            const llama_pos n_pos_b = mtmd_input_chunk_get_n_pos(b_chunk.get());
 
-            if (id_ai == id_bi && n_tok_a == n_tok_b) {
+            const auto digest_a = map_idx_to_media_digest.find(i);
+            const auto digest_b = b.map_idx_to_media_digest.find(i);
+
+            if (digest_a != map_idx_to_media_digest.end() && digest_b != b.map_idx_to_media_digest.end() &&
+                    digest_a->second == digest_b->second &&
+                    mtmd_input_chunk_get_type(a_chunk.get()) == mtmd_input_chunk_get_type(b_chunk.get()) &&
+                    n_tok_a == n_tok_b && n_pos_a == n_pos_b) {
                 GGML_ASSERT(n_tok_a > 0 && "Invalid media chunk"); // should never happen
                 i += n_tok_a - 1; // will be +1 by the for loop
                 continue;
@@ -775,12 +830,66 @@ server_tokens server_tokens::clone() const {
     server_tokens res;
     res.has_mtmd = has_mtmd;
     res.tokens   = tokens;
+    res.map_idx_to_media_digest = map_idx_to_media_digest;
     for (auto it = map_idx_to_media.begin(); it != map_idx_to_media.end(); ++it) {
         size_t idx = it->first;
         const mtmd::input_chunk_ptr & chunk = it->second;
         res.map_idx_to_media[idx] = mtmd::input_chunk_ptr(mtmd_input_chunk_copy(chunk.get()));
     }
     return res;
+}
+
+bool server_tokens::get_media_identities(
+        size_t n_tokens, std::vector<server_media_identity> & identities) const {
+    identities.clear();
+    if (n_tokens > tokens.size()) {
+        return false;
+    }
+
+    for (const auto & item : map_idx_to_media) {
+        const size_t index = item.first;
+        if (index >= n_tokens) {
+            break;
+        }
+
+        const auto * chunk = item.second.get();
+        const size_t chunk_tokens = mtmd_input_chunk_get_n_tokens(chunk);
+        if (chunk_tokens == 0 || chunk_tokens > n_tokens - index) {
+            identities.clear();
+            return false;
+        }
+
+        auto digest_it = map_idx_to_media_digest.find(index);
+        if (digest_it == map_idx_to_media_digest.end()) {
+            std::array<uint8_t, MTMD_INPUT_CHUNK_CONTENT_DIGEST_SIZE> digest;
+            if (mtmd_input_chunk_get_content_digest(chunk, digest.data()) != 0) {
+                identities.clear();
+                return false;
+            }
+            digest_it = map_idx_to_media_digest.emplace(index, digest).first;
+        }
+
+        identities.push_back({
+            index,
+            (uint32_t) mtmd_input_chunk_get_type(chunk),
+            chunk_tokens,
+            mtmd_input_chunk_get_n_pos(chunk),
+            digest_it->second,
+        });
+    }
+
+    return true;
+}
+
+size_t server_tokens::retained_media_bytes() const {
+    size_t result = map_idx_to_media_digest.size() * MTMD_INPUT_CHUNK_CONTENT_DIGEST_SIZE;
+    for (const auto & item : map_idx_to_media) {
+        size_t chunk_size = 0;
+        if (mtmd_input_chunk_save(item.second.get(), nullptr, 0, &chunk_size) == 0) {
+            result += chunk_size;
+        }
+    }
+    return result;
 }
 
 //

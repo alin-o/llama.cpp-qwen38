@@ -1605,6 +1605,38 @@ std::string server_task_result_metrics::to_metrics() {
             "spec_decode_num_drafts_total",
             "Speculative: Total speculative decoding verification steps",
             (double) metrics.n_draft_verif_steps
+        }, {
+            "global_checkpoint_hits_total",
+            "Number of exact global checkpoint attachments",
+            (double) metrics.n_checkpoint_hits
+        }, {
+            "global_checkpoint_builds_total",
+            "Number of immutable global checkpoints published",
+            (double) metrics.n_checkpoint_builds
+        }, {
+            "global_checkpoint_coalesced_total",
+            "Number of duplicate checkpoint constructions coalesced",
+            (double) metrics.n_checkpoint_coalesced
+        }, {
+            "global_checkpoint_evictions_total",
+            "Number of unpinned global checkpoints evicted",
+            (double) metrics.n_checkpoint_evictions
+        }, {
+            "global_checkpoint_holds_total",
+            "Number of requests held before exceeding the physical KV capacity",
+            (double) metrics.n_checkpoint_holds
+        }, {
+            "global_checkpoint_recurrent_clones_total",
+            "Number of private recurrent states cloned during checkpoint attachment",
+            (double) metrics.n_checkpoint_recurrent_clones
+        }, {
+            "global_checkpoint_media_chunks_avoided_total",
+            "Number of media chunks not re-encoded due to exact checkpoint attachment",
+            (double) metrics.n_checkpoint_media_chunks_avoided
+        }, {
+            "global_checkpoint_media_tokens_avoided_total",
+            "Number of media prompt tokens not re-prefilled due to exact checkpoint attachment",
+            (double) metrics.n_checkpoint_media_tokens_avoided
         },
     };
 
@@ -1629,6 +1661,62 @@ std::string server_task_result_metrics::to_metrics() {
             "n_busy_slots_per_decode",
             "Average number of busy slots per llama_decode() call",
             (double) metrics.n_busy_slots / std::max((double) metrics.n_decode, 1.0)
+        }, {
+            "global_checkpoint_records",
+            "Number of immutable global checkpoints currently retained",
+            (double) metrics.n_checkpoint_records
+        }, {
+            "global_checkpoint_pins",
+            "Number of checkpoint attachment operations currently pinned",
+            (double) metrics.n_checkpoint_pins
+        }, {
+            "global_checkpoint_state_bytes",
+            "Host bytes retained for recurrent and speculative checkpoint state",
+            (double) metrics.checkpoint_state_bytes
+        }, {
+            "global_checkpoint_state_bytes_peak",
+            "Peak host bytes retained for recurrent and speculative checkpoint state",
+            (double) metrics.checkpoint_state_bytes_peak
+        }, {
+            "global_checkpoint_media_bytes",
+            "Host bytes retained for exact media checkpoint identity",
+            (double) metrics.checkpoint_media_bytes
+        }, {
+            "global_checkpoint_media_bytes_peak",
+            "Peak host bytes retained for exact media checkpoint identity",
+            (double) metrics.checkpoint_media_bytes_peak
+        }, {
+            "global_checkpoint_working_state_bytes",
+            "Bytes represented by private recurrent and speculative state for active consumers",
+            (double) metrics.checkpoint_working_state_bytes
+        }, {
+            "global_checkpoint_working_state_bytes_peak",
+            "Peak bytes represented by private recurrent and speculative state for active consumers",
+            (double) metrics.checkpoint_working_state_bytes_peak
+        }, {
+            "attention_target_unique_cells",
+            "Unique physical target attention cells across active requests and checkpoints",
+            (double) metrics.checkpoint_target_cells
+        }, {
+            "attention_target_unique_cells_peak",
+            "Peak unique physical target attention cells",
+            (double) metrics.checkpoint_target_cells_peak
+        }, {
+            "attention_draft_unique_cells",
+            "Unique physical draft attention cells across active requests and checkpoints",
+            (double) metrics.checkpoint_draft_cells
+        }, {
+            "attention_draft_unique_cells_peak",
+            "Peak unique physical draft attention cells",
+            (double) metrics.checkpoint_draft_cells_peak
+        }, {
+            "global_checkpoint_holds",
+            "Number of requests currently held for physical KV capacity",
+            (double) metrics.n_checkpoint_holds_current
+        }, {
+            "global_checkpoint_holds_peak",
+            "Peak number of requests held for physical KV capacity",
+            (double) metrics.n_checkpoint_holds_peak
         },
     };
 

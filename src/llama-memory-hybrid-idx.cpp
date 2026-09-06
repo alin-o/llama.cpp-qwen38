@@ -165,6 +165,54 @@ void llama_memory_hybrid_idx::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_i
     }
 }
 
+bool llama_memory_hybrid_idx::seq_rm_attn(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
+    bool result = llama_memory_hybrid::seq_rm_attn(seq_id, p0, p1);
+    if (mem_idx) {
+        result = mem_idx->seq_rm(seq_id, p0, p1) && result;
+    }
+    return result;
+}
+
+void llama_memory_hybrid_idx::seq_cp_attn(
+        llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) {
+    llama_memory_hybrid::seq_cp_attn(seq_id_src, seq_id_dst, p0, p1);
+    if (mem_idx) {
+        mem_idx->seq_cp(seq_id_src, seq_id_dst, p0, p1);
+    }
+}
+
+size_t llama_memory_hybrid_idx::seq_n_cells_attn(llama_seq_id seq_id) const {
+    return llama_memory_hybrid::seq_n_cells_attn(seq_id) +
+            (mem_idx ? mem_idx->seq_n_cells_attn(seq_id) : 0);
+}
+
+size_t llama_memory_hybrid_idx::seq_n_shared_cells_attn(llama_seq_id seq_id) const {
+    return llama_memory_hybrid::seq_n_shared_cells_attn(seq_id) +
+            (mem_idx ? mem_idx->seq_n_shared_cells_attn(seq_id) : 0);
+}
+
+llama_pos llama_memory_hybrid_idx::seq_pos_min_attn(llama_seq_id seq_id) const {
+    return mem_idx ? std::max(
+            llama_memory_hybrid::seq_pos_min_attn(seq_id), mem_idx->seq_pos_min_attn(seq_id)) :
+            llama_memory_hybrid::seq_pos_min_attn(seq_id);
+}
+
+llama_pos llama_memory_hybrid_idx::seq_pos_max_attn(llama_seq_id seq_id) const {
+    return mem_idx ? std::min(
+            llama_memory_hybrid::seq_pos_max_attn(seq_id), mem_idx->seq_pos_max_attn(seq_id)) :
+            llama_memory_hybrid::seq_pos_max_attn(seq_id);
+}
+
+bool llama_memory_hybrid_idx::seq_can_share_attn() const {
+    return llama_memory_hybrid::seq_can_share_attn() && (!mem_idx || mem_idx->seq_can_share_attn());
+}
+
+size_t llama_memory_hybrid_idx::n_unique_cells_attn(
+        llama_seq_id seq_id_begin, llama_seq_id seq_id_end) const {
+    return llama_memory_hybrid::n_unique_cells_attn(seq_id_begin, seq_id_end) +
+            (mem_idx ? mem_idx->n_unique_cells_attn(seq_id_begin, seq_id_end) : 0);
+}
+
 void llama_memory_hybrid_idx::seq_keep(llama_seq_id seq_id) {
     llama_memory_hybrid::seq_keep(seq_id);
 

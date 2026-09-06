@@ -73,6 +73,14 @@ public:
     void seq_add (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1, llama_pos shift) override;
     void seq_div (llama_seq_id seq_id,                              llama_pos p0, llama_pos p1, int d) override;
 
+    size_t seq_n_cells_attn       (llama_seq_id seq_id) const override;
+    size_t seq_n_shared_cells_attn(llama_seq_id seq_id) const override;
+    llama_pos seq_pos_min_attn(llama_seq_id seq_id) const override;
+    llama_pos seq_pos_max_attn(llama_seq_id seq_id) const override;
+    bool seq_can_share_attn() const override;
+    size_t n_unique_cells_attn(llama_seq_id seq_id_begin, llama_seq_id seq_id_end) const override;
+    size_t n_unique_tokens_attn(llama_seq_id seq_id_begin, llama_seq_id seq_id_end) const override;
+
     llama_pos seq_pos_min(llama_seq_id seq_id) const override;
     llama_pos seq_pos_max(llama_seq_id seq_id) const override;
 

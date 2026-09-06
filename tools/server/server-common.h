@@ -10,6 +10,7 @@
 #include "json.h"
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <cinttypes>
@@ -129,6 +130,19 @@ std::vector<size_t> lora_get_enabled_ids(const std::vector<common_adapter_lora_i
 // server_tokens
 //
 
+struct server_media_identity {
+    size_t index = 0;
+    uint32_t type = 0;
+    size_t n_tokens = 0;
+    llama_pos n_pos = 0;
+    std::array<uint8_t, MTMD_INPUT_CHUNK_CONTENT_DIGEST_SIZE> digest = {};
+
+    bool operator==(const server_media_identity & other) const {
+        return index == other.index && type == other.type && n_tokens == other.n_tokens &&
+                n_pos == other.n_pos && digest == other.digest;
+    }
+};
+
 /**
  * server_tokens is a helper to manage the input tokens and image for the server.
  * it is made this way to simplify the logic of KV cache management.
@@ -141,6 +155,9 @@ private: // disallow accessing these members directly, risking out-of-sync
     // map a **start** index in tokens to the image chunk
     // note: the order need to be in-sync with tokens
     std::map<size_t, mtmd::input_chunk_ptr> map_idx_to_media;
+
+    // Strong identity for full chunks and placeholders derived from them.
+    mutable std::map<size_t, std::array<uint8_t, MTMD_INPUT_CHUNK_CONTENT_DIGEST_SIZE>> map_idx_to_media_digest;
 
     // list of tokens
     //   if the token is LLAMA_TOKEN_NULL, it indicates that this position is occupied by media chunk
@@ -208,6 +225,9 @@ public:
     // for compatibility with speculative decoding, ctx shift
     const llama_tokens & get_tokens() const;
 
+    // for callers that have verified there are no media chunks
+    const llama_tokens & get_tokens_no_media() const;
+
     llama_tokens get_text_tokens() const;
 
     std::vector<char> serialize() const;
@@ -220,8 +240,15 @@ public:
 
     bool empty() const { return tokens.empty(); }
 
+    bool has_media_chunks() const { return !map_idx_to_media.empty(); }
+
+    bool get_media_identities(size_t n_tokens, std::vector<server_media_identity> & identities) const;
+
+    size_t retained_media_bytes() const;
+
     void clear() {
         map_idx_to_media.clear();
+        map_idx_to_media_digest.clear();
         tokens.clear();
     }
 
@@ -368,6 +395,14 @@ struct server_slot_stats {
     uint64_t n_draft_accepted    = 0;
     uint64_t n_draft_verif_steps = 0;
 
+    uint64_t checkpoint_hit_tokens       = 0;
+    uint64_t checkpoint_target_cells     = 0;
+    uint64_t checkpoint_draft_cells      = 0;
+    uint64_t checkpoint_recurrent_clones = 0;
+    uint64_t checkpoint_working_state_bytes = 0;
+    uint64_t checkpoint_media_chunks = 0;
+    uint64_t checkpoint_media_tokens = 0;
+
     // these are absolute timestamps (in us)
     // note: must be signed - they are subtracted before the later ones are set
     int64_t t_start       = 0;
@@ -486,6 +521,30 @@ struct server_metrics {
     uint64_t n_draft_accepted    = 0; // Draft tokens actually accepted
     uint64_t n_draft_verif_steps = 0; // Total draft token verification steps by the target model
     std::vector<uint64_t> n_accepted_per_pos; // Accepted tokens per draft position
+
+    uint64_t n_checkpoint_hits      = 0;
+    uint64_t n_checkpoint_builds    = 0;
+    uint64_t n_checkpoint_coalesced = 0;
+    uint64_t n_checkpoint_evictions = 0;
+    uint64_t n_checkpoint_holds     = 0;
+    uint64_t n_checkpoint_recurrent_clones = 0;
+    uint64_t n_checkpoint_media_chunks_avoided = 0;
+    uint64_t n_checkpoint_media_tokens_avoided = 0;
+
+    uint64_t n_checkpoint_records        = 0;
+    uint64_t n_checkpoint_pins           = 0;
+    uint64_t checkpoint_state_bytes      = 0;
+    uint64_t checkpoint_state_bytes_peak = 0;
+    uint64_t checkpoint_media_bytes      = 0;
+    uint64_t checkpoint_media_bytes_peak = 0;
+    uint64_t checkpoint_working_state_bytes      = 0;
+    uint64_t checkpoint_working_state_bytes_peak = 0;
+    uint64_t checkpoint_target_cells      = 0;
+    uint64_t checkpoint_target_cells_peak = 0;
+    uint64_t checkpoint_draft_cells       = 0;
+    uint64_t checkpoint_draft_cells_peak  = 0;
+    uint64_t n_checkpoint_holds_current = 0;
+    uint64_t n_checkpoint_holds_peak    = 0;
 
     void init() {
         t_start = ggml_time_us();

@@ -22,6 +22,7 @@
 #include <cinttypes>
 #include <exception>
 #include <memory>
+#include <numeric>
 #include <filesystem>
 #include <random>
 #include <utility>
@@ -104,6 +105,7 @@ enum slot_state {
     SLOT_STATE_PROCESSING_PROMPT,
     SLOT_STATE_DONE_PROMPT,
     SLOT_STATE_GENERATING,
+    SLOT_STATE_HOLD,
 };
 
 struct server_slot; // forward declaration
@@ -296,6 +298,8 @@ struct server_slot {
 
     server_prompt prompt;
 
+    int64_t checkpoint_last = -1;
+
     bool prompt_save(server_prompt_cache & prompt_cache) const {
         if (prompt.tokens.size() == 0) {
             return false;
@@ -401,6 +405,8 @@ struct server_slot {
 
         // clear alora start
         alora_invocation_start = -1;
+
+        checkpoint_last = -1;
 
         // clear multimodal state
         mbatch.reset();
@@ -691,6 +697,7 @@ struct server_slot {
             {"n_ctx",         n_ctx},
             {"speculative",   can_speculate()},
             {"is_processing", is_processing()},
+            {"checkpoint_hold", state == SLOT_STATE_HOLD},
         };
 
         const auto & ptask = task ? task : task_prev;
@@ -914,6 +921,41 @@ private:
 
     std::unique_ptr<server_prompt_cache> prompt_cache;
 
+    struct global_checkpoint {
+        uint64_t key = 0;
+        uint64_t state_key = 0;
+        uint64_t compatibility_epoch = 0;
+        uint64_t last_access = 0;
+
+        llama_seq_id keeper_seq_id = -1;
+        server_tokens tokens;
+        std::vector<server_media_identity> media;
+        common_prompt_checkpoint state;
+
+        llama_context * ctx_tgt = nullptr;
+        llama_context * ctx_dft = nullptr;
+        const llama_model * model_tgt = nullptr;
+        const llama_model * model_dft = nullptr;
+        const mtmd_context * mctx = nullptr;
+        int32_t n_ctx_tgt = 0;
+        int32_t n_ctx_dft = 0;
+        int32_t image_min_tokens = 0;
+        int32_t image_max_tokens = 0;
+        int32_t mtmd_batch_max_tokens = 0;
+
+        size_t target_cells = 0;
+        size_t draft_cells = 0;
+        llama_pos target_pos_min = -1;
+        llama_pos target_pos_max = -1;
+        llama_pos draft_pos_min = -1;
+        llama_pos draft_pos_max = -1;
+        size_t pins = 0;
+    };
+
+    std::list<global_checkpoint> global_checkpoints;
+    uint64_t checkpoint_compatibility_epoch = 1;
+    uint64_t checkpoint_access_clock = 0;
+
     server_metrics metrics;
 
     // queued prompt stats - llama_decode() is async, so the timing is only valid after a sync
@@ -937,6 +979,8 @@ private:
     int64_t t_last_load_progress_ms = 0;
 
     void destroy() {
+        clear_global_checkpoints();
+
         spec.reset();
         spec_init.reset();
 
@@ -1176,11 +1220,6 @@ private:
                 params_base.ctx_shift = false;
                 SRV_WRN("%s\n", "ctx_shift is not supported by multimodal, it will be disabled");
             }
-
-            if (params_base.n_cache_reuse) {
-                params_base.n_cache_reuse = 0;
-                SRV_WRN("%s\n", "cache_reuse is not supported by multimodal, it will be disabled");
-            }
         }
 
         if (!llama_memory_can_shift(llama_get_memory(ctx_tgt))) {
@@ -1205,8 +1244,8 @@ private:
         n_swa = params_base.swa_full ? 0 : llama_model_n_swa(model_tgt);
 
         // Necessary similarity of prompt for slot selection
-        slot_prompt_similarity = params_base.slot_prompt_similarity;
         slot_prompt_cache_threshold = params_base.slot_prompt_cache_threshold;
+        slot_prompt_similarity = params_base.slot_prompt_similarity;
 
         const int n_ctx_train = llama_model_n_ctx_train(model_tgt);
 
@@ -1310,6 +1349,7 @@ private:
                 if (slot.stats.n_gen > 0) {
                     metrics_on_prediction(slot);
                 }
+                update_global_checkpoint_metrics();
             };
 
             slot.reset();
@@ -1546,6 +1586,13 @@ private:
         return nullptr;
     }
 
+    bool global_checkpoint_task_eligible(const server_task & task) const {
+        return params_base.kv_unified && params_base.n_ctx_checkpoints > 0 &&
+               task.params.cache_prompt && task.type == SERVER_TASK_TYPE_COMPLETION &&
+               task.params.lora.empty() &&
+               lora_get_enabled_ids(params_base.lora_adapters).empty();
+    }
+
     server_slot * get_available_slot(const server_task & task) {
         server_slot * ret = nullptr;
 
@@ -1606,7 +1653,7 @@ private:
 
                 // if we are about to lose a large portion of the existing context - save it in the prompt cache
                 if (f_keep < slot_prompt_cache_threshold) {
-                    update_cache = true;
+                    update_ca0.5f
                 }
             }
         }
@@ -1640,6 +1687,9 @@ private:
 
             // cache prompts only for completion tasks
             update_cache = update_cache && task.type == SERVER_TASK_TYPE_COMPLETION;
+
+            // Global checkpoints supersede full prompt-state reloads and avoid restoring duplicate attention cells.
+            update_cache = update_cache && !global_checkpoint_task_eligible(task);
 
             if (update_cache) {
                 SRV_TRC("%s", "updating prompt cache\n");
@@ -2309,9 +2359,585 @@ private:
         return true;
     }
 
+    static uint64_t global_checkpoint_key(
+            const server_tokens & tokens,
+            size_t n_tokens,
+            const std::vector<server_media_identity> & media,
+            uint64_t compatibility_epoch) {
+        uint64_t result = 1469598103934665603ULL;
+        auto mix = [&](uint64_t value) {
+            for (unsigned i = 0; i < sizeof(value); ++i) {
+                result ^= (value >> (8*i)) & 0xff;
+                result *= 1099511628211ULL;
+            }
+        };
+
+        mix(compatibility_epoch);
+        mix(n_tokens);
+        for (size_t i = 0; i < n_tokens; ++i) {
+            mix((uint32_t) tokens[i]);
+        }
+        for (const auto & chunk : media) {
+            mix(chunk.index);
+            mix(chunk.type);
+            mix(chunk.n_tokens);
+            mix((uint32_t) chunk.n_pos);
+            for (uint8_t byte : chunk.digest) {
+                mix(byte);
+            }
+        }
+        return result;
+    }
+
+    static uint64_t global_checkpoint_state_key(const common_prompt_checkpoint & state) {
+        uint64_t result = 1469598103934665603ULL;
+        auto mix = [&](const void * data, size_t size) {
+            const uint8_t * bytes = static_cast<const uint8_t *>(data);
+            for (size_t i = 0; i < size; ++i) {
+                result ^= bytes[i];
+                result *= 1099511628211ULL;
+            }
+        };
+
+        mix(&state.n_tokens, sizeof(state.n_tokens));
+        mix(&state.pos_min, sizeof(state.pos_min));
+        mix(&state.pos_max, sizeof(state.pos_max));
+        mix(state.data_tgt.data(), state.data_tgt.size());
+        mix(state.data_dft.data(), state.data_dft.size());
+        mix(state.data_spec.data(), state.data_spec.size());
+        return result;
+    }
+
+    bool global_checkpoint_eligible(const server_slot & slot) const {
+        if (!slot.task || !global_checkpoint_task_eligible(*slot.task)) {
+            return false;
+        }
+        if (!lora_get_enabled_ids(slot.lora).empty()) {
+            return false;
+        }
+        if (slot.task->tokens.has_media_chunks()) {
+            if (!mctx) {
+                return false;
+            }
+            std::vector<server_media_identity> media;
+            if (!slot.task->tokens.get_media_identities(slot.task->tokens.size(), media)) {
+                return false;
+            }
+        }
+
+        // Global checkpoints share the immutable attention cache and restore
+        // recurrent state by cloning it into the consumer slot.  Recurrent
+        // caches require a contiguous allocation for that clone, which is not
+        // reserved by the checkpoint keeper and may be unavailable when other
+        // slots are active.  Let the normal per-slot checkpoint path handle
+        // these models instead of allowing a failed clone to abort the server.
+        if (context_needs_partial_checkpoint(ctx_tgt) ||
+                context_needs_partial_checkpoint(ctx_dft)) {
+            return false;
+        }
+
+        if (!llama_memory_seq_can_share_attn(llama_get_memory(ctx_tgt))) {
+            return false;
+        }
+        return !ctx_dft || llama_memory_seq_can_share_attn(llama_get_memory(ctx_dft));
+    }
+
+    bool global_checkpoint_compatible(const global_checkpoint & checkpoint) const {
+        return checkpoint.compatibility_epoch == checkpoint_compatibility_epoch &&
+               checkpoint.ctx_tgt == ctx_tgt && checkpoint.ctx_dft == ctx_dft &&
+               checkpoint.model_tgt == model_tgt && checkpoint.model_dft == model_dft &&
+               checkpoint.mctx == mctx &&
+               checkpoint.n_ctx_tgt == (int32_t) llama_n_ctx(ctx_tgt) &&
+               checkpoint.n_ctx_dft == (ctx_dft ? (int32_t) llama_n_ctx(ctx_dft) : 0) &&
+               checkpoint.image_min_tokens == params_base.image_min_tokens &&
+               checkpoint.image_max_tokens == params_base.image_max_tokens &&
+               checkpoint.mtmd_batch_max_tokens == params_base.mtmd_batch_max_tokens;
+    }
+
+    bool slot_has_shared_attention(const server_slot & slot) const {
+        return llama_memory_seq_n_shared_cells_attn(llama_get_memory(ctx_tgt), slot.id) > 0 ||
+                (ctx_dft && llama_memory_seq_n_shared_cells_attn(llama_get_memory(ctx_dft), slot.id) > 0);
+    }
+
+    bool global_checkpoint_tokens_equal(
+            const global_checkpoint & checkpoint, const server_tokens & tokens, size_t n_tokens) const {
+        if (checkpoint.tokens.size() != n_tokens || tokens.size() < n_tokens) {
+            return false;
+        }
+        for (size_t i = 0; i < n_tokens; ++i) {
+            if (checkpoint.tokens[i] != tokens[i]) {
+                return false;
+            }
+        }
+        std::vector<server_media_identity> media;
+        return tokens.get_media_identities(n_tokens, media) && media == checkpoint.media;
+    }
+
+    global_checkpoint * find_global_checkpoint(const server_tokens & tokens, size_t n_tokens) {
+        if (n_tokens == 0) {
+            return nullptr;
+        }
+
+        std::vector<server_media_identity> media;
+        if (!tokens.get_media_identities(n_tokens, media)) {
+            return nullptr;
+        }
+        const uint64_t key = global_checkpoint_key(tokens, n_tokens, media, checkpoint_compatibility_epoch);
+        for (auto & checkpoint : global_checkpoints) {
+            if (checkpoint.key == key && global_checkpoint_compatible(checkpoint) &&
+                    global_checkpoint_tokens_equal(checkpoint, tokens, n_tokens)) {
+                return &checkpoint;
+            }
+        }
+        return nullptr;
+    }
+
+    global_checkpoint * find_deepest_global_checkpoint(const server_tokens & tokens) {
+        global_checkpoint * result = nullptr;
+        for (auto & checkpoint : global_checkpoints) {
+            if (!global_checkpoint_compatible(checkpoint) || checkpoint.tokens.size() >= tokens.size()) {
+                continue;
+            }
+            if (result && result->tokens.size() >= checkpoint.tokens.size()) {
+                continue;
+            }
+            if (global_checkpoint_tokens_equal(checkpoint, tokens, checkpoint.tokens.size())) {
+                result = &checkpoint;
+            }
+        }
+        return result;
+    }
+
+    bool global_checkpoint_creator_active(const global_checkpoint & checkpoint) const {
+        return std::any_of(slots.begin(), slots.end(), [&](const auto & slot) {
+            return slot.is_processing() && slot.task && slot.task->id == checkpoint.state.id_task;
+        });
+    }
+
+    void update_global_checkpoint_metrics() {
+        metrics.n_checkpoint_records = global_checkpoints.size();
+        metrics.n_checkpoint_pins = 0;
+        metrics.checkpoint_state_bytes = 0;
+        metrics.checkpoint_media_bytes = 0;
+        for (const auto & checkpoint : global_checkpoints) {
+            metrics.n_checkpoint_pins += checkpoint.pins;
+            metrics.checkpoint_state_bytes += checkpoint.state.size();
+            metrics.checkpoint_media_bytes += checkpoint.tokens.retained_media_bytes();
+        }
+        metrics.checkpoint_state_bytes_peak = std::max(
+                metrics.checkpoint_state_bytes_peak, metrics.checkpoint_state_bytes);
+        metrics.checkpoint_media_bytes_peak = std::max(
+                metrics.checkpoint_media_bytes_peak, metrics.checkpoint_media_bytes);
+
+        if (!params_base.kv_unified) {
+            metrics.checkpoint_target_cells = 0;
+            metrics.checkpoint_draft_cells = 0;
+            return;
+        }
+
+        const llama_seq_id seq_id_end = (llama_seq_id) llama_max_parallel_sequences();
+        metrics.checkpoint_target_cells = llama_memory_n_unique_cells_attn(
+                llama_get_memory(ctx_tgt), 0, seq_id_end);
+        metrics.checkpoint_draft_cells = ctx_dft ? llama_memory_n_unique_cells_attn(
+                llama_get_memory(ctx_dft), 0, seq_id_end) : 0;
+        metrics.checkpoint_target_cells_peak = std::max(
+                metrics.checkpoint_target_cells_peak, metrics.checkpoint_target_cells);
+        metrics.checkpoint_draft_cells_peak = std::max(
+                metrics.checkpoint_draft_cells_peak, metrics.checkpoint_draft_cells);
+    }
+
+    void update_global_checkpoint_working_metrics() {
+        metrics.checkpoint_working_state_bytes = 0;
+        for (const auto & slot : slots) {
+            if (slot.is_processing()) {
+                metrics.checkpoint_working_state_bytes += slot.stats.checkpoint_working_state_bytes;
+            }
+        }
+        metrics.checkpoint_working_state_bytes_peak = std::max(
+                metrics.checkpoint_working_state_bytes_peak, metrics.checkpoint_working_state_bytes);
+    }
+
+    void erase_global_checkpoint(std::list<global_checkpoint>::iterator it, bool count_eviction = true) {
+        GGML_ASSERT(it->pins == 0);
+        if (ctx_tgt) {
+            llama_memory_seq_rm_attn(llama_get_memory(ctx_tgt), it->keeper_seq_id, -1, -1);
+        }
+        if (ctx_dft) {
+            llama_memory_seq_rm_attn(llama_get_memory(ctx_dft), it->keeper_seq_id, -1, -1);
+        }
+        global_checkpoints.erase(it);
+        if (count_eviction) {
+            metrics.n_checkpoint_evictions++;
+        }
+        update_global_checkpoint_metrics();
+    }
+
+    bool evict_global_checkpoint(llama_seq_id protected_keeper = -1) {
+        auto victim = global_checkpoints.end();
+        for (auto it = global_checkpoints.begin(); it != global_checkpoints.end(); ++it) {
+            if (it->pins == 0 && it->keeper_seq_id != protected_keeper &&
+                    (victim == global_checkpoints.end() || it->last_access < victim->last_access)) {
+                victim = it;
+            }
+        }
+        if (victim == global_checkpoints.end()) {
+            return false;
+        }
+
+        SRV_TRC("evicting global checkpoint (keeper = %d, tokens = %zu, target cells = %zu, draft cells = %zu)\n",
+                victim->keeper_seq_id, victim->tokens.size(), victim->target_cells, victim->draft_cells);
+        erase_global_checkpoint(victim);
+        return true;
+    }
+
+    void clear_global_checkpoints() {
+        while (!global_checkpoints.empty()) {
+            auto it = global_checkpoints.begin();
+            it->pins = 0;
+            erase_global_checkpoint(it, false);
+        }
+        metrics.n_checkpoint_records = 0;
+        metrics.n_checkpoint_pins = 0;
+        metrics.checkpoint_state_bytes = 0;
+        metrics.checkpoint_media_bytes = 0;
+    }
+
+    llama_seq_id allocate_checkpoint_keeper() {
+        const int first = params_base.n_parallel;
+        const int last = (int) llama_max_parallel_sequences();
+        for (int candidate = first; candidate < last; ++candidate) {
+            const bool used = std::any_of(global_checkpoints.begin(), global_checkpoints.end(), [&](const auto & cur) {
+                return cur.keeper_seq_id == candidate;
+            });
+            if (!used) {
+                return candidate;
+            }
+        }
+        return -1;
+    }
+
+    static bool context_needs_partial_checkpoint(llama_context * ctx) {
+        if (!ctx) {
+            return false;
+        }
+        const llama_model * model = llama_get_model(ctx);
+        return llama_model_is_recurrent(model) || llama_model_is_hybrid(model);
+    }
+
+    void attach_global_checkpoint(
+            server_slot & slot, global_checkpoint & checkpoint, bool credit_hit, size_t media_from = 0) {
+        checkpoint.pins++;
+        checkpoint.last_access = ++checkpoint_access_clock;
+        update_global_checkpoint_metrics();
+
+        // Removing the full consumer state first makes the subsequent partial restore a private recurrent clone.
+        slot.mem.seq_rm(slot.id, -1, -1);
+        slot.mem.seq_cp_attn(checkpoint.keeper_seq_id, slot.id, -1, -1);
+        checkpoint.state.load_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+        checkpoint.state.load_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+        if (spec) {
+            common_speculative_set_state(spec.get(), slot.id, checkpoint.state.data_spec);
+        }
+
+        checkpoint.target_cells = llama_memory_seq_n_cells_attn(llama_get_memory(ctx_tgt), checkpoint.keeper_seq_id);
+        checkpoint.draft_cells = ctx_dft ?
+                llama_memory_seq_n_cells_attn(llama_get_memory(ctx_dft), checkpoint.keeper_seq_id) : 0;
+
+        slot.checkpoint_last = checkpoint.state.n_tokens;
+        const uint64_t recurrent_clones =
+                !checkpoint.state.data_tgt.empty() + !checkpoint.state.data_dft.empty();
+        slot.stats.checkpoint_working_state_bytes = checkpoint.state.size();
+        checkpoint.pins--;
+        update_global_checkpoint_metrics();
+        update_global_checkpoint_working_metrics();
+
+        metrics.n_checkpoint_recurrent_clones += recurrent_clones;
+        if (credit_hit) {
+            const uint64_t media_chunks = std::count_if(
+                    checkpoint.media.begin(), checkpoint.media.end(),
+                    [media_from](const server_media_identity & chunk) {
+                        return chunk.index >= media_from;
+                    });
+            const uint64_t media_tokens = std::accumulate(
+                    checkpoint.media.begin(), checkpoint.media.end(), uint64_t(0),
+                    [media_from](uint64_t total, const server_media_identity & chunk) {
+                        return total + (chunk.index >= media_from ? chunk.n_tokens : 0);
+                    });
+            slot.stats.checkpoint_hit_tokens = checkpoint.state.n_tokens;
+            slot.stats.checkpoint_target_cells = checkpoint.target_cells;
+            slot.stats.checkpoint_draft_cells = checkpoint.draft_cells;
+            slot.stats.checkpoint_recurrent_clones = recurrent_clones;
+            slot.stats.checkpoint_media_chunks = media_chunks;
+            slot.stats.checkpoint_media_tokens = media_tokens;
+            metrics.n_checkpoint_hits++;
+            metrics.n_checkpoint_media_chunks_avoided += media_chunks;
+            metrics.n_checkpoint_media_tokens_avoided += media_tokens;
+        }
+
+        SLT_TRC(slot,
+                "attached global checkpoint (keeper = %d, tokens = %" PRId64 ", target cells = %zu, "
+                "draft cells = %zu, recurrent clones = %" PRIu64 ", hidden replay = 0, credit = %s)\n",
+                checkpoint.keeper_seq_id, checkpoint.state.n_tokens, checkpoint.target_cells,
+                checkpoint.draft_cells, slot.stats.checkpoint_recurrent_clones, credit_hit ? "yes" : "no");
+    }
+
+    bool restore_global_checkpoint(server_slot & slot, int & n_past, size_t min_depth = 0) {
+        if (!global_checkpoint_eligible(slot)) {
+            return false;
+        }
+
+        auto * checkpoint = find_deepest_global_checkpoint(slot.task->tokens);
+        if (!checkpoint || checkpoint->tokens.size() <= min_depth) {
+            return false;
+        }
+
+        const size_t target_cells = llama_memory_seq_n_cells_attn(
+                llama_get_memory(ctx_tgt), checkpoint->keeper_seq_id);
+        const size_t draft_cells = ctx_dft ? llama_memory_seq_n_cells_attn(
+                llama_get_memory(ctx_dft), checkpoint->keeper_seq_id) : 0;
+        const llama_pos target_pos_min = llama_memory_seq_pos_min_attn(
+                llama_get_memory(ctx_tgt), checkpoint->keeper_seq_id);
+        const llama_pos target_pos_max = llama_memory_seq_pos_max_attn(
+                llama_get_memory(ctx_tgt), checkpoint->keeper_seq_id);
+        const llama_pos draft_pos_min = ctx_dft ? llama_memory_seq_pos_min_attn(
+                llama_get_memory(ctx_dft), checkpoint->keeper_seq_id) : -1;
+        const llama_pos draft_pos_max = ctx_dft ? llama_memory_seq_pos_max_attn(
+                llama_get_memory(ctx_dft), checkpoint->keeper_seq_id) : -1;
+        const bool partial_state_ok =
+                (!context_needs_partial_checkpoint(ctx_tgt) || !checkpoint->state.data_tgt.empty()) &&
+                (!context_needs_partial_checkpoint(ctx_dft) || !checkpoint->state.data_dft.empty());
+        const bool attention_state_ok =
+                target_cells == checkpoint->target_cells && draft_cells == checkpoint->draft_cells &&
+                target_pos_min == checkpoint->target_pos_min && target_pos_max == checkpoint->target_pos_max &&
+                draft_pos_min == checkpoint->draft_pos_min && draft_pos_max == checkpoint->draft_pos_max;
+        if (!partial_state_ok || !attention_state_ok ||
+                checkpoint->state_key != global_checkpoint_state_key(checkpoint->state) ||
+                checkpoint->state.n_tokens != (int64_t) checkpoint->tokens.size() ||
+                checkpoint->key != global_checkpoint_key(
+                        checkpoint->tokens, checkpoint->tokens.size(), checkpoint->media,
+                        checkpoint->compatibility_epoch) ||
+                !global_checkpoint_tokens_equal(*checkpoint, checkpoint->tokens, checkpoint->tokens.size())) {
+            SLT_TRC(slot, "%s", "global checkpoint failed integrity verification; evaluating normally\n");
+            return false;
+        }
+
+        const bool coalesced = global_checkpoint_creator_active(*checkpoint);
+        attach_global_checkpoint(slot, *checkpoint, true, min_depth);
+        metrics.n_checkpoint_coalesced += coalesced;
+        slot.prompt.tokens = checkpoint->tokens.clone();
+        slot.prompt.checkpoints.clear();
+        n_past = checkpoint->state.n_tokens;
+        return true;
+    }
+
+    size_t global_checkpoint_depth(const server_slot & slot) {
+        if (!global_checkpoint_eligible(slot)) {
+            return 0;
+        }
+        auto * checkpoint = find_deepest_global_checkpoint(slot.task->tokens);
+        return checkpoint ? checkpoint->tokens.size() : 0;
+    }
+
+    void schedule_global_checkpoint_pressure() {
+        if (!params_base.kv_unified) {
+            return;
+        }
+
+        std::vector<server_slot *> runnable;
+        std::vector<server_slot *> starting;
+        std::vector<server_slot *> held;
+        for (auto & slot : slots) {
+            if (slot.state == SLOT_STATE_HOLD) {
+                held.push_back(&slot);
+            } else if (slot.is_processing()) {
+                runnable.push_back(&slot);
+                if (slot.state == SLOT_STATE_STARTED) {
+                    starting.push_back(&slot);
+                }
+            }
+        }
+
+        if (runnable.empty() && !held.empty()) {
+            auto best = std::max_element(held.begin(), held.end(), [&](const auto * lhs, const auto * rhs) {
+                return global_checkpoint_depth(*lhs) < global_checkpoint_depth(*rhs);
+            });
+
+            try_clear_idle_slots();
+            auto * checkpoint = find_deepest_global_checkpoint((*best)->task->tokens);
+            const llama_seq_id protected_keeper = checkpoint ? checkpoint->keeper_seq_id : -1;
+            const size_t depth = checkpoint ? checkpoint->tokens.size() : 0;
+            const size_t remaining = (*best)->task->tokens.size() > depth ?
+                    (*best)->task->tokens.size() - depth : 0;
+            while (llama_memory_n_unique_tokens_attn(
+                        llama_get_memory(ctx_tgt), 0, (llama_seq_id) llama_max_parallel_sequences()) + remaining >
+                    llama_n_ctx(ctx_tgt) && evict_global_checkpoint(protected_keeper)) {
+            }
+
+            (*best)->state = SLOT_STATE_STARTED;
+            runnable.push_back(*best);
+            starting.push_back(*best);
+            SLT_TRC(**best, "%s", "resuming request held for KV pressure\n");
+        }
+
+        auto projected_cells = [&]() {
+            size_t result = llama_memory_n_unique_tokens_attn(
+                    llama_get_memory(ctx_tgt), 0, (llama_seq_id) llama_max_parallel_sequences());
+            for (const auto * slot : runnable) {
+                if (slot->state == SLOT_STATE_STARTED) {
+                    const size_t depth = global_checkpoint_depth(*slot);
+                    result += slot->task->tokens.size() > depth ? slot->task->tokens.size() - depth : 0;
+                } else if (slot->state == SLOT_STATE_PROCESSING_PROMPT) {
+                    result += slot->task->tokens.size() - slot->prompt.tokens.size();
+                }
+            }
+            return result;
+        };
+
+        const size_t capacity = llama_n_ctx(ctx_tgt);
+        std::sort(starting.begin(), starting.end(), [&](const auto * lhs, const auto * rhs) {
+            const size_t lhs_depth = global_checkpoint_depth(*lhs);
+            const size_t rhs_depth = global_checkpoint_depth(*rhs);
+            if (lhs_depth != rhs_depth) {
+                return lhs_depth < rhs_depth;
+            }
+            return lhs->task->tokens.size() > rhs->task->tokens.size();
+        });
+
+        for (auto * slot : starting) {
+            if (projected_cells() <= capacity || runnable.size() <= 1) {
+                break;
+            }
+
+            slot->mem.seq_rm(slot->id, -1, -1);
+            slot->prompt.clear();
+            slot->state = SLOT_STATE_HOLD;
+            runnable.erase(std::remove(runnable.begin(), runnable.end(), slot), runnable.end());
+            metrics.n_checkpoint_holds++;
+            SLT_TRC(*slot,
+                    "holding request for KV pressure (projected cells = %zu, capacity = %zu, shared depth = %zu)\n",
+                    projected_cells(), capacity, global_checkpoint_depth(*slot));
+        }
+
+        metrics.n_checkpoint_holds_current = std::count_if(
+                slots.begin(), slots.end(), [](const auto & slot) { return slot.state == SLOT_STATE_HOLD; });
+        metrics.n_checkpoint_holds_peak = std::max(
+                metrics.n_checkpoint_holds_peak, metrics.n_checkpoint_holds_current);
+    }
+
+    bool create_global_checkpoint(
+            server_slot & slot, int64_t n_tokens, llama_pos pos_min, llama_pos pos_max) {
+        if (!global_checkpoint_eligible(slot) || n_tokens <= 0) {
+            return false;
+        }
+
+        if (auto * existing = find_global_checkpoint(slot.prompt.tokens, n_tokens)) {
+            if (slot.stats.checkpoint_hit_tokens >= (uint64_t) n_tokens) {
+                slot.checkpoint_last = n_tokens;
+                return true;
+            }
+            const bool coalesced = global_checkpoint_creator_active(*existing);
+            attach_global_checkpoint(slot, *existing, false);
+            slot.checkpoint_last = n_tokens;
+            metrics.n_checkpoint_coalesced += coalesced;
+            return true;
+        }
+
+        const size_t limit = std::min<size_t>(
+                params_base.n_ctx_checkpoints,
+                llama_max_parallel_sequences() - params_base.n_parallel);
+        if (limit == 0) {
+            return true;
+        }
+        while (global_checkpoints.size() >= limit) {
+            if (!evict_global_checkpoint()) {
+                SRV_TRC("all global checkpoints are pinned; evaluating without publishing token boundary %" PRId64 "\n",
+                        n_tokens);
+                return true;
+            }
+        }
+
+        const llama_seq_id keeper_seq_id = allocate_checkpoint_keeper();
+        if (keeper_seq_id < 0) {
+            return true;
+        }
+
+        global_checkpoint checkpoint;
+        checkpoint.compatibility_epoch = checkpoint_compatibility_epoch;
+        checkpoint.last_access = ++checkpoint_access_clock;
+        checkpoint.keeper_seq_id = keeper_seq_id;
+        checkpoint.ctx_tgt = ctx_tgt;
+        checkpoint.ctx_dft = ctx_dft;
+        checkpoint.model_tgt = model_tgt;
+        checkpoint.model_dft = model_dft;
+        checkpoint.mctx = mctx;
+        checkpoint.n_ctx_tgt = llama_n_ctx(ctx_tgt);
+        checkpoint.n_ctx_dft = ctx_dft ? llama_n_ctx(ctx_dft) : 0;
+        checkpoint.image_min_tokens = params_base.image_min_tokens;
+        checkpoint.image_max_tokens = params_base.image_max_tokens;
+        checkpoint.mtmd_batch_max_tokens = params_base.mtmd_batch_max_tokens;
+        checkpoint.tokens = slot.prompt.tokens.clone();
+        checkpoint.tokens.keep_first(n_tokens);
+        if (!slot.task->tokens.get_media_identities(n_tokens, checkpoint.media)) {
+            SRV_TRC("media identity is unavailable at checkpoint boundary %" PRId64 "; not publishing\n", n_tokens);
+            return true;
+        }
+        checkpoint.key = global_checkpoint_key(
+                checkpoint.tokens, checkpoint.tokens.size(), checkpoint.media, checkpoint_compatibility_epoch);
+        checkpoint.state.id_task = slot.task->id;
+        checkpoint.state.update_pos(n_tokens, pos_min, pos_max);
+        if (context_needs_partial_checkpoint(ctx_tgt)) {
+            checkpoint.state.update_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+        }
+        if (context_needs_partial_checkpoint(ctx_dft)) {
+            checkpoint.state.update_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+        }
+        if (spec) {
+            common_speculative_get_state(spec.get(), slot.id, checkpoint.state.data_spec);
+        }
+        checkpoint.state_key = global_checkpoint_state_key(checkpoint.state);
+
+        slot.mem.seq_cp_attn(slot.id, keeper_seq_id, -1, -1);
+        checkpoint.target_cells = llama_memory_seq_n_cells_attn(llama_get_memory(ctx_tgt), keeper_seq_id);
+        checkpoint.draft_cells = ctx_dft ?
+                llama_memory_seq_n_cells_attn(llama_get_memory(ctx_dft), keeper_seq_id) : 0;
+        checkpoint.target_pos_min = llama_memory_seq_pos_min_attn(llama_get_memory(ctx_tgt), keeper_seq_id);
+        checkpoint.target_pos_max = llama_memory_seq_pos_max_attn(llama_get_memory(ctx_tgt), keeper_seq_id);
+        checkpoint.draft_pos_min = ctx_dft ?
+                llama_memory_seq_pos_min_attn(llama_get_memory(ctx_dft), keeper_seq_id) : -1;
+        checkpoint.draft_pos_max = ctx_dft ?
+                llama_memory_seq_pos_max_attn(llama_get_memory(ctx_dft), keeper_seq_id) : -1;
+        if (checkpoint.target_cells == 0 || checkpoint.target_pos_min < 0 || checkpoint.target_pos_max < 0 ||
+                (ctx_dft && (checkpoint.draft_cells == 0 ||
+                        checkpoint.draft_pos_min < 0 || checkpoint.draft_pos_max < 0))) {
+            slot.mem.seq_rm_attn(keeper_seq_id, -1, -1);
+            SRV_TRC("checkpoint boundary %" PRId64 " is not synchronized in target and draft; not publishing\n",
+                    n_tokens);
+            return true;
+        }
+
+        global_checkpoints.push_back(std::move(checkpoint));
+        const auto & published = global_checkpoints.back();
+        slot.checkpoint_last = n_tokens;
+        metrics.n_checkpoint_builds++;
+        update_global_checkpoint_metrics();
+
+        SLT_TRC(slot,
+                "published global checkpoint (keeper = %d, tokens = %" PRId64 ", target cells = %zu, "
+                "draft cells = %zu, recurrent bytes = %zu, speculative bytes = %zu)\n",
+                published.keeper_seq_id, n_tokens, published.target_cells, published.draft_cells,
+                published.state.data_tgt.size() + published.state.data_dft.size(),
+                published.state.data_spec.size());
+        return true;
+    }
+
     // n_tokens_cur: the number of tokens added to the batch for the current slot
     void create_checkpoint(server_slot & slot, const int64_t n_tokens_cur, llama_pos pos_min, llama_pos pos_max) {
         const int id_task = slot.task->id;
+
+        const int64_t n_tokens = slot.prompt.n_tokens() - n_tokens_cur;
+        if (create_global_checkpoint(slot, n_tokens, pos_min, pos_max)) {
+            return;
+        }
 
         // evict checkpoints within min-step of a previous checkpoint, unless they were
         // created by the current task
@@ -2346,7 +2972,7 @@ private:
         // [TAG_CHECKPOINTS_FIX_POS_MIN]
         // TODO: here we incorrectly deterimne that the saved checkpoint data covers the [pos_min, pos_max] range
         //       this is not true for SWA models: https://github.com/ggml-org/llama.cpp/pull/24411#issuecomment-4677983225
-        cur.update_pos(slot.prompt.n_tokens() - n_tokens_cur, pos_min, pos_max);
+        cur.update_pos(n_tokens, pos_min, pos_max);
 
         cur.update_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
         cur.update_dft(ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
@@ -2496,6 +3122,11 @@ private:
                         }
                     }
                     SRV_DBG("n_processing_slots = %d\n", n_processing_slots);
+
+                    metrics.n_checkpoint_holds_current = std::count_if(
+                            slots.begin(), slots.end(), [](const auto & slot) { return slot.state == SLOT_STATE_HOLD; });
+                    update_global_checkpoint_metrics();
+                    update_global_checkpoint_working_metrics();
 
                     auto res = std::make_unique<server_task_result_metrics>();
                     res->id                  = task.id;
@@ -2705,6 +3336,8 @@ private:
                         SRV_TRC("set lora adapter idx=%zu scale=%f\n", i, new_loras[i].scale);
                     }
                     // TODO @ngxson : make lora_adapters a dedicated member of server_context
+                    clear_global_checkpoints();
+                    checkpoint_compatibility_epoch++;
                     params_base.lora_adapters = new_loras;
                     auto res = std::make_unique<server_task_result_apply_lora>();
                     res->id = task.id;
@@ -2895,6 +3528,8 @@ private:
     }
 
     void pre_decode() {
+        schedule_global_checkpoint_pressure();
+
         // apply context-shift if needed
         // TODO: simplify and improve
         iterate(slots, [&](server_slot & slot) {
@@ -2911,6 +3546,12 @@ private:
                     // we should never reach this because params_base.ctx_shift is automatically disabled if mmproj is loaded
                     // we don't support ctx_shift because an image chunk may contains multiple tokens
                     GGML_ABORT("not supported by multimodal");
+                }
+
+                if (slot_has_shared_attention(slot)) {
+                    send_error(slot, "context shift cannot mutate a shared checkpoint prefix", ERROR_TYPE_SERVER);
+                    slot.release();
+                    return;
                 }
 
                 if (slot.task->is_parent() || slot.task->is_child()) {
@@ -3099,6 +3740,12 @@ private:
         if (params_base.cont_batching || batch.size() == 0) {
             bool add_ok = true; // false means the batch is full, skip remaining slots
 
+            const int32_t n_prompting = std::count_if(slots.begin(), slots.end(), [](const auto & slot) {
+                return slot.state == SLOT_STATE_STARTED || slot.state == SLOT_STATE_PROCESSING_PROMPT;
+            });
+            const int32_t prompt_quota = n_prompting > 0 ?
+                    std::max<int32_t>(1, (n_batch - batch.size()) / n_prompting) : n_batch;
+
             iterate(slots, [&](server_slot & slot) {
                 if (!add_ok || batch.size() >= n_batch) {
                     return; // batch is full, skip remaining slots
@@ -3150,6 +3797,7 @@ private:
 
                         // keep track how many tokens we can reuse from the previous state
                         int n_past = 0;
+                        bool used_global_checkpoint = false;
 
                         // empty prompt passed -> release the slot and send empty response
                         if (input_tokens.empty()) {
@@ -3216,7 +3864,9 @@ private:
 
                                 const bool can_cache_reuse =
                                     llama_memory_can_shift(llama_get_memory(ctx_tgt)) &&
-                                    !slot.prompt.tokens.has_mtmd;
+                                    !slot_has_shared_attention(slot) &&
+                                    !slot.prompt.tokens.has_media_chunks() &&
+                                    !input_tokens.has_media_chunks();
 
                                 if (!can_cache_reuse && n_cache_reuse > 0) {
                                     SLT_WRN(slot, "cache reuse is not supported - ignoring n_cache_reuse = %d\n", n_cache_reuse);
@@ -3224,15 +3874,11 @@ private:
 
                                 // reuse chunks from the cached prompt by shifting their KV cache in the new position
                                 if (can_cache_reuse && n_cache_reuse > 0) {
-                                    GGML_ASSERT(!slot.prompt.tokens.has_mtmd);
+                                    GGML_ASSERT(!slot.prompt.tokens.has_media_chunks());
+                                    GGML_ASSERT(!input_tokens.has_media_chunks());
 
                                     size_t head_c = n_past; // cache
                                     size_t head_p = n_past; // current prompt
-
-                                    if (mctx) {
-                                        // we should never reach this
-                                        GGML_ABORT("not supported by multimodal");
-                                    }
 
                                     SLT_DBG(slot, "trying to reuse chunks with size > %d, n_past = %d\n", n_cache_reuse, n_past);
 
@@ -3276,6 +3922,8 @@ private:
                                 n_past = 0;
                             }
 
+                            used_global_checkpoint = restore_global_checkpoint(slot, n_past, n_past);
+
                             llama_pos pos_next = slot.prompt.tokens.pos_next(n_past);
 
                             // ref: https://github.com/ggml-org/llama.cpp/pull/24110
@@ -3284,7 +3932,7 @@ private:
                             // the largest pos_min required for a checkpoint to be useful
                             const auto pos_min_thold = std::max(0, pos_next - n_swa - (has_new_tokens ? 0 : 1));
 
-                            if (n_past > 0 && n_past <= slot.prompt.n_tokens()) {
+                            if (!used_global_checkpoint && n_past > 0 && n_past <= slot.prompt.n_tokens()) {
                                 const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id);
                                 if (pos_min == -1) {
                                     SLT_ERR(slot, "n_past = %d, slot.prompt.tokens.size() = %d, seq_id = %d, pos_min = %d\n", n_past, (int) slot.prompt.tokens.size(), slot.id, pos_min);
@@ -3413,6 +4061,16 @@ private:
                         }
                     } // end of SLOT_STATE_STARTED
 
+                    if (slot.state == SLOT_STATE_PROCESSING_PROMPT && slot.prompt.n_tokens() > 0) {
+                        const size_t previous_depth = slot.prompt.tokens.size();
+                        int n_past = previous_depth;
+                        if (restore_global_checkpoint(slot, n_past, previous_depth)) {
+                            const size_t reused = n_past - previous_depth;
+                            slot.stats.n_prompt_cached += reused;
+                            metrics.add_prompt_cached(reused);
+                        }
+                    }
+
                     if (!slot.can_split()) {
                         // cannot fit the prompt in the current batch - will try next iter
                         if (batch.size() + slot.task->n_tokens() > n_batch) {
@@ -3455,12 +4113,12 @@ private:
                     // - the model does not support partial sequence removal
                     // - the model uses SWA (and we are not using `swa_full`)
                     // - the model supports partial sequence removal but only up to a fixed bound
-                    do_checkpoint = do_checkpoint && (
+                    do_checkpoint = do_checkpoint && (global_checkpoint_eligible(slot) ||
                             ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_FULL ||
                             ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_RS ||
                             n_swa > 0);
 
-                    bool has_mtmd = false;
+                    bool processed_mtmd = false;
 
                     // check if we should process the mtmd chunk
                     while (true) {
@@ -3501,15 +4159,15 @@ private:
                             // the chunk is already in the KV cache at this point, so we don't need to keep its data around
                             slot.prompt.tokens.push_back_placeholder(chunk.get());
                         }
-
-                        has_mtmd = true;
+                        processed_mtmd = true;
                     }
 
                     const auto & spans = slot.task->params.message_spans;
                     const auto last_user_pos = spans.last_user_message_pos();
 
                     // add prompt tokens for processing in the current batch
-                    while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.size() < n_batch) {
+                    while (slot.prompt.n_tokens() < slot.task->n_tokens() &&
+                            batch.size() < n_batch && batch.size() - n_tokens_prev < prompt_quota) {
                         // get next token to process
                         llama_token cur_tok = input_tokens[slot.prompt.n_tokens()];
                         if (cur_tok == LLAMA_TOKEN_NULL) {
@@ -3597,6 +4255,14 @@ private:
                         }
                     }
 
+                    if (do_checkpoint && processed_mtmd) {
+                        llama_synchronize(ctx_tgt);
+                        if (ctx_dft) {
+                            llama_synchronize(ctx_dft);
+                        }
+                        metrics_flush_prompt();
+                    }
+
                     const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id);
                     const auto pos_max = llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id);
 
@@ -3606,14 +4272,15 @@ private:
                         do_checkpoint = false;
                     }
 
-                    // do not checkpoint after mtmd chunks
-                    do_checkpoint = do_checkpoint && !has_mtmd;
-
                     // no need to create checkpoints that are too close together, unless it's the last user message
+                    const bool use_global_checkpoints = global_checkpoint_eligible(slot);
+                    const bool no_previous_checkpoint = use_global_checkpoints ?
+                            slot.checkpoint_last < 0 : slot.prompt.checkpoints.empty();
+                    const int64_t previous_checkpoint = use_global_checkpoints ?
+                            slot.checkpoint_last : (slot.prompt.checkpoints.empty() ? -1 : slot.prompt.checkpoints.back().n_tokens);
                     do_checkpoint = do_checkpoint && (
-                            slot.prompt.checkpoints.empty() ||
-                            is_last_user_message || near_prompt_end ||
-                            n_tokens_start > slot.prompt.checkpoints.back().n_tokens + params_base.checkpoint_min_step);
+                            no_previous_checkpoint || is_last_user_message || near_prompt_end ||
+                            n_tokens_start > previous_checkpoint + params_base.checkpoint_min_step);
                     SLT_DBG(slot, "main/do_checkpoint = %s, pos_min = %d, pos_max = %d\n", do_checkpoint ? "yes" : "no", pos_min, pos_max);
 
                     // note: we create the checkpoint before calling llama_decode(), so the current batch is not
@@ -3714,7 +4381,7 @@ private:
             }
 
             // retry with half the batch size to try to find a free slot in the KV cache
-            if (!try_clear_idle_slots()) {
+            if (!try_clear_idle_slots() && !evict_global_checkpoint()) {
                 n_batch /= 2;
             }
 
@@ -3820,6 +4487,14 @@ private:
                 }
 
                 GGML_ASSERT(slot.task->need_sampling());
+
+                if (global_checkpoint_eligible(slot)) {
+                    create_global_checkpoint(
+                            slot,
+                            slot.prompt.n_tokens(),
+                            llama_memory_seq_pos_min(llama_get_memory(ctx_tgt), slot.id),
+                            llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id));
+                }
 
                 // prompt evaluated for next-token prediction
                 slot.state = SLOT_STATE_GENERATING;

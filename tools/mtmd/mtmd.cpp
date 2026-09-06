@@ -26,6 +26,10 @@
 #include <type_traits>
 #include <vector>
 
+extern "C" {
+#include "hash/sha256/sha256.h"
+}
+
 // remember to bump this if the serialization format changes
 #define MTMD_SERIALIZATION_VERSION 2
 
@@ -2316,6 +2320,71 @@ void mtmd_input_chunks_free(mtmd_input_chunks * chunks) {
 
 // mtmd_input_chunk
 
+namespace {
+
+struct mtmd_content_hasher {
+    sha256_t ctx;
+
+    mtmd_content_hasher() {
+        sha256_init(&ctx);
+    }
+
+    void write_u8(uint8_t value) {
+        sha256_update(&ctx, &value, sizeof(value));
+    }
+
+    void write_u32(uint32_t value) {
+        uint8_t bytes[4];
+        for (unsigned i = 0; i < sizeof(bytes); ++i) {
+            bytes[i] = (value >> (8*i)) & 0xff;
+        }
+        sha256_update(&ctx, bytes, sizeof(bytes));
+    }
+
+    void write_u64(uint64_t value) {
+        uint8_t bytes[8];
+        for (unsigned i = 0; i < sizeof(bytes); ++i) {
+            bytes[i] = (value >> (8*i)) & 0xff;
+        }
+        sha256_update(&ctx, bytes, sizeof(bytes));
+    }
+
+    void write_i32(int32_t value) {
+        write_u32((uint32_t) value);
+    }
+
+    void write_f32(float value) {
+        static_assert(sizeof(float) == sizeof(uint32_t), "unexpected float size");
+        uint32_t bits;
+        std::memcpy(&bits, &value, sizeof(bits));
+        write_u32(bits);
+    }
+
+    void write_batch(const clip_image_f32_batch & batch) {
+        write_u8(batch.is_audio);
+        write_u64(batch.entries.size());
+        for (const auto & entry : batch.entries) {
+            write_u8(entry.add_viewsep);
+            write_u8(entry.add_newline);
+            write_i32(entry.lead_pad);
+            write_i32(entry.anyres.grid_x);
+            write_i32(entry.anyres.grid_y);
+            write_i32(entry.anyres.orig_nx);
+            write_i32(entry.anyres.orig_ny);
+            write_i32(entry.nx());
+            write_i32(entry.ny());
+
+            const auto & data = entry.get_ro_buf();
+            write_u64(data.size());
+            for (float value : data) {
+                write_f32(value);
+            }
+        }
+    }
+};
+
+} // namespace
+
 enum mtmd_input_chunk_type mtmd_input_chunk_get_type(const mtmd_input_chunk * chunk) {
     return chunk->type;
 }
@@ -2357,6 +2426,46 @@ llama_pos mtmd_input_chunk_get_n_pos(const mtmd_input_chunk * chunk) {
         return chunk->tokens_audio->n_tokens;
     } else {
         GGML_ABORT("invalid chunk type");
+    }
+}
+
+int32_t mtmd_input_chunk_get_content_digest(
+        const mtmd_input_chunk * chunk,
+        uint8_t digest[MTMD_INPUT_CHUNK_CONTENT_DIGEST_SIZE]) {
+    if (!chunk || !digest || chunk->is_placeholder()) {
+        return -1;
+    }
+
+    try {
+        mtmd_content_hasher hasher;
+        hasher.write_u32(1); // canonical digest format version
+        hasher.write_u32((uint32_t) chunk->type);
+
+        if (chunk->type == MTMD_INPUT_CHUNK_TYPE_TEXT) {
+            hasher.write_u64(chunk->tokens_text.size());
+            for (llama_token token : chunk->tokens_text) {
+                hasher.write_i32(token);
+            }
+        } else if (chunk->type == MTMD_INPUT_CHUNK_TYPE_IMAGE) {
+            const auto & image = *chunk->tokens_image;
+            hasher.write_u32(image.nx);
+            hasher.write_u32(image.ny);
+            hasher.write_u32((uint32_t) image.pos);
+            hasher.write_u32(image.image_idx);
+            hasher.write_u32(image.n_temporal_merge);
+            hasher.write_batch(image.batch_f32);
+        } else if (chunk->type == MTMD_INPUT_CHUNK_TYPE_AUDIO) {
+            const auto & audio = *chunk->tokens_audio;
+            hasher.write_u32(audio.n_tokens);
+            hasher.write_batch(audio.batch_f32);
+        } else {
+            return -1;
+        }
+
+        sha256_final(&hasher.ctx, digest);
+        return 0;
+    } catch (const std::exception &) {
+        return -1;
     }
 }
 
@@ -2560,6 +2669,11 @@ mtmd_input_chunks * mtmd_test_create_input_chunks() {
     image_tokens->nx = 4;
     image_tokens->ny = 4;
     image_tokens->batch_f32.entries.resize(16);
+    for (size_t i = 0; i < image_tokens->batch_f32.entries.size(); ++i) {
+        auto & entry = image_tokens->batch_f32.entries[i];
+        entry.set_size({ 1, 1 }, false, false);
+        entry.cpy_buf({ (float) i, (float) i + 0.25f, (float) i + 0.5f });
+    }
     image_tokens->id = "image_1";
     mtmd_input_chunk chunk_image{
         MTMD_INPUT_CHUNK_TYPE_IMAGE,
@@ -2568,6 +2682,93 @@ mtmd_input_chunks * mtmd_test_create_input_chunks() {
         nullptr, // audio tokens
     };
     chunks->entries.emplace_back(std::move(chunk_image));
+
+    // Same preprocessed image with a different caller-supplied ID.
+    mtmd_input_chunk image_equivalent{
+        MTMD_INPUT_CHUNK_TYPE_IMAGE,
+        {},
+        std::make_unique<mtmd_image_tokens>(chunks->entries[1].tokens_image->clone()),
+        nullptr,
+    };
+    image_equivalent.tokens_image->id = "image_equivalent";
+    chunks->entries.emplace_back(std::move(image_equivalent));
+
+    // Same layout with different preprocessed content.
+    mtmd_input_chunk image_content{
+        MTMD_INPUT_CHUNK_TYPE_IMAGE,
+        {},
+        std::make_unique<mtmd_image_tokens>(chunks->entries[1].tokens_image->clone()),
+        nullptr,
+    };
+    image_content.tokens_image->batch_f32.entries[0].cpy_buf({ 9.0f, 9.25f, 9.5f });
+    chunks->entries.emplace_back(std::move(image_content));
+
+    // Same token count with a different position layout.
+    mtmd_input_chunk image_position{
+        MTMD_INPUT_CHUNK_TYPE_IMAGE,
+        {},
+        std::make_unique<mtmd_image_tokens>(chunks->entries[1].tokens_image->clone()),
+        nullptr,
+    };
+    image_position.tokens_image->pos = MTMD_POS_TYPE_MROPE;
+    chunks->entries.emplace_back(std::move(image_position));
+
+    // Same content and token layout with different preprocessing metadata.
+    mtmd_input_chunk image_preprocess{
+        MTMD_INPUT_CHUNK_TYPE_IMAGE,
+        {},
+        std::make_unique<mtmd_image_tokens>(chunks->entries[1].tokens_image->clone()),
+        nullptr,
+    };
+    image_preprocess.tokens_image->batch_f32.entries[0].add_newline = true;
+    chunks->entries.emplace_back(std::move(image_preprocess));
+
+    // create an audio chunk
+    mtmd_audio_tokens_ptr audio_tokens(new mtmd_audio_tokens);
+    audio_tokens->n_tokens = 8;
+    audio_tokens->batch_f32.is_audio = true;
+    audio_tokens->batch_f32.entries.resize(1);
+    audio_tokens->batch_f32.entries[0].set_size({ 4, 2 }, false, true);
+    audio_tokens->batch_f32.entries[0].cpy_buf({ 0.0f, 0.25f, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f });
+    audio_tokens->id = "audio_1";
+    mtmd_input_chunk chunk_audio{
+        MTMD_INPUT_CHUNK_TYPE_AUDIO,
+        {}, // text tokens
+        nullptr, // image tokens
+        std::move(audio_tokens),
+    };
+    chunks->entries.emplace_back(std::move(chunk_audio));
+
+    // Same preprocessed audio with a different caller-supplied ID.
+    mtmd_input_chunk audio_equivalent{
+        MTMD_INPUT_CHUNK_TYPE_AUDIO,
+        {},
+        nullptr,
+        std::make_unique<mtmd_audio_tokens>(chunks->entries[6].tokens_audio->clone()),
+    };
+    audio_equivalent.tokens_audio->id = "audio_equivalent";
+    chunks->entries.emplace_back(std::move(audio_equivalent));
+
+    // Same audio layout with different preprocessed content.
+    mtmd_input_chunk audio_content{
+        MTMD_INPUT_CHUNK_TYPE_AUDIO,
+        {},
+        nullptr,
+        std::make_unique<mtmd_audio_tokens>(chunks->entries[6].tokens_audio->clone()),
+    };
+    audio_content.tokens_audio->batch_f32.entries[0].cpy_buf(
+            { 0.0f, 0.25f, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f });
+    chunks->entries.emplace_back(std::move(audio_content));
+
+    // Same preprocessed audio with a different token and position count.
+    mtmd_input_chunk audio_layout{
+        MTMD_INPUT_CHUNK_TYPE_AUDIO,
+        {},
+        nullptr,
+        std::make_unique<mtmd_audio_tokens>(chunks->entries[6].tokens_audio->clone()),
+    };
+    audio_layout.tokens_audio->n_tokens++;
+    chunks->entries.emplace_back(std::move(audio_layout));
 
     return chunks;
 }

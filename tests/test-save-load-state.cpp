@@ -354,6 +354,161 @@ static bool test_seq_cp_device(struct llama_model * model, const struct common_p
     return true;
 }
 
+// Test immutable attention aliases can outlive both the source and the hidden keeper sequence.
+static bool test_seq_cp_attn_alias(struct llama_model * model, const common_params & params, const llama_tokens & tokens) {
+    auto params_ctx = common_context_params_to_llama(params);
+    params_ctx.n_seq_max = 2;
+    params_ctx.kv_unified = true;
+    auto ctx = llama_context_ptr{llama_init_from_model(model, params_ctx)};
+    if (!ctx) {
+        return false;
+    }
+
+    LOG("\n=== Test 9: immutable attention alias ===\n");
+
+    llama_batch batch = llama_batch_get_one(const_cast<llama_token *>(tokens.data()), tokens.size());
+    if (llama_decode(ctx.get(), batch) != 0) {
+        LOG_ERR("%s: prompt decode failed\n", __func__);
+        return false;
+    }
+
+    llama_memory_t mem = llama_get_memory(ctx.get());
+    const llama_seq_id keeper = 17;
+    if (!llama_memory_seq_can_share_attn(mem)) {
+        LOG("%s: model has no shareable attention memory, skipping\n", __func__);
+        return true;
+    }
+
+    const size_t n_cells = llama_memory_seq_n_cells_attn(mem, 0);
+    const llama_pos pos_min = llama_memory_seq_pos_min_attn(mem, 0);
+    const llama_pos pos_max = llama_memory_seq_pos_max_attn(mem, 0);
+    llama_memory_seq_cp_attn(mem, 0, keeper, -1, -1);
+    if (n_cells == 0 || llama_memory_seq_n_cells_attn(mem, keeper) != n_cells ||
+            llama_memory_seq_n_shared_cells_attn(mem, keeper) != n_cells ||
+            llama_memory_seq_pos_min_attn(mem, keeper) != pos_min ||
+            llama_memory_seq_pos_max_attn(mem, keeper) != pos_max ||
+            llama_memory_n_unique_tokens_attn(mem, 0, keeper + 1) == 0 ||
+            llama_memory_n_unique_tokens_attn(mem, 0, keeper + 1) > n_cells ||
+            llama_memory_n_unique_cells_attn(mem, 0, keeper + 1) != n_cells) {
+        LOG_ERR("%s: keeper did not alias source cells\n", __func__);
+        return false;
+    }
+
+    if (!llama_memory_seq_rm_attn(mem, 0, -1, -1) ||
+            llama_memory_seq_n_cells_attn(mem, keeper) != n_cells) {
+        LOG_ERR("%s: removing source reclaimed keeper cells\n", __func__);
+        return false;
+    }
+
+    llama_memory_seq_cp_attn(mem, keeper, 1, -1, -1);
+    if (!llama_memory_seq_rm_attn(mem, keeper, -1, -1) ||
+            llama_memory_seq_n_cells_attn(mem, 1) != n_cells) {
+        LOG_ERR("%s: consumer did not retain aliased cells\n", __func__);
+        return false;
+    }
+
+    LOG("\nPASS\n");
+    return true;
+}
+
+// Test an attached hybrid consumer keeps private recurrent state after a sibling branch advances.
+static bool test_seq_cp_attn_hybrid_cow(
+        struct llama_model * model, const common_params & params, const llama_tokens & tokens) {
+    if (!llama_model_is_hybrid(model) || tokens.size() < 8) {
+        return true;
+    }
+
+    auto params_ctx = common_context_params_to_llama(params);
+    params_ctx.n_ctx = 256;
+    params_ctx.n_seq_max = 2;
+    params_ctx.kv_unified = true;
+
+    auto ctx_oracle = llama_context_ptr{llama_init_from_model(model, params_ctx)};
+    auto ctx_shared = llama_context_ptr{llama_init_from_model(model, params_ctx)};
+    if (!ctx_oracle || !ctx_shared) {
+        return false;
+    }
+
+    LOG("\n=== Test 10: immutable attention with private hybrid state ===\n");
+
+    llama_memory_t mem = llama_get_memory(ctx_shared.get());
+    if (!llama_memory_seq_can_share_attn(mem)) {
+        LOG("%s: model has no shareable attention memory, skipping\n", __func__);
+        return true;
+    }
+
+    const size_t n_suffix = 4;
+    const size_t n_prefix = std::min<size_t>(64, tokens.size() - n_suffix);
+    llama_batch prompt = llama_batch_get_one(const_cast<llama_token *>(tokens.data()), n_prefix);
+    if (llama_decode(ctx_oracle.get(), prompt) != 0 || llama_decode(ctx_shared.get(), prompt) != 0) {
+        LOG_ERR("%s: prompt decode failed\n", __func__);
+        return false;
+    }
+
+    const uint32_t partial_flags = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
+    std::vector<uint8_t> partial(llama_state_seq_get_size_ext(ctx_shared.get(), 0, partial_flags));
+    if (partial.empty() ||
+            llama_state_seq_get_data_ext(ctx_shared.get(), partial.data(), partial.size(), 0, partial_flags) != partial.size()) {
+        LOG_ERR("%s: failed to save hybrid partial state\n", __func__);
+        return false;
+    }
+
+    const llama_seq_id keeper = 17;
+    llama_memory_seq_cp_attn(mem, 0, keeper, -1, -1);
+    if (!llama_memory_seq_rm(mem, 0, -1, -1)) {
+        LOG_ERR("%s: failed to clear checkpoint source\n", __func__);
+        return false;
+    }
+    llama_memory_seq_cp_attn(mem, keeper, 0, -1, -1);
+    llama_memory_seq_cp_attn(mem, keeper, 1, -1, -1);
+    if (llama_state_seq_set_data_ext(ctx_shared.get(), partial.data(), partial.size(), 0, partial_flags) != partial.size() ||
+            llama_state_seq_set_data_ext(ctx_shared.get(), partial.data(), partial.size(), 1, partial_flags) != partial.size()) {
+        LOG_ERR("%s: failed to clone hybrid partial state\n", __func__);
+        return false;
+    }
+
+    const auto * vocab = llama_model_get_vocab(model);
+    llama_token divergent = (tokens[n_prefix] + 1) % llama_vocab_n_tokens(vocab);
+    llama_batch_ptr batch(1, 0, 1);
+    common_batch_add(batch.get(), divergent, n_prefix, {0}, true);
+    if (llama_decode(ctx_shared.get(), batch.get()) != 0) {
+        LOG_ERR("%s: divergent sibling decode failed\n", __func__);
+        return false;
+    }
+
+    auto smpl_oracle = llama_sampler_ptr{llama_sampler_init_greedy()};
+    auto smpl_shared = llama_sampler_ptr{llama_sampler_init_greedy()};
+    for (size_t i = 0; i < n_suffix; ++i) {
+        const llama_token token = tokens[n_prefix + i];
+
+        llama_batch oracle_batch = llama_batch_get_one(const_cast<llama_token *>(&token), 1);
+        llama_pos oracle_pos = n_prefix + i;
+        oracle_batch.pos = &oracle_pos;
+        if (llama_decode(ctx_oracle.get(), oracle_batch) != 0) {
+            LOG_ERR("%s: oracle suffix decode failed\n", __func__);
+            return false;
+        }
+
+        common_batch_clear(batch.get());
+        common_batch_add(batch.get(), token, n_prefix + i, {1}, true);
+        if (llama_decode(ctx_shared.get(), batch.get()) != 0) {
+            LOG_ERR("%s: attached suffix decode failed\n", __func__);
+            return false;
+        }
+
+        const llama_token expected = llama_sampler_sample(smpl_oracle.get(), ctx_oracle.get(), -1);
+        const llama_token actual = llama_sampler_sample(smpl_shared.get(), ctx_shared.get(), -1);
+        if (actual != expected) {
+            LOG_ERR("%s: cold oracle token %d differs from attached token %d at suffix step %zu\n",
+                    __func__, expected, actual, i);
+            return false;
+        }
+    }
+
+    LOG("\nPASS\n");
+    return true;
+}
+
 
 // Test 6/7: seq copy (scatter)
 // - decode the same prefix on two sequences, interleaving seq 0 cells between the seq 1 cells
@@ -508,7 +663,7 @@ static bool test_state_roundtrip(struct llama_model * model, const struct common
 }
 
 
-// Run the full save/load test suite (tests 1-8) for a single model.
+// Run the full save/load test suite for a single model.
 // Returns true if all tests pass, false otherwise.
 static bool run_save_load_tests_for_model(const std::string & model_path, const struct common_params & base_params) {
     struct common_params params = base_params;
@@ -587,6 +742,16 @@ static bool run_save_load_tests_for_model(const std::string & model_path, const 
 
     // Test 8: state blob round-trip
     if (!test_state_roundtrip(model, params, tokens)) {
+        return false;
+    }
+
+    // Test 9: immutable attention alias ownership
+    if (!test_seq_cp_attn_alias(model, params, tokens)) {
+        return false;
+    }
+
+    // Test 10: attention alias plus private hybrid state
+    if (!test_seq_cp_attn_hybrid_cow(model, params, tokens)) {
         return false;
     }
 

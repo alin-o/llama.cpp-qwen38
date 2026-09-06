@@ -124,6 +124,35 @@ void llama_kv_cache_iswa::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_ds
     kv_swa ->seq_cp(seq_id_src, seq_id_dst, p0, p1);
 }
 
+size_t llama_kv_cache_iswa::seq_n_cells_attn(llama_seq_id seq_id) const {
+    return kv_base->seq_n_cells_attn(seq_id) + kv_swa->seq_n_cells_attn(seq_id);
+}
+
+size_t llama_kv_cache_iswa::seq_n_shared_cells_attn(llama_seq_id seq_id) const {
+    return kv_base->seq_n_shared_cells_attn(seq_id) + kv_swa->seq_n_shared_cells_attn(seq_id);
+}
+
+llama_pos llama_kv_cache_iswa::seq_pos_min_attn(llama_seq_id seq_id) const {
+    return seq_pos_min(seq_id);
+}
+
+llama_pos llama_kv_cache_iswa::seq_pos_max_attn(llama_seq_id seq_id) const {
+    return seq_pos_max(seq_id);
+}
+
+bool llama_kv_cache_iswa::seq_can_share_attn() const {
+    return kv_base->seq_can_share_attn() && kv_swa->seq_can_share_attn();
+}
+
+size_t llama_kv_cache_iswa::n_unique_cells_attn(llama_seq_id seq_id_begin, llama_seq_id seq_id_end) const {
+    return kv_base->n_unique_cells_attn(seq_id_begin, seq_id_end) +
+           kv_swa->n_unique_cells_attn(seq_id_begin, seq_id_end);
+}
+
+size_t llama_kv_cache_iswa::n_unique_tokens_attn(llama_seq_id seq_id_begin, llama_seq_id seq_id_end) const {
+    return kv_base->n_unique_tokens_attn(seq_id_begin, seq_id_end);
+}
+
 void llama_kv_cache_iswa::seq_keep(llama_seq_id seq_id) {
     kv_base->seq_keep(seq_id);
     kv_swa ->seq_keep(seq_id);

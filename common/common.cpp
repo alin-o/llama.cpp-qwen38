@@ -1658,6 +1658,23 @@ void common_memory::seq_cp(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, lla
     }
 }
 
+void common_memory::seq_rm_attn(llama_seq_id seq_id, llama_pos p0, llama_pos p1) const {
+    if (!llama_memory_seq_rm_attn(llama_get_memory(ctx_tgt), seq_id, p0, p1)) {
+        GGML_ABORT("failed to remove attention sequence %d\n", seq_id);
+    }
+    if (ctx_dft && !llama_memory_seq_rm_attn(llama_get_memory(ctx_dft), seq_id, p0, p1)) {
+        GGML_ABORT("failed to remove draft attention sequence %d\n", seq_id);
+    }
+}
+
+void common_memory::seq_cp_attn(
+        llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) const {
+    llama_memory_seq_cp_attn(llama_get_memory(ctx_tgt), seq_id_src, seq_id_dst, p0, p1);
+    if (ctx_dft) {
+        llama_memory_seq_cp_attn(llama_get_memory(ctx_dft), seq_id_src, seq_id_dst, p0, p1);
+    }
+}
+
 void common_memory::seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, llama_pos delta) const {
     common_context_seq_add(ctx_tgt, seq_id, p0, p1, delta);
     if (ctx_dft) {

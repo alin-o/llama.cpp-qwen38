@@ -58,6 +58,8 @@ enum mtmd_input_chunk_type {
     MTMD_INPUT_CHUNK_TYPE_COUNT, // for validation
 };
 
+#define MTMD_INPUT_CHUNK_CONTENT_DIGEST_SIZE 32
+
 // opaque types
 struct mtmd_context;
 struct mtmd_bitmap;
@@ -237,6 +239,11 @@ MTMD_API size_t                     mtmd_input_chunk_get_n_tokens    (const mtmd
 MTMD_API const char *               mtmd_input_chunk_get_id          (const mtmd_input_chunk * chunk);
 // number of temporal positions (equals to max(t,h,w) for M-RoPE; equals to n_tokens otherwise)
 MTMD_API llama_pos                  mtmd_input_chunk_get_n_pos       (const mtmd_input_chunk * chunk);
+
+// SHA-256 over the canonical preprocessed media data and layout. Returns non-zero for placeholders.
+MTMD_API int32_t mtmd_input_chunk_get_content_digest(
+        const mtmd_input_chunk * chunk,
+        uint8_t digest[MTMD_INPUT_CHUNK_CONTENT_DIGEST_SIZE]);
 
 // in case you want to use custom logic to handle the chunk (i.e. KV cache management)
 // you can move the chunk ownership to your own code by copying it

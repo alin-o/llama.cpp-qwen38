@@ -4054,6 +4054,61 @@ void llama_memory_seq_cp(
     mem->seq_cp(seq_id_src, seq_id_dst, p0, p1);
 }
 
+bool llama_memory_seq_rm_attn(
+        llama_memory_t mem,
+          llama_seq_id seq_id,
+             llama_pos p0,
+             llama_pos p1) {
+    if (!mem) {
+        return true;
+    }
+
+    return mem->seq_rm_attn(seq_id, p0, p1);
+}
+
+void llama_memory_seq_cp_attn(
+        llama_memory_t mem,
+          llama_seq_id seq_id_src,
+          llama_seq_id seq_id_dst,
+             llama_pos p0,
+             llama_pos p1) {
+    if (!mem) {
+        return;
+    }
+
+    mem->seq_cp_attn(seq_id_src, seq_id_dst, p0, p1);
+}
+
+size_t llama_memory_seq_n_cells_attn(llama_memory_t mem, llama_seq_id seq_id) {
+    return mem ? mem->seq_n_cells_attn(seq_id) : 0;
+}
+
+size_t llama_memory_seq_n_shared_cells_attn(llama_memory_t mem, llama_seq_id seq_id) {
+    return mem ? mem->seq_n_shared_cells_attn(seq_id) : 0;
+}
+
+llama_pos llama_memory_seq_pos_min_attn(llama_memory_t mem, llama_seq_id seq_id) {
+    return mem ? mem->seq_pos_min_attn(seq_id) : -1;
+}
+
+llama_pos llama_memory_seq_pos_max_attn(llama_memory_t mem, llama_seq_id seq_id) {
+    return mem ? mem->seq_pos_max_attn(seq_id) : -1;
+}
+
+bool llama_memory_seq_can_share_attn(llama_memory_t mem) {
+    return mem && mem->seq_can_share_attn();
+}
+
+size_t llama_memory_n_unique_cells_attn(
+        llama_memory_t mem, llama_seq_id seq_id_begin, llama_seq_id seq_id_end) {
+    return mem ? mem->n_unique_cells_attn(seq_id_begin, seq_id_end) : 0;
+}
+
+size_t llama_memory_n_unique_tokens_attn(
+        llama_memory_t mem, llama_seq_id seq_id_begin, llama_seq_id seq_id_end) {
+    return mem ? mem->n_unique_tokens_attn(seq_id_begin, seq_id_end) : 0;
+}
+
 void llama_memory_seq_keep(
         llama_memory_t mem,
           llama_seq_id seq_id) {

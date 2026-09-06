@@ -1007,6 +1007,9 @@ struct common_memory {
     void seq_rm (llama_seq_id seq_id, llama_pos p0, llama_pos p1) const;
     void seq_add(llama_seq_id seq_id, llama_pos p0, llama_pos p1, llama_pos delta) const;
     void seq_cp (llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) const;
+
+    void seq_rm_attn(llama_seq_id seq_id, llama_pos p0, llama_pos p1) const;
+    void seq_cp_attn(llama_seq_id seq_id_src, llama_seq_id seq_id_dst, llama_pos p0, llama_pos p1) const;
 };
 
 //

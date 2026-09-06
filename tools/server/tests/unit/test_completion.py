@@ -2,6 +2,7 @@ import pytest
 import requests
 import time
 import random
+import re
 
 from openai import OpenAI
 from utils import *
@@ -91,6 +92,96 @@ def test_completion_stream_vs_non_stream():
     for data in res_stream:
         content_stream += data["content"]
     assert content_stream == res_non_stream.body["content"]
+
+
+def test_global_checkpoint_cross_slot_and_cold_coalescing():
+    global server
+    server.n_slots = 2
+    server.n_ctx = 2048
+    server.n_batch = 64
+    server.n_ubatch = 32
+    server.n_predict = 8
+    server.kv_unified = True
+    server.server_continuous_batching = True
+    server.server_metrics = True
+    server.ctx_checkpoints = 8
+    server.checkpoint_min_step = 8
+    prefix = "A knight crossed the quiet valley before sunrise. " * 100
+    followup_prompt = prefix + "Then the bells rang from the northern tower."
+
+    server.start()
+    oracle = server.make_request("POST", "/completion", data={
+        "prompt": followup_prompt,
+        "id_slot": 1,
+        "cache_prompt": True,
+        "n_predict": 8,
+        "temperature": 0,
+        "seed": 42,
+        "return_tokens": True,
+    })
+    assert oracle.status_code == 200
+    oracle_tokens = oracle.body["tokens"]
+    server.stop()
+
+    server.start()
+    first = server.make_request("POST", "/completion", data={
+        "prompt": prefix,
+        "id_slot": 0,
+        "cache_prompt": True,
+        "n_predict": 8,
+        "temperature": 0,
+        "seed": 42,
+    })
+    assert first.status_code == 200
+
+    followup = server.make_request("POST", "/completion", data={
+        "prompt": followup_prompt,
+        "id_slot": 1,
+        "cache_prompt": True,
+        "n_predict": 8,
+        "temperature": 0,
+        "seed": 42,
+        "return_tokens": True,
+    })
+    assert followup.status_code == 200
+    assert followup.body["tokens"] == oracle_tokens
+    checkpoint = followup.body["timings"]["checkpoint"]
+    assert checkpoint["hit_tokens"] > 0
+    assert checkpoint["target_cells"] > 0
+    assert checkpoint["hidden_replay"] == 0
+
+    server.stop()
+    server.start()
+    cold = "The river carried silver leaves toward the sea. " * 40
+    response = server.make_request("POST", "/completion", data={
+        "prompt": [cold, cold],
+        "cache_prompt": True,
+        "n_predict": 8,
+        "temperature": 0,
+        "seed": 42,
+        "return_tokens": True,
+    })
+    assert response.status_code == 200
+    responses = response.body
+    assert len(responses) == 2
+    assert responses[0]["id_slot"] != responses[1]["id_slot"]
+    assert responses[0]["tokens"] == responses[1]["tokens"]
+    prompt_tokens = max(
+        response["timings"]["prompt_n"] + response["timings"]["cache_n"]
+        for response in responses)
+    assert all(response["timings"]["prompt_n"] >= prompt_tokens - 1 for response in responses)
+
+    metrics = server.make_request("GET", "/metrics")
+    assert metrics.status_code == 200
+
+    def metric_value(name: str) -> float:
+        match = re.search(rf"^{re.escape(name)} ([0-9.eE+-]+)$", metrics.body, re.MULTILINE)
+        assert match is not None
+        return float(match.group(1))
+
+    assert metric_value("llamacpp:global_checkpoint_builds_total") > 0
+    assert metric_value("llamacpp:global_checkpoint_coalesced_total") > 0
+    assert metric_value("llamacpp:attention_target_unique_cells") < 2 * prompt_tokens
 
 
 def test_completion_with_openai_library():
