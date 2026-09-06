@@ -1,0 +1,76 @@
+name: qwen38-evaluation
+
+x-runtime: &runtime
+  restart: "no"
+  volumes:
+    # /models = the model dir named by MODELS_DIR (set per model in
+    # model-configs/<model>.env; default: the cache root).
+    - ${MODELS_DIR:-/mnt/S/.cache/llama.cpp}:/models:ro
+  cpuset: "0-7"
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+      limits:
+        cpus: 8
+        memory: 24G
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+    interval: 10s
+    timeout: 5s
+    retries: 60
+    start_period: 30s
+
+services:
+  llama-server:
+    <<: *runtime
+    profiles: [upstream]
+    # Make GPU injection explicit for ordinary `docker compose up/run`; do
+    # not rely solely on the Swarm-style deploy reservation below.
+    gpus: all
+    build:
+      context: .
+      dockerfile: Dockerfile
+      additional_contexts:
+        carapa-llama-cpp: docker-image://carapa-llama-cpp:latest
+    image: qwen38-upstream:b10502
+    ports:
+      - "${QWEN38_UPSTREAM_PORT:-8882}:8080"
+    volumes:
+      - ${MODELS_DIR:-/mnt/S/.cache/llama.cpp}:/models:ro
+      - ./scripts/qwen38:/qwen38:ro
+      - ./run-model-server.sh:/run-model-server.sh:ro
+      - ./state:/state
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      CUDA_VISIBLE_DEVICES: "0"
+      MODEL_GGUF: ${MODEL_GGUF:-}
+      MTP_GGUF: ${MTP_GGUF:-}
+      DRAFT_GGUF: ${DRAFT_GGUF:-}
+      MMPROJ_GGUF: ${MMPROJ_GGUF:-}
+      CHAT_TEMPLATE_FILE: ${CHAT_TEMPLATE_FILE:-}
+      REASONING_FORMAT: ${REASONING_FORMAT:-}
+      PROMPT_LOG_DIR: ${PROMPT_LOG_DIR:-}
+      CACHE_PROFILE: ${CACHE_PROFILE:-turbo4}
+      SPEC: ${SPEC:-mtp}
+      CTX: ${CTX:-102400}
+      DRAFT_MAX: ${DRAFT_MAX:-3}
+      DRAFT_CACHE_K: ${DRAFT_CACHE_K:-q8_0}
+      DRAFT_CACHE_V: ${DRAFT_CACHE_V:-q8_0}
+      NP: ${NP:-1}
+      CACHE_REUSE: ${CACHE_REUSE:-0}
+      SLOT_PROMPT_CACHE_THRESHOLD: ${SLOT_PROMPT_CACHE_THRESHOLD:-0.5}
+      CACHE_RAM_MIB: ${CACHE_RAM_MIB:-16384}
+      KV_PAGED: ${KV_PAGED:-0}
+      KV_BLOCK_SIZE: ${KV_BLOCK_SIZE:-}
+      N_GPU_BLOCKS: ${N_GPU_BLOCKS:-}
+      N_CPU_BLOCKS: ${N_CPU_BLOCKS:-}
+      KV_PAGED_WATERMARK: ${KV_PAGED_WATERMARK:-}
+      FIT: ${FIT:-}
+      LLAMA_ARG_CACHE_RAM: ${CACHE_RAM_MIB:-16384}
+      LLAMA_ARG_LOG_VERBOSITY: "3"
+    entrypoint: ["/bin/bash", "${MODEL_ENTRYPOINT:-/run-model-server.sh}"]
