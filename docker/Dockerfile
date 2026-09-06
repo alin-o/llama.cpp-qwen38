@@ -26,7 +26,7 @@ RUN --mount=type=cache,id=qwen38-cmake-cuda133-sm89,target=/workspace/build,shar
     -DGGML_CUDA_PEER_MAX_BATCH=4096 \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CUDA_COMPILER=/usr/local/cuda-13.3/bin/nvcc \
-    && cmake --build build --config Release --target llama-server llama-cli llama-bench llama-paged llama-perplexity test-chat test-arg-parser test-backend-ops -j$(nproc) \
+    && cmake --build build --config Release --target llama-server llama-cli llama-bench llama-perplexity test-chat test-arg-parser test-backend-ops -j$(nproc) \
     && rm -rf /out \
     && mkdir -p /out \
     && cp -a build/bin/. /out/
